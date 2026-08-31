@@ -27,7 +27,11 @@ rustls = { version = "0.23.43", default-features = false, features = [
     "std",
     "tls12",
 ] }
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false, features = [
+    "ring",
+    "logging",
+    "tls12",
+] }
 rustls-pki-types = "1.15.1"
 rustls-pemfile = "2.2.0"
 
