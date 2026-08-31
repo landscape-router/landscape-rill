@@ -313,7 +313,7 @@ impl Node {
         // 待发路径请求（netmap 发现 v2 peer 后；随控制面心跳节奏发送）
         if !self.pending_path_requests.is_empty() {
             if let Some(control) = self.control.as_mut() {
-                let reqs: Vec<u32> = self.pending_path_requests.drain(..).collect();
+                let reqs = std::mem::take(&mut self.pending_path_requests);
                 for dest in reqs {
                     let req = control.client().path_request(dest);
                     if control.send_envelope(&req).await.is_err() {
