@@ -1,0 +1,48 @@
+# mesh e2e 拓扑：coordinator + node-a + node-b（每节点一容器）
+# 网络：bridge 互通；节点 privileged + /dev/net/tun（用户态 tun0 = LAN 侧）
+# 配置：镜像内置二进制/CA/证书，config.json 每服务挂载（build/ 下生成）
+services:
+  coord:
+    build:
+      context: ./build
+      dockerfile: ../Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ./build/coord.json:/etc/landscape/overlay.json
+    networks: [mesh]
+
+  node-a:
+    build:
+      context: ./build
+      dockerfile: ../Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ./build/node-a.json:/etc/landscape/overlay.json
+    networks: [mesh]
+
+  node-b:
+    build:
+      context: ./build
+      dockerfile: ../Dockerfile
+    container_name: mesh-node-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ./build/node-b.json:/etc/landscape/overlay.json
+    networks: [mesh]
+
+networks:
+  mesh:
+    driver: bridge

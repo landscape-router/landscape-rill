@@ -1,0 +1,22 @@
+[package]
+name = "landscape-rill-mesh"
+version.workspace = true
+edition.workspace = true
+description = "mesh leg: TLS control plane client/server, frame data plane"
+
+[dependencies]
+landscape-rill-core = { path = "../rill-core" }
+landscape-rill-coord = { path = "../rill-coord" }
+landscape-rill-proto = { path = "../rill-proto" }
+quick-protobuf.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-pemfile.workspace = true
+x25519-dalek.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+ed25519-dalek.workspace = true

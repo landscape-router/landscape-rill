@@ -1,0 +1,47 @@
+# P0 验证拓扑：自建 headscale（自签 TLS + 内嵌 DERP）+ 两个官方 Tailscale 客户端容器
+# 官方客户端（tailscaled，与手机 app 同协议栈）经 --login-server 入网自建 headscale
+services:
+  headscale:
+    image: p0-base
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    container_name: p0-headscale
+    command: ["headscale", "serve"]
+    volumes:
+      - ./build/headscale-config:/etc/headscale
+      - headscale-data:/var/lib/headscale
+    networks: [p0net]
+
+  node-c:
+    image: p0-base
+    container_name: p0-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY}"
+      TS_HOSTNAME: node-c
+    command: ["/usr/local/bin/entry-node.sh"]
+    networks: [p0net]
+
+  node-d:
+    image: p0-base
+    container_name: p0-node-d
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY}"
+      TS_HOSTNAME: node-d
+    command: ["/usr/local/bin/entry-node.sh"]
+    networks: [p0net]
+
+volumes:
+  headscale-data:
+
+networks:
+  p0net:
+    driver: bridge

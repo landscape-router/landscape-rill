@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package control;
+
+// landscape-rill mesh 控制面消息（CONTROL_PLANE §3 语义级 → 字段级）
+// 生成方式：build.rs + pb-rs → src/core/wire/control.rs（生成物禁手改）
+// 传输包络（实现级）：TLS 之上 = 4B 大端消息长度 + Envelope（msg_type + body）
+
+// 控制面消息类型（Envelope.msg_type）
+enum MsgType {
+  REGISTER = 0;
+  REGISTER_RESPONSE = 1;
+  NETMAP_PUSH = 2;
+  KEY_DIST = 3;
+  HEARTBEAT = 4;
+  LEASE = 5;
+  REVOKE = 6;
+  LEADER_REDIRECT = 7;
+  CHALLENGE = 8;
+  CHALLENGE_ACK = 9;
+  ENDPOINT_REPORT = 10;
+}
+
+message Envelope {
+  MsgType msg_type = 1;
+  bytes body = 2;  // 具体消息的 protobuf 编码
+}
+
+// 能力位（位掩码，CONTROL_PLANE §3.1 能力位表）：
+//   relay=0x01  bridge=0x02  coordinator=0x04  exit=0x08  acl=0x10（v2 预留，v1 恒 false）
+//   broadcast=0x20（接收 L2 广播/组播泛洪，opt-in——keydist 仅向该位节点下发 broadcast_key）
+
+// §3.1 注册
+message RegisterRequest {
+  string auth_key = 1;          // 预授权密钥（一次性/可复用，生成时绑定网络）
+  bytes static_pubkey = 2;      // Noise 静态公钥（32B）
+  uint32 capabilities = 3;      // 能力位掩码
+  uint32 protocol_version = 4;  // 版本协商（§2 首消息协商）
+  string hostname = 5;          // 可选元数据
+  string os = 6;                // 可选元数据
+  repeated string routes = 7;   // 前缀公告（CIDR，§3.8）
+}
+
+message RegisterResponse {
+  fixed32 node_id = 1;          // coordinator 唯一分配
+  fixed32 network_id = 2;       // 本网络标识（联邦钩子，v1 恒为本地网络）
+  bytes identity_binding = 3;   // coordinator 签名 (node_id || static_pubkey)
+  LeaderRedirect leader_redirect = 4;  // 非主 coordinator 时返回
+}
+
+// §3.6 主重定向（Raft 期）
+message LeaderRedirect {
+  string leader_endpoint = 1;   // 当前主 coordinator 地址
+  uint64 raft_term = 2;
+}
+
+// §3.2 全网拓扑
+message NetmapEntry {
+  fixed32 node_id = 1;
+  fixed32 network_id = 2;       // 联邦场景高 8 位 = 网络号
+  bytes static_pubkey = 3;
+  repeated string endpoints = 4;  // UDP 端点 "ip:port"
+  uint32 capabilities = 5;
+  repeated string routes = 6;   // 前缀公告（CIDR，§3.8）
+}
+
+message NetmapPush {
+  uint64 version = 1;           // 权威版本号（CAS 语义；同时承载 ACL 策略版本）
+  repeated NetmapEntry entries = 2;
+  repeated string relay_list = 3;  // 候选中继（CONNECTIVITY §5）
+}
+
+// §3.3 转发密钥下发
+message KeyDist {
+  fixed32 to_node_id = 1;
+  bytes key = 2;                // key_dst（32B，派生自网络主密钥）
+  uint32 key_version = 3;       // 轮换语义：新版本 → 宽限期 → 旧版本过期
+  bytes broadcast_key = 4;      // KDF(主密钥, 0xFFFFFFFF)，广播（FRAME_HEADER §2.6）；仅当接收节点能力位含 broadcast（0x20）时携带，未 opt-in 不填充
+}
+
+// §3.4 心跳与租约
+message Heartbeat {
+}
+
+message Lease {
+  bool granted = 1;
+  uint64 expires_at = 2;        // 租约到期时间戳
+}
+
+// §3.5 吊销
+message Revoke {
+  fixed32 node_id = 1;          // 吊销对象；本地吊销列表拒绝握手/流量
+}
+
+// §3.9 重连认证（X25519 静态密钥 DH 挑战）
+message Challenge {
+  bytes eph_pub = 1;            // coordinator 一次性临时 X25519 公钥（32B）
+  bytes nonce = 2;              // 随机值（16B）
+  uint64 issued_at = 3;         // 服务端校验时间窗口（防重放）
+}
+
+message ChallengeAck {
+  fixed32 node_id = 1;
+  bytes tag = 2;                // HMAC（32B）：HKDF-SHA256(X25519(静态私钥, eph_pub), salt=nonce, info="challenge")
+}
+
+// §3.2 端点上报（数据面 UDP 地址；注册后/地址变化时上报，随心跳周期广播进 netmap）
+message EndpointReport {
+  repeated string endpoints = 1;  // "ip:port"
+}

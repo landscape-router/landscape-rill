@@ -1,0 +1,12 @@
+[package]
+name = "landscape-rill-proto"
+version.workspace = true
+edition.workspace = true
+description = "control plane protobuf schema + pb-rs generated wire types"
+
+[dependencies]
+quick-protobuf.workspace = true
+
+[build-dependencies]
+pb-rs.workspace = true
+walkdir.workspace = true

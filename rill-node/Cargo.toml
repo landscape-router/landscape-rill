@@ -1,0 +1,19 @@
+[package]
+name = "landscape-rill-node"
+version.workspace = true
+edition.workspace = true
+description = "edge node runtime: tun device, packet parse, mesh session glue"
+
+[dependencies]
+landscape-rill-core = { path = "../rill-core" }
+landscape-rill-coord = { path = "../rill-coord" }
+landscape-rill-mesh = { path = "../rill-mesh" }
+tokio.workspace = true
+tun.workspace = true
+rtnetlink.workspace = true
+futures-util.workspace = true
+ed25519-dalek.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+rustls.workspace = true

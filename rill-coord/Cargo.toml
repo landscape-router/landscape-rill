@@ -1,0 +1,9 @@
+[package]
+name = "landscape-rill-coord"
+version.workspace = true
+edition.workspace = true
+description = "mesh coordinator: registry, identity binding signer/verifier"
+
+[dependencies]
+landscape-rill-core = { path = "../rill-core" }
+ed25519-dalek.workspace = true
