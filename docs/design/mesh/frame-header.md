@@ -4,9 +4,12 @@
 > 不涉及 tailscale 模式（boringtun/WireGuard 协议）与控制面协议本体；控制面对数据面的接口需求见 §9。
 > 相关需求：REQ-001 / REQ-002 / REQ-003 / REQ-011 / REQ-016 / REQ-017 / REQ-028 / REQ-029 / REQ-032 / REQ-034 / REQ-035
 
-**版本：v0.9（2026-08-30 修订）**
+**版本：v1.0（2026-08-31 修订）**
 
 修订要点：
+- **v1.0 新增 §2.7 v2 帧头规格（v2 路径数据面）**：42B 固定帧头（34B + 8B `path_id`），`version=0x02`；path_id 纳入 route_mac 与 AEAD AAD 输入；v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`（按路径签发、只发路径参与者）；`path_id=0` = 默认路径 = 现有 key_dst 语义（v1 兼容回退，v1 帧头不变）；v1 节点互操作 = 发送方按对端协议版本（netmap `protocol_version`）回退 34B 帧。实现落档 CONTROL_PLANE §3.11 / REQ-034
+- v0.9 修订内容（广播 opt-in）
+- v0.8 新增 §9 路径服务交叉引用
 - v0.5 修订内容（握手报文规格/心跳帧规格）
 - **新增 §2.6 广播帧规格（组播泛洪）**：IPv6 ND 落地的数据面缺口——LAN 侧组播经 `type=广播` + `to=0xFFFFFFFF` 泛洪全网；复用 keydist 已下发的 `broadcast_key`（v1 砍广播时预埋的密钥方案）；relay 去重/ttl/限速；广播帧无会话密钥依赖 → 可发往无会话端点（不触发懒握手）
 - **v0.8 新增 §9 路径服务交叉引用**：v2 帧头 `path_id` 演进预留（CONTROL_PLANE §3.11），v1 数据面零改动
@@ -120,6 +123,32 @@ mesh 模式使用自研数据面：snow (Noise_XX) 握手派生会话密钥 + �
 
 双层认证，职责分离：
 
+### 2.7 v2 帧头规格（v2 路径数据面，REQ-034 实现落档）
+
+```
+       0        1        2        3        4        5        6        7
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+   0 |version |  type  | flags  |  ttl   |            to_node_id             |
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+   8 |                     from_node_id                      |       seq       |
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+  16 |   len   |                    path_id (8B，固定 18..26)                |
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+  24 |  path_id（续 2B）  |              route_mac (前 6B，26..42)           |
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+  32 |                       route_mac (续 8B)                               |
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+  40 |route_mac(续 2B)                                                       |
+     +--------+--------+--------+--------+--------+--------+--------+--------+
+```
+
+- **`version=0x02`、固定 42B**；`path_id`（8B，网络字节序）位于 18..26，`route_mac` 移至 26..42——v1 布局 18..34 不变
+- **认证范围（ttl 置零后）**：v2 认证输入 = `帧头[0..18] || path_id`（26B），route_mac 与 AEAD AAD 共用（§2.2/§3.1 语义扩展）
+- **密钥选择**：v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`（§3.11.5，按路径签发、只发路径参与者）；**`path_id=0` = 默认路径 = 现有 `key_dst` 语义**（v1 兼容回退）
+- **互操作**：帧头版本即判定（v1 节点收 v2 帧 → version 不匹配丢弃，§2.1 既有语义）；发送方按对端 `protocol_version`（netmap 条目，≥2 = v2）决定帧头版本——v2 对 v1 对端恒发 34B v1 帧（path_id 隐含 0）
+- **握手/心跳/广播帧恒为 v1 帧头**（key_dst/broadcast_key 路径）——路径是已建会话后的数据面概念
+- **转发**：转发节点按 `path_id` 查 `key_path` 校验 route_mac（无授权 → 丢弃，fail-closed）；下一跳端点按路径 hops（本节点在路径中的后继）解析（§3.11 转发语义）
+
 ### 3.1 route_mac（轻量，转发节点校验）
 
 ```
@@ -227,6 +256,7 @@ route_mac = siphash_2-4(key_dst, 帧头[0..18] 且 ttl 置零) 的低 16 字节
 | 2026-08-15 | **v0.6（实现级派生约定，crate 骨架落档）**：①`key_dst = HKDF-SHA256(ikm=主密钥, salt=∅, info=b"key_dst" \|\| to_node_id(4B BE))` → 32B；`sipkey(i) = HKDF-SHA256(ikm=key_dst, salt=∅, info=b"sipkey" \|\| [i])` 前 16B（i=0/1）；②**nonce 计数器实现细化**：64-bit 方向计数器 = `0x00000000 \|\| seq`（高位 32 位恒 0）——接收方从帧头取 seq 构造 nonce，零状态同步，seq 单调保证不重用；③**SipHash-2-4 自研**（siphash crate 0.0.5 无法在 modern rustc 编译）：实现与官方 C 参考实现（siphashc，绑定 veorq/siphash siphash24.c）交叉验证一致，测试向量 0x7127512f72f27cce/0x726fdb47dd0e0e31/0x74f839c593dc67fd |
 | 2026-08-30 | **v0.8（路径服务预留引用）**：§9 新增第 6 项——v2 帧头固定 8B `path_id`（34B→42B，纳入 route_mac/AAD），v2 route_mac 改用 `key_path = KDF(主密钥, path_id, path_epoch)`（按路径签发，只发路径参与者）；`path_id=0` 回退 `key_dst`（v1 兼容，v1 数据面零改动）；桥节点按路径段用目标网络 `key_path` 重签（§3.1 例外扩展）。设计出处 CONTROL_PLANE §3.11 |
 | 2026-08-30 | **v0.9（广播 opt-in，纯控制面语义，帧头零改动）**：broadcast_key **按需下发**——keydist 仅向能力位含 `broadcast`（0x20，CONTROL_PLANE §3.1 新增）的节点携带；**泛洪目标 = opt-in 端点**（发送与转发双侧过滤，无能力记录按未 opt-in fail-closed）；未 opt-in 节点：无 key 即丢（既有的 fail-closed 路径）、本地 LAN 组播不泛洪。动机：广播平时不参与（仅 ND/mDNS 等组播场景），opt-in 让"不想收 L2 的主机"协议层面收不到（省带宽+CPU）；L2 内容继续走 payload（现状），帧头不加 L2 标记（`flags` 注释相应清理） |
+| 2026-08-31 | **v1.0（v2 路径数据面实现，REQ-034）**：新增 §2.7 v2 帧头（42B，8B path_id @18..26，route_mac @26..42）；`version=0x02`；认证输入 26B（path_id 纳入 route_mac 与 AAD）；v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`；`path_id=0` 回退 `key_dst`；互操作按 netmap `protocol_version` 回退 v1 帧头；握手/心跳/广播恒 v1 帧头；转发按 path_id 查 key_path + hops 下一跳 |
 
 ## 9. 控制面接口（见 CONTROL_PLANE.md）
 

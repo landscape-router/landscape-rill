@@ -1,13 +1,26 @@
 use crate::crypto::{self, AeadError};
 
 pub const HEADER_LEN: usize = 34;
+pub const HEADER_LEN_V2: usize = 42;
 pub const TAG_LEN: usize = 16;
+/// v1 帧头协议版本（34B，隐式 path_id=0）
 pub const VERSION: u8 = 0x01;
+/// v2 帧头协议版本（42B，固定 8B path_id，FRAME_HEADER §9 / CONTROL_PLANE §3.11）
+pub const VERSION2: u8 = 0x02;
 pub const NODE_ID_LEN: usize = 4;
 pub const ROUTE_MAC_LEN: usize = 16;
+pub const PATH_ID_LEN: usize = 8;
+/// v1 认证输入：帧头[0..18]（ttl 置零）
 pub const AUTH_INPUT_LEN: usize = 18;
+/// v2 认证输入：帧头[0..18]（ttl 置零）|| path_id（8B）
+pub const AUTH_INPUT_LEN_V2: usize = 26;
+/// v2 route_mac 起始偏移（path_id 之后）
+pub const ROUTE_MAC_OFFSET_V2: usize = 26;
 
 pub const BROADCAST_NODE_ID: u32 = 0xFFFF_FFFF;
+
+/// path_id = 0 = 默认路径 = 现有 key_dst 语义（v1 兼容回退）
+pub const PATH_ID_DEFAULT: u64 = 0;
 
 pub mod packet_type {
     pub const UNICAST: u8 = 0x01;
@@ -27,6 +40,8 @@ pub struct MeshFrameHeader {
     pub from_node_id: u32,
     pub seq: u32,
     pub len: u16,
+    /// v2 帧头字段（8B）；v1 帧头恒为 0（隐式默认路径）
+    pub path_id: u64,
     pub route_mac: [u8; ROUTE_MAC_LEN],
 }
 
@@ -41,14 +56,24 @@ impl Default for MeshFrameHeader {
             from_node_id: 0,
             seq: 0,
             len: 0,
+            path_id: PATH_ID_DEFAULT,
             route_mac: [0u8; ROUTE_MAC_LEN],
         }
     }
 }
 
+/// 帧头总长（按版本：v1 = 34B，v2 = 42B）
+pub fn header_len(version: u8) -> usize {
+    if version == VERSION2 {
+        HEADER_LEN_V2
+    } else {
+        HEADER_LEN
+    }
+}
+
 impl MeshFrameHeader {
     pub fn encode(&self, out: &mut [u8]) {
-        assert!(out.len() >= HEADER_LEN);
+        assert!(out.len() >= header_len(self.version));
         out[0] = self.version;
         out[1] = self.packet_type;
         out[2] = self.flags;
@@ -57,21 +82,39 @@ impl MeshFrameHeader {
         out[8..12].copy_from_slice(&self.from_node_id.to_be_bytes());
         out[12..16].copy_from_slice(&self.seq.to_be_bytes());
         out[16..18].copy_from_slice(&self.len.to_be_bytes());
-        out[18..34].copy_from_slice(&self.route_mac);
+        if self.version == VERSION2 {
+            out[18..26].copy_from_slice(&self.path_id.to_be_bytes());
+            out[26..42].copy_from_slice(&self.route_mac);
+        } else {
+            out[18..34].copy_from_slice(&self.route_mac);
+        }
     }
 
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        if buf.len() < HEADER_LEN {
+        if buf.is_empty() {
+            return Err(DecodeError::Truncated);
+        }
+        let version = buf[0];
+        let hlen = header_len(version);
+        if buf.len() < hlen {
             return Err(DecodeError::Truncated);
         }
         let to_node_id = u32::from_be_bytes(buf[4..8].try_into().unwrap());
         let from_node_id = u32::from_be_bytes(buf[8..12].try_into().unwrap());
         let seq = u32::from_be_bytes(buf[12..16].try_into().unwrap());
         let len = u16::from_be_bytes(buf[16..18].try_into().unwrap());
-        let mut route_mac = [0u8; ROUTE_MAC_LEN];
-        route_mac.copy_from_slice(&buf[18..34]);
+        let (path_id, route_mac) = if version == VERSION2 {
+            let path_id = u64::from_be_bytes(buf[18..26].try_into().unwrap());
+            let mut rm = [0u8; ROUTE_MAC_LEN];
+            rm.copy_from_slice(&buf[26..42]);
+            (path_id, rm)
+        } else {
+            let mut rm = [0u8; ROUTE_MAC_LEN];
+            rm.copy_from_slice(&buf[18..34]);
+            (PATH_ID_DEFAULT, rm)
+        };
         Ok(Self {
-            version: buf[0],
+            version,
             packet_type: buf[1],
             flags: buf[2],
             ttl: buf[3],
@@ -79,12 +122,15 @@ impl MeshFrameHeader {
             from_node_id,
             seq,
             len,
+            path_id,
             route_mac,
         })
     }
 
-    pub fn auth_input(&self) -> [u8; AUTH_INPUT_LEN] {
-        let mut out = [0u8; AUTH_INPUT_LEN];
+    /// 认证输入：帧头[0..18]（ttl 置零）|| path_id（v2 才含）。返回 (字节, 长度)。
+    /// route_mac 与 AEAD AAD 共用（FRAME_HEADER §2.2/§3.1）。
+    pub fn auth_input(&self) -> ([u8; AUTH_INPUT_LEN_V2], usize) {
+        let mut out = [0u8; AUTH_INPUT_LEN_V2];
         out[0] = self.version;
         out[1] = self.packet_type;
         out[2] = self.flags;
@@ -93,7 +139,12 @@ impl MeshFrameHeader {
         out[8..12].copy_from_slice(&self.from_node_id.to_be_bytes());
         out[12..16].copy_from_slice(&self.seq.to_be_bytes());
         out[16..18].copy_from_slice(&self.len.to_be_bytes());
-        out
+        if self.version == VERSION2 {
+            out[18..26].copy_from_slice(&self.path_id.to_be_bytes());
+            (out, AUTH_INPUT_LEN_V2)
+        } else {
+            (out, AUTH_INPUT_LEN)
+        }
     }
 }
 
@@ -106,21 +157,26 @@ pub fn build_frame(
 ) -> Result<Vec<u8>, AeadError> {
     let mut h = header.clone();
     h.len = (payload.len() + TAG_LEN) as u16;
-    h.route_mac = crypto::route_mac(key_dst, &h.auth_input());
-    let ciphertext = crypto::seal(session_key, salt, h.seq as u64, &h.auth_input(), payload)?;
-    let mut out = vec![0u8; HEADER_LEN + ciphertext.len()];
+    let (ai, ai_len) = h.auth_input();
+    h.route_mac = crypto::route_mac(key_dst, &ai[..ai_len]);
+    let ciphertext = crypto::seal(session_key, salt, h.seq as u64, &ai[..ai_len], payload)?;
+    let hlen = header_len(h.version);
+    let mut out = vec![0u8; hlen + ciphertext.len()];
     h.encode(&mut out);
-    out[HEADER_LEN..].copy_from_slice(&ciphertext);
+    out[hlen..].copy_from_slice(&ciphertext);
     Ok(out)
 }
 
 /// 握手帧构建（无 AEAD，FRAME_HEADER §2.4）：len = 载荷长度（无 TAG）。
-/// route_mac 与数据帧同路径校验——握手帧不经转发路径认证，转发节点只需按 to_node_id 转发。
+/// 握手帧恒为 v1 帧头 + key_dst（路径是已建会话后的数据面概念）。
 pub fn build_handshake_frame(header: &MeshFrameHeader, key_dst: &[u8], payload: &[u8]) -> Vec<u8> {
     let mut h = header.clone();
+    h.version = VERSION;
+    h.path_id = PATH_ID_DEFAULT;
     h.packet_type = packet_type::HANDSHAKE;
     h.len = payload.len() as u16;
-    h.route_mac = crypto::route_mac(key_dst, &h.auth_input());
+    let (ai, ai_len) = h.auth_input();
+    h.route_mac = crypto::route_mac(key_dst, &ai[..ai_len]);
     let mut out = vec![0u8; HEADER_LEN + payload.len()];
     h.encode(&mut out);
     out[HEADER_LEN..].copy_from_slice(payload);
@@ -129,14 +185,18 @@ pub fn build_handshake_frame(header: &MeshFrameHeader, key_dst: &[u8], payload: 
 
 /// 提取帧载荷（按帧头 len 截取，含长度校验；数据帧 len 含 TAG）
 pub fn frame_payload(frame: &[u8]) -> Option<&[u8]> {
-    if frame.len() < HEADER_LEN {
+    if frame.is_empty() {
+        return None;
+    }
+    let hlen = header_len(frame[0]);
+    if frame.len() < hlen {
         return None;
     }
     let len = u16::from_be_bytes(frame[16..18].try_into().unwrap()) as usize;
-    if frame.len() < HEADER_LEN + len {
+    if frame.len() < hlen + len {
         return None;
     }
-    Some(&frame[HEADER_LEN..HEADER_LEN + len])
+    Some(&frame[hlen..hlen + len])
 }
 
 pub fn open_frame(
@@ -145,18 +205,19 @@ pub fn open_frame(
     session_key: &[u8; 32],
     salt: u32,
 ) -> Result<(MeshFrameHeader, Vec<u8>), OpenError> {
-    if frame.len() < HEADER_LEN {
+    if frame.is_empty() {
         return Err(OpenError::Decode(DecodeError::Truncated));
     }
     let header = MeshFrameHeader::decode(frame).map_err(OpenError::Decode)?;
-    if header.version != VERSION {
+    if header.version != VERSION && header.version != VERSION2 {
         return Err(OpenError::Version);
     }
-    let auth_input = header.auth_input();
-    if crypto::route_mac(key_dst, &auth_input) != header.route_mac {
+    let (ai, ai_len) = header.auth_input();
+    if crypto::route_mac(key_dst, &ai[..ai_len]) != header.route_mac {
         return Err(OpenError::RouteMac);
     }
-    let expected = HEADER_LEN + header.len as usize;
+    let hlen = header_len(header.version);
+    let expected = hlen + header.len as usize;
     if frame.len() < expected {
         return Err(OpenError::TruncatedPayload);
     }
@@ -164,8 +225,8 @@ pub fn open_frame(
         session_key,
         salt,
         header.seq as u64,
-        &auth_input,
-        &frame[HEADER_LEN..expected],
+        &ai[..ai_len],
+        &frame[hlen..expected],
     )
     .map_err(OpenError::Aead)?;
     Ok((header, payload))
@@ -231,6 +292,7 @@ mod tests {
     use crate::crypto;
 
     const KEY_DST: [u8; 32] = [0x11; 32];
+    const KEY_PATH: [u8; 32] = [0x55; 32];
     const SESSION: [u8; 32] = [0x22; 32];
     const SALT: u32 = 0xdead_beef;
 
@@ -243,6 +305,17 @@ mod tests {
         }
     }
 
+    fn sample_v2_header() -> MeshFrameHeader {
+        MeshFrameHeader {
+            version: VERSION2,
+            to_node_id: 0x0000_0002,
+            from_node_id: 0x0000_0001,
+            seq: 7,
+            path_id: 0x1234_5678_9abc_def0,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn header_roundtrip() {
         let h = sample_header();
@@ -250,6 +323,30 @@ mod tests {
         h.encode(&mut buf);
         let d = MeshFrameHeader::decode(&buf).unwrap();
         assert_eq!(h, d);
+    }
+
+    #[test]
+    fn header_v2_roundtrip() {
+        let h = sample_v2_header();
+        let mut buf = [0u8; HEADER_LEN_V2];
+        h.encode(&mut buf);
+        let d = MeshFrameHeader::decode(&buf).unwrap();
+        assert_eq!(h, d);
+        assert_eq!(d.path_id, 0x1234_5678_9abc_def0);
+        // 字段偏移校验：path_id 在 18..26，route_mac 在 26..42
+        assert_eq!(&buf[18..26], &0x1234_5678_9abc_def0u64.to_be_bytes());
+    }
+
+    #[test]
+    fn header_v1_decode_in_v2_buffer_rejected() {
+        let h = sample_v2_header();
+        let mut buf = [0u8; HEADER_LEN_V2];
+        h.encode(&mut buf);
+        // 只给 34B：按 v2 版本号应截断
+        assert_eq!(
+            MeshFrameHeader::decode(&buf[..HEADER_LEN]),
+            Err(DecodeError::Truncated)
+        );
     }
 
     #[test]
@@ -273,6 +370,35 @@ mod tests {
         assert_eq!(h.to_node_id, 2);
         assert_eq!(h.len as usize, payload.len() + TAG_LEN);
         assert_eq!(out, payload);
+        assert_eq!(frame.len(), HEADER_LEN + payload.len() + TAG_LEN);
+    }
+
+    #[test]
+    fn frame_v2_roundtrip_with_key_path() {
+        let payload = b"hello path";
+        let frame = build_frame(&sample_v2_header(), &KEY_PATH, &SESSION, SALT, payload).unwrap();
+        assert_eq!(frame.len(), HEADER_LEN_V2 + payload.len() + TAG_LEN);
+        // path_id=0 回退 key_dst 也能解（默认路径语义）
+        let (h, out) = open_frame(&frame, &KEY_PATH, &SESSION, SALT).unwrap();
+        assert_eq!(h.path_id, 0x1234_5678_9abc_def0);
+        assert_eq!(out, payload);
+        // key_path 错误 → RouteMac 拒绝
+        assert_eq!(
+            open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap_err(),
+            OpenError::RouteMac
+        );
+    }
+
+    #[test]
+    fn frame_v2_path_id_zero_falls_back_to_key_dst() {
+        // v2 帧头 path_id=0 = 默认路径 = key_dst 语义（CONTROL_PLANE §3.11）
+        let mut h = sample_v2_header();
+        h.path_id = PATH_ID_DEFAULT;
+        let payload = b"default path";
+        let frame = build_frame(&h, &KEY_DST, &SESSION, SALT, payload).unwrap();
+        let (out_h, out) = open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap();
+        assert_eq!(out_h.path_id, 0);
+        assert_eq!(out, payload);
     }
 
     #[test]
@@ -287,12 +413,29 @@ mod tests {
     }
 
     #[test]
+    fn route_mac_v2_rejects_path_id_tamper() {
+        let payload = b"payload";
+        let frame = build_frame(&sample_v2_header(), &KEY_PATH, &SESSION, SALT, payload).unwrap();
+        let mut frame = frame;
+        frame[18] ^= 0x01; // 篡改 path_id
+        assert_eq!(
+            open_frame(&frame, &KEY_PATH, &SESSION, SALT).unwrap_err(),
+            OpenError::RouteMac
+        );
+    }
+
+    #[test]
     fn ttl_change_still_valid() {
         let payload = b"payload";
         let frame = build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, payload).unwrap();
         let mut frame = frame;
         frame[3] = 0x7f;
         assert!(open_frame(&frame, &KEY_DST, &SESSION, SALT).is_ok());
+        // v2 同样
+        let f2 = build_frame(&sample_v2_header(), &KEY_PATH, &SESSION, SALT, payload).unwrap();
+        let mut f2 = f2;
+        f2[3] = 0x01;
+        assert!(open_frame(&f2, &KEY_PATH, &SESSION, SALT).is_ok());
     }
 
     #[test]
@@ -335,7 +478,7 @@ mod tests {
         let payload = b"payload";
         let frame = build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, payload).unwrap();
         let mut frame = frame;
-        frame[0] = 0x02;
+        frame[0] = 0x03;
         assert_eq!(
             open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap_err(),
             OpenError::Version
@@ -366,14 +509,29 @@ mod tests {
     }
 
     #[test]
+    fn key_path_derivation() {
+        let k1 = crypto::derive_key_path(&[0x42; 32], 7, 1);
+        let k2 = crypto::derive_key_path(&[0x42; 32], 7, 2);
+        let k3 = crypto::derive_key_path(&[0x42; 32], 8, 1);
+        assert_eq!(k1, crypto::derive_key_path(&[0x42; 32], 7, 1));
+        assert_ne!(k1, k2);
+        assert_ne!(k1, k3);
+        assert_ne!(k1, crypto::derive_key_dst(&[0x42; 32], 5));
+    }
+
+    #[test]
     fn route_mac_deterministic_and_distinct() {
-        let ai = sample_header().auth_input();
-        let mac = crypto::route_mac(&KEY_DST, &ai);
+        let (ai, len) = sample_header().auth_input();
+        let mac = crypto::route_mac(&KEY_DST, &ai[..len]);
         assert_eq!(mac.len(), ROUTE_MAC_LEN);
-        assert_eq!(crypto::route_mac(&KEY_DST, &ai), mac);
+        assert_eq!(crypto::route_mac(&KEY_DST, &ai[..len]), mac);
         let mut tampered = ai;
         tampered[0] ^= 1;
-        assert_ne!(crypto::route_mac(&KEY_DST, &tampered), mac);
-        assert_ne!(crypto::route_mac(&[0x55; 32], &ai), mac);
+        assert_ne!(crypto::route_mac(&KEY_DST, &tampered[..len]), mac);
+        assert_ne!(crypto::route_mac(&[0x55; 32], &ai[..len]), mac);
+        // v2 auth_input 含 path_id：26B
+        let (ai2, len2) = sample_v2_header().auth_input();
+        assert_eq!(len2, AUTH_INPUT_LEN_V2);
+        assert_eq!(&ai2[18..26], &sample_v2_header().path_id.to_be_bytes());
     }
 }

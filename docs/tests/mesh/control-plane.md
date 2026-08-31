@@ -116,14 +116,13 @@
 - 证据：—
 - 缺口：keydist 按能力位按需下发 broadcast_key 未实现（REQ-035 实现待落地）
 
-## CTL-15 路径服务（v1.5）
+## CTL-15 路径服务（v1.5 + v2 数据面）
 
 - 关联 REQ：REQ-034
-- 测试层：单测 + e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：Path\* 消息族、候选路径/快速切换、路径生命周期、key_path 签发与 path_id=0 回退均未实现
-- 说明：设计已落档 CONTROL_PLANE §3.11（REQ-034）
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`
+- 证据：rill-core/src/frame.rs、rill-core/src/crypto.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control.rs、e2e/run_e2e.sh
+- 缺口：relay 路径的 docker e2e 场景未建（单测已覆盖 relay 转发与候选构造）；PathProbe 消息族运行时未启用（活性由数据面心跳承担，协议已定义）；v1/v2 节点混跑 e2e 未验证
 
 ## 验收断言
 
@@ -141,4 +140,4 @@
 - [ ] CTL-12：主切换幂等重注册、软状态重建（P2）
 - [x] CTL-13：DH 挑战闭环、时间窗口防重放
 - [ ] CTL-14：未 opt-in 节点 keydist 不带 broadcast_key（待实现）
-- [ ] CTL-15：Path\* 消息族 + 路径生命周期 + key_path 语义（v1.5）
+- [x] CTL-15：Path* 消息族 + 候选路径（直连 + relay，幂等）/flow hash 选择/主路径 miss 快速切换/key_path 参与者全量签发/吊销联动撤销/path_id=0 回退 key_dst（v2 帧头 42B 纳入 route_mac 与 AAD）

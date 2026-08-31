@@ -5,7 +5,7 @@
 //! 无 tun 环境（无 /dev/net/tun）下全链路可主机验证；run() 仅在容器环境启用 tun。
 
 use crate::config::{Config, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_SESSION_REKEY_HOURS};
-use crate::packet::parse_packet;
+use crate::packet::{parse_packet, PacketInfo, TransportProto};
 use crate::tun::{TunConfig, TunDevice};
 use ed25519_dalek::VerifyingKey;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
@@ -13,7 +13,7 @@ use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
 use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
-use landscape_rill_mesh::data::{IncomingEvent, MeshData};
+use landscape_rill_mesh::data::{IncomingEvent, MeshData, PathEntry};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -84,6 +84,8 @@ pub struct Node {
     next_rekey: Instant,
     reconnect_backoff: Duration,
     peer_heartbeats: HashMap<u32, u32>,
+    /// netmap 发现 v2 peer 后待发的路径请求（v1.5，CONTROL_PLANE §3.11）
+    pending_path_requests: Vec<u32>,
     /// 近期写入 land0 的组播包指纹（(src,dst,len) → 时间）；LAN 侧再读到 = 回环，跳过泛洪
     recent_multicast_writes: HashMap<(IpAddr, IpAddr, usize), Instant>,
 }
@@ -125,6 +127,7 @@ impl Node {
             next_rekey,
             reconnect_backoff: RECONNECT_INITIAL_BACKOFF,
             peer_heartbeats: HashMap::new(),
+            pending_path_requests: Vec::new(),
             recent_multicast_writes: HashMap::new(),
         })
     }
@@ -199,19 +202,23 @@ impl Node {
         match ev {
             IncomingEvent::Data { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
+                self.mesh.path_ok_peer(from);
                 Some(payload)
             }
             IncomingEvent::Broadcast { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
+                self.mesh.path_ok_peer(from);
                 Some(payload)
             }
             IncomingEvent::Heartbeat { from } => {
                 self.peer_heartbeats.insert(from, 0);
+                self.mesh.path_ok_peer(from);
                 None
             }
             IncomingEvent::Established { peer } => {
                 eprintln!("[node] session established with {}", peer);
                 self.peer_heartbeats.insert(peer, 0);
+                self.mesh.path_ok_peer(peer);
                 None
             }
             IncomingEvent::Rejected { peer, reason } => {
@@ -274,11 +281,15 @@ impl Node {
                         Ok(None) => LanOutcome::Handshaking { peer },
                     }
                 } else {
-                    match self.mesh.build_data_frame(peer, packet) {
-                        Ok(frame) => match self.mesh.send_to_node(peer, &frame).await {
-                            Ok(true) => LanOutcome::Sent { peer },
-                            _ => LanOutcome::Dropped,
-                        },
+                    // flow hash：五元组 → 候选路径选择（CONTROL_PLANE §3.11）
+                    let flow = flow_hash(&info);
+                    match self.mesh.build_data_frame(peer, packet, flow) {
+                        Ok((frame, first_hop)) => {
+                            match self.mesh.send_to_node_hop(peer, first_hop, &frame).await {
+                                Ok(true) => LanOutcome::Sent { peer },
+                                _ => LanOutcome::Dropped,
+                            }
+                        }
                         Err(_) => LanOutcome::Dropped,
                     }
                 }
@@ -299,12 +310,27 @@ impl Node {
                 }
             }
         }
+        // 待发路径请求（netmap 发现 v2 peer 后；随控制面心跳节奏发送）
+        if !self.pending_path_requests.is_empty() {
+            if let Some(control) = self.control.as_mut() {
+                let reqs: Vec<u32> = self.pending_path_requests.drain(..).collect();
+                for dest in reqs {
+                    let req = control.client().path_request(dest);
+                    if control.send_envelope(&req).await.is_err() {
+                        self.control = None;
+                        break;
+                    }
+                }
+            }
+        }
         if now.duration_since(self.last_data_heartbeat) >= self.opts.data_heartbeat_interval {
             self.last_data_heartbeat = now;
             let peers: Vec<u32> = self.mesh.sessions().map(|s| s.peer()).collect();
             for peer in peers {
                 let miss = self.peer_heartbeats.entry(peer).or_insert(0);
                 *miss += 1;
+                // 路径活性联动（v1.5）：miss 累计 → 主路径健康下降 → pick_path 切备用
+                self.mesh.path_miss_peer(peer);
                 if let Ok(frame) = self.mesh.build_heartbeat_frame(peer) {
                     let _ = self.mesh.send_to_node(peer, &frame).await;
                 }
@@ -518,6 +544,7 @@ impl Node {
                 self.mesh.remove_peer_static(node_id);
                 self.mesh.remove_key_dst(node_id);
                 self.mesh.remove_endpoint(node_id);
+                self.mesh.remove_paths_for(node_id);
                 self.engine.remove_mesh_node(node_id);
                 self.netmap_peers.remove(&node_id);
                 self.peer_heartbeats.remove(&node_id);
@@ -527,6 +554,48 @@ impl Node {
                         .session_mut()
                         .handle(SessionEvent::Revoked { node_id });
                 }
+            }
+            ControlEvent::Paths {
+                destination_node_id,
+                candidates,
+                ..
+            } => {
+                // 候选路径 + key_path 注入（v1.5，CONTROL_PLANE §3.11）
+                let entries: Vec<PathEntry> = candidates
+                    .iter()
+                    .map(|c| PathEntry {
+                        path_id: c.path_id,
+                        path_epoch: c.path_epoch,
+                        hops: c.hops.clone(),
+                        expires_at: c.expires_at,
+                    })
+                    .collect();
+                for c in &candidates {
+                    if c.key_path.len() == 32 {
+                        let mut kp = [0u8; 32];
+                        kp.copy_from_slice(&c.key_path);
+                        self.mesh.set_key_path(c.path_id, kp);
+                    }
+                }
+                self.mesh.set_paths(destination_node_id, entries);
+                eprintln!(
+                    "[node] paths to {}: {:?}",
+                    destination_node_id,
+                    candidates
+                        .iter()
+                        .map(|c| (c.path_id, c.hops.clone()))
+                        .collect::<Vec<_>>()
+                );
+            }
+            ControlEvent::PathWithdrawn {
+                destination_node_id,
+                path_id,
+            } => {
+                self.mesh.withdraw_path(destination_node_id, path_id);
+                eprintln!(
+                    "[node] path withdrawn {} -> {}",
+                    destination_node_id, path_id
+                );
             }
         }
         Ok(())
@@ -558,15 +627,53 @@ impl Node {
                     });
                 }
             }
+            // v2 peer（protocol_version >= 2）：请求候选路径（v1.5，CONTROL_PLANE §3.11）
+            if entry.protocol_version >= 2 {
+                self.request_paths_for(entry.node_id);
+            }
         }
         for stale in self.netmap_peers.difference(&fresh) {
             self.mesh.remove_peer_static(*stale);
             self.mesh.remove_endpoint(*stale);
             self.mesh.drop_session(*stale);
+            self.mesh.remove_paths_for(*stale);
             self.engine.remove_mesh_node(*stale);
         }
         self.netmap_peers = fresh;
     }
+
+    /// 登记待发路径请求（netmap 全量替换每次都会触发，幂等：重复请求 = 刷新路径集）
+    fn request_paths_for(&mut self, dest: u32) {
+        if !self.pending_path_requests.contains(&dest) {
+            self.pending_path_requests.push(dest);
+        }
+    }
+}
+/// flow hash：五元组（src/dst/proto）FNV-1a——同流同路径，负载均衡不拆流
+/// （CONTROL_PLANE §3.11 候选路径 flow hash 选择）
+fn flow_hash(info: &PacketInfo) -> u64 {
+    fn addr_bytes(ip: IpAddr) -> Vec<u8> {
+        match ip {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        }
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in addr_bytes(info.src)
+        .iter()
+        .chain(addr_bytes(info.dst).iter())
+    {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= match info.proto {
+        TransportProto::Tcp => 6,
+        TransportProto::Udp => 17,
+        TransportProto::Icmp => 1,
+        TransportProto::Icmpv6 => 58,
+        TransportProto::Other(v) => v as u64,
+    };
+    h
 }
 
 #[cfg(test)]

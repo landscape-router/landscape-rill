@@ -1,12 +1,22 @@
+use crate::path_service::{PathCandidate, PathEvent, PathService};
 use crate::signer::Ed25519Signer;
 use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, Registry,
 };
-use landscape_rill_core::crypto::{derive_key_dst, KEY_DST_LEN};
+use landscape_rill_core::crypto::{derive_key_dst, derive_key_path, KEY_DST_LEN};
 use landscape_rill_core::route::Prefix;
 use std::collections::HashMap;
 
 pub const BROADCAST_KEY_LEN: usize = 32;
+/// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
+pub const CAPABILITY_RELAY: u32 = 0x01;
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterData {
@@ -32,6 +42,8 @@ pub struct NodeInfo {
     pub routes: Vec<String>,
     pub endpoints: Vec<String>,
     pub offline: bool,
+    /// 协议版本（v2 路径能力协商；v1 节点恒 1）
+    pub protocol_version: u32,
 }
 
 pub struct Coordinator {
@@ -44,11 +56,15 @@ pub struct Coordinator {
     endpoints: HashMap<u32, Vec<String>>,
     relay_list: Vec<String>,
     offline: Vec<u32>,
+    /// 路径服务（v1.5，CONTROL_PLANE §3.11）
+    paths: PathService,
+    /// 节点协议版本（v2 路径能力协商，netmap 带出）
+    protocol_versions: HashMap<u32, u32>,
 }
 
 impl Coordinator {
     pub fn new(master_key: [u8; 32], signing_seed: [u8; 32]) -> Self {
-        Self {
+        let mut coord = Self {
             registry: Registry::new(0x0000_0001),
             signer: Ed25519Signer::new(signing_seed),
             master_key,
@@ -58,7 +74,30 @@ impl Coordinator {
             endpoints: HashMap::new(),
             relay_list: Vec::new(),
             offline: Vec::new(),
-        }
+            paths: PathService::new(),
+            protocol_versions: HashMap::new(),
+        };
+        coord.sync_relays();
+        coord
+    }
+
+    /// relay 节点集合 = 能力位含 relay 的节点（voluntary opt-in，CONNECTIVITY §5）
+    fn sync_relays(&mut self) {
+        let relays: Vec<u32> = self
+            .registry
+            .entries()
+            .filter(|e| e.capabilities & CAPABILITY_RELAY != 0)
+            .map(|e| e.node_id)
+            .collect();
+        self.paths.set_relays(relays);
+    }
+
+    pub fn set_protocol_version(&mut self, node_id: u32, version: u32) {
+        self.protocol_versions.insert(node_id, version);
+    }
+
+    pub fn protocol_version(&self, node_id: u32) -> u32 {
+        self.protocol_versions.get(&node_id).copied().unwrap_or(1)
     }
 
     pub fn add_auth_key(&mut self, key: &str, policy: AuthKeyPolicy) {
@@ -135,6 +174,36 @@ impl Coordinator {
         self.netmap_version += 1;
     }
 
+    // ==================== 路径服务（v1.5，CONTROL_PLANE §3.11） ====================
+
+    /// PathRequest 处理：构造候选路径集（直连 + 经 relay），返回 (候选, key_path)
+    pub fn request_paths(
+        &mut self,
+        source: u32,
+        dest: u32,
+        max: u32,
+    ) -> Vec<(PathCandidate, [u8; KEY_DST_LEN])> {
+        let now = unix_seconds();
+        self.paths
+            .request(source, dest, max, now)
+            .iter()
+            .map(|c| {
+                let key_path = derive_key_path(&self.master_key, c.path_id, c.path_epoch);
+                (c.clone(), key_path)
+            })
+            .collect()
+    }
+
+    /// 心跳推送：取走该节点（source 身份）的未推送路径事件
+    pub fn take_path_events(&mut self, source: u32) -> Vec<PathEvent> {
+        self.paths.take_events(source)
+    }
+
+    /// PathUpdate 推送用：按路径重新派生 key_path（只发路径参与者）
+    pub fn key_path_for(&self, path_id: u64, path_epoch: u32) -> [u8; KEY_DST_LEN] {
+        derive_key_path(&self.master_key, path_id, path_epoch)
+    }
+
     pub fn set_relay_list(&mut self, relay_list: Vec<String>) {
         self.relay_list = relay_list;
         self.netmap_version += 1;
@@ -152,6 +221,7 @@ impl Coordinator {
                 routes: e.routes.clone(),
                 endpoints: self.endpoints.get(&e.node_id).cloned().unwrap_or_default(),
                 offline: offline.contains(&e.node_id),
+                protocol_version: self.protocol_version(e.node_id),
             })
             .collect()
     }
@@ -186,8 +256,12 @@ impl Coordinator {
             self.last_seen.remove(&node_id);
             self.endpoints.remove(&node_id);
             self.offline.retain(|id| *id != node_id);
+            self.protocol_versions.remove(&node_id);
+            // 路径联动：撤销所有涉及该节点的路径（源/目的/中继）
+            self.paths.withdraw_node(node_id);
             self.key_version += 1;
             self.netmap_version += 1;
+            self.sync_relays();
         }
     }
 

@@ -19,6 +19,12 @@ enum MsgType {
   CHALLENGE = 8;
   CHALLENGE_ACK = 9;
   ENDPOINT_REPORT = 10;
+  PATH_REQUEST = 11;
+  PATH_RESPONSE = 12;
+  PATH_UPDATE = 13;
+  PATH_WITHDRAW = 14;
+  PATH_PROBE = 15;
+  PATH_PROBE_RESPONSE = 16;
 }
 
 message Envelope {
@@ -62,6 +68,7 @@ message NetmapEntry {
   repeated string endpoints = 4;  // UDP 端点 "ip:port"
   uint32 capabilities = 5;
   repeated string routes = 6;   // 前缀公告（CIDR，§3.8）
+  uint32 protocol_version = 7;  // 协议版本（v2 路径服务协商；v1 节点 = 1）
 }
 
 message NetmapPush {
@@ -107,4 +114,52 @@ message ChallengeAck {
 // §3.2 端点上报（数据面 UDP 地址；注册后/地址变化时上报，随心跳周期广播进 netmap）
 message EndpointReport {
   repeated string endpoints = 1;  // "ip:port"
+}
+
+// §3.11 路径服务（v1.5 控制面引入 / v2 数据面生效，REQ-034）
+// PathRequest：节点 → coordinator，请求本节点 → 目标节点的候选路径集
+message PathRequest {
+  fixed32 destination_node_id = 1;
+  uint32 max_candidates = 2;    // 请求候选路径数（2~4，缺省 4）
+}
+
+// PathResponse：coordinator → 节点，候选路径集（含 key_path 签发，只发路径参与者）
+message PathResponse {
+  fixed32 destination_node_id = 1;
+  repeated CandidatePath candidates = 2;
+  uint64 path_version = 3;      // 该目标路径集版本
+}
+
+message CandidatePath {
+  uint64 path_id = 1;
+  uint32 path_epoch = 2;
+  repeated fixed32 hops = 3;    // 有序跳（首跳 = 发送端点；direct = [目的]）
+  uint64 expires_at = 4;        // unix 秒
+  bytes key_path = 5;           // KDF(主密钥, path_id, path_epoch)，按路径签发
+}
+
+// PathUpdate：coordinator → 节点，路径集变更（拓扑/健康，path_version++，全量替换）
+message PathUpdate {
+  fixed32 destination_node_id = 1;
+  repeated CandidatePath candidates = 2;
+  uint64 path_version = 3;
+}
+
+// PathWithdraw：coordinator → 节点，路径撤销（吊销/过期/联邦取消）
+message PathWithdraw {
+  fixed32 destination_node_id = 1;
+  uint64 path_id = 2;
+  uint64 path_version = 3;
+}
+
+// PathProbe / PathProbeResponse：节点 ↔ 节点，路径活性/健康探测
+message PathProbe {
+  uint64 path_id = 1;
+  uint64 nonce = 2;
+  uint64 issued_at = 3;
+}
+
+message PathProbeResponse {
+  uint64 path_id = 1;
+  uint64 nonce = 2;
 }

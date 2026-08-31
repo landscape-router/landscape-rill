@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const CHALLENGE_NONCE_LEN: usize = 16;
 
 pub struct MeshLegConfig {
@@ -109,6 +109,15 @@ impl MeshClient {
 
     pub fn heartbeat(&self) -> Vec<u8> {
         envelope_bytes(MsgType::HEARTBEAT, &Heartbeat {})
+    }
+
+    /// 路径请求（v1.5，CONTROL_PLANE §3.11）：请求本节点 → dest 的候选路径集
+    pub fn path_request(&self, destination_node_id: u32) -> Vec<u8> {
+        let msg = PathRequest {
+            destination_node_id,
+            max_candidates: 4,
+        };
+        envelope_bytes(MsgType::PATH_REQUEST, &msg)
     }
 }
 
@@ -233,6 +242,7 @@ pub fn netmap_push_message(coordinator: &Coordinator) -> NetmapPush<'static> {
             endpoints: info.endpoints.into_iter().map(Cow::Owned).collect(),
             capabilities: info.capabilities,
             routes: info.routes.into_iter().map(Cow::Owned).collect(),
+            protocol_version: info.protocol_version,
         })
         .collect();
     NetmapPush {
@@ -372,6 +382,8 @@ impl CoordinatorServer {
                     routes,
                 ) {
                     Ok(data) => {
+                        self.coordinator
+                            .set_protocol_version(data.node_id, req.protocol_version);
                         let resp = RegisterResponse {
                             node_id: data.node_id,
                             network_id: data.network_id,
@@ -471,12 +483,53 @@ impl CoordinatorServer {
                     self.coordinator.heartbeat(node_id, unix_seconds());
                     // 周期收敛：端点/离线等软状态随心跳广播（v1 无增量推送）
                     self.push_snapshot(stream).await?;
+                    // 路径事件推送（v1.5，CONTROL_PLANE §3.11）：PathUpdate/PathWithdraw
+                    self.push_path_events(stream, node_id).await?;
                     let lease = Lease {
                         granted: true,
                         expires_at: unix_seconds() + 60,
                     };
                     write_msg(stream, MsgType::LEASE, &envelope_body(&lease)).await?;
                 }
+            }
+            MsgType::PATH_REQUEST => {
+                let mut reader = BytesReader::from_bytes(body);
+                let req = PathRequest::from_reader(&mut reader, body)?;
+                let Some(source) = state.registered else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "path request before registration",
+                    )
+                    .into());
+                };
+                let cands = self.coordinator.request_paths(
+                    source,
+                    req.destination_node_id,
+                    req.max_candidates,
+                );
+                let resp = PathResponse {
+                    destination_node_id: req.destination_node_id,
+                    candidates: cands
+                        .iter()
+                        .map(|(c, key)| CandidatePath {
+                            path_id: c.path_id,
+                            path_epoch: c.path_epoch,
+                            hops: c.hops.iter().copied().collect(),
+                            expires_at: c.expires_at,
+                            key_path: Cow::Owned(key.to_vec()),
+                        })
+                        .collect(),
+                    path_version: 1,
+                };
+                write_msg(stream, MsgType::PATH_RESPONSE, &envelope_body(&resp)).await?;
+            }
+            MsgType::PATH_PROBE
+            | MsgType::PATH_PROBE_RESPONSE
+            | MsgType::PATH_UPDATE
+            | MsgType::PATH_WITHDRAW => {
+                // 节点↔节点 PathProbe 走数据面语义（活性由数据面心跳承担，v1.5）；
+                // PathUpdate/PathWithdraw 为 coordinator → 节点单向推送，不收
+                let _ = body;
             }
             MsgType::ENDPOINT_REPORT => {
                 let mut reader = BytesReader::from_bytes(body);
@@ -490,6 +543,49 @@ impl CoordinatorServer {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// 心跳推送：该节点（source 身份）的未推送路径事件（PathUpdate/PathWithdraw）
+    async fn push_path_events<W: AsyncWriteExt + Unpin>(
+        &mut self,
+        stream: &mut W,
+        source: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for event in self.coordinator.take_path_events(source) {
+            match event {
+                landscape_rill_coord::path_service::PathEvent::Update { dest, set } => {
+                    let msg = PathUpdate {
+                        destination_node_id: dest,
+                        candidates: set
+                            .candidates
+                            .iter()
+                            .map(|c| CandidatePath {
+                                path_id: c.path_id,
+                                path_epoch: c.path_epoch,
+                                hops: c.hops.iter().copied().collect(),
+                                expires_at: c.expires_at,
+                                key_path: Cow::Owned(
+                                    self.coordinator
+                                        .key_path_for(c.path_id, c.path_epoch)
+                                        .to_vec(),
+                                ),
+                            })
+                            .collect(),
+                        path_version: set.version,
+                    };
+                    write_msg(stream, MsgType::PATH_UPDATE, &envelope_body(&msg)).await?;
+                }
+                landscape_rill_coord::path_service::PathEvent::Withdraw { dest, path_id } => {
+                    let msg = PathWithdraw {
+                        destination_node_id: dest,
+                        path_id,
+                        path_version: 0,
+                    };
+                    write_msg(stream, MsgType::PATH_WITHDRAW, &envelope_body(&msg)).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -514,6 +610,8 @@ pub struct NetmapNode {
     pub endpoints: Vec<String>,
     pub capabilities: u32,
     pub routes: Vec<String>,
+    /// 协议版本（v2 路径能力协商）
+    pub protocol_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -547,6 +645,27 @@ pub enum ControlEvent {
     Revoked {
         node_id: u32,
     },
+    /// 候选路径集（PathResponse/PathUpdate，v1.5 CONTROL_PLANE §3.11）
+    Paths {
+        destination_node_id: u32,
+        candidates: Vec<PathCandidateMsg>,
+        version: u64,
+    },
+    /// 路径撤销（PathWithdraw）
+    PathWithdrawn {
+        destination_node_id: u32,
+        path_id: u64,
+    },
+}
+
+/// 路径候选（control 层消息载体 → runtime 注入 MeshData）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathCandidateMsg {
+    pub path_id: u64,
+    pub path_epoch: u32,
+    pub hops: Vec<u32>,
+    pub expires_at: u64,
+    pub key_path: Vec<u8>,
 }
 
 pub struct ControlSession {
@@ -637,6 +756,7 @@ impl ControlSession {
                             endpoints: e.endpoints.iter().map(|s| s.to_string()).collect(),
                             capabilities: e.capabilities,
                             routes: e.routes.iter().map(|s| s.to_string()).collect(),
+                            protocol_version: e.protocol_version,
                         }
                     })
                     .collect();
@@ -684,6 +804,41 @@ impl ControlSession {
                 Ok(ControlEvent::Revoked {
                     node_id: revoke.node_id,
                 })
+            }
+            MsgType::PATH_RESPONSE | MsgType::PATH_UPDATE => {
+                let owned = PathResponseOwned::try_from(body).map_err(decoding_err)?;
+                let candidates = owned
+                    .proto()
+                    .candidates
+                    .iter()
+                    .map(|c| PathCandidateMsg {
+                        path_id: c.path_id,
+                        path_epoch: c.path_epoch,
+                        hops: c.hops.iter().copied().collect(),
+                        expires_at: c.expires_at,
+                        key_path: c.key_path.to_vec(),
+                    })
+                    .collect();
+                Ok(ControlEvent::Paths {
+                    destination_node_id: owned.proto().destination_node_id,
+                    candidates,
+                    version: owned.proto().path_version,
+                })
+            }
+            MsgType::PATH_WITHDRAW => {
+                let mut reader = BytesReader::from_bytes(&body);
+                let w = PathWithdraw::from_reader(&mut reader, &body).map_err(decoding_err)?;
+                Ok(ControlEvent::PathWithdrawn {
+                    destination_node_id: w.destination_node_id,
+                    path_id: w.path_id,
+                })
+            }
+            MsgType::PATH_PROBE | MsgType::PATH_PROBE_RESPONSE => {
+                // v1.5：路径活性由数据面心跳承担，PathProbe 消息族协议已定义、运行时未启用
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected path probe on control connection",
+                ))
             }
             other => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

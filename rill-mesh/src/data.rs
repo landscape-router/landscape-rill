@@ -1,6 +1,6 @@
 use landscape_rill_core::frame::{
     build_frame, build_handshake_frame, frame_payload, open_frame, packet_type, MeshFrameHeader,
-    ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, VERSION,
+    ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, VERSION, VERSION2,
 };
 use landscape_rill_core::handshake::{
     HandshakeContext, HandshakeError, HandshakeInitiator, HandshakeResponder, Session,
@@ -16,9 +16,35 @@ pub const FLOOD_BUCKET_CAPACITY: u32 = 64;
 pub const FLOOD_BUCKET_RATE_PER_SEC: f64 = 16.0;
 /// 泛洪去重 seen 集条目存活时长
 pub const FLOOD_SEEN_TTL: Duration = Duration::from_secs(30);
+/// 主路径健康 miss 阈值：累计达此值 → 快速切换备用路径（CONTROL_PLANE §3.11）
+pub const PATH_HEALTH_MISS_LIMIT: u32 = 3;
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// coordinator 公钥持有者注入的身份绑定校验器（与签名算法解耦）
 pub type BindingVerifier = dyn Fn(u32, &[u8; 32], &[u8]) -> bool + Send + Sync;
+
+/// v2 候选路径条目（CONTROL_PLANE §3.11）：hops 显式（direct = [dest]，relay = [relay, dest]）
+#[derive(Debug, Clone)]
+pub struct PathEntry {
+    pub path_id: u64,
+    pub path_epoch: u32,
+    /// 有序跳（首跳 = 发送端点；转发节点按自己在路径中的位置取下一跳）
+    pub hops: Vec<u32>,
+    /// unix 秒过期
+    pub expires_at: u64,
+}
+
+impl PathEntry {
+    pub fn expired(&self, now_unix: u64) -> bool {
+        self.expires_at != 0 && now_unix > self.expires_at
+    }
+}
 
 pub struct MeshData {
     socket: UdpSocket,
@@ -41,6 +67,12 @@ pub struct MeshData {
     flood_seen: HashMap<(u32, u32), Instant>,
     /// 泛洪出口令牌桶（发送与转发共用）
     flood_bucket: TokenBucket,
+    /// v2 路径授权密钥：path_id → key_path（coordinator 签发，只发路径参与者）
+    key_path_table: HashMap<u64, [u8; 32]>,
+    /// v2 候选路径表：dest → 候选路径集合（2~4 条）
+    path_table: HashMap<u32, Vec<PathEntry>>,
+    /// 主路径健康 miss 计数（快速切换，CONTROL_PLANE §3.11）
+    path_health: HashMap<u64, u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -180,6 +212,9 @@ impl MeshData {
             broadcast_replay: HashMap::new(),
             flood_seen: HashMap::new(),
             flood_bucket: TokenBucket::new(FLOOD_BUCKET_RATE_PER_SEC, FLOOD_BUCKET_CAPACITY),
+            key_path_table: HashMap::new(),
+            path_table: HashMap::new(),
+            path_health: HashMap::new(),
         })
     }
 
@@ -190,6 +225,108 @@ impl MeshData {
     /// 注册完成后由 runtime 注入真实 node_id（bind 时未知）
     pub fn set_self_node_id(&mut self, node_id: u32) {
         self.self_node_id = node_id;
+    }
+
+    // ==================== v2 路径 API（CONTROL_PLANE §3.11） ====================
+
+    /// key_path 注入（PathResponse 签发，只发路径参与者）；轮换 = 同 path_id 覆盖
+    pub fn set_key_path(&mut self, path_id: u64, key: [u8; 32]) {
+        self.key_path_table.insert(path_id, key);
+    }
+
+    pub fn remove_key_path(&mut self, path_id: u64) {
+        self.key_path_table.remove(&path_id);
+        self.path_health.remove(&path_id);
+    }
+
+    pub fn has_key_path(&self, path_id: u64) -> bool {
+        self.key_path_table.contains_key(&path_id)
+    }
+
+    /// 候选路径集注入（PathResponse/PathUpdate）；同 dest 全量替换。
+    /// key_path 生命周期由 withdraw_path/remove_paths_for 管理（不在此清理——
+    /// 跨 dest 的全局清理会误删其他路径集的授权密钥）。
+    pub fn set_paths(&mut self, dest: u32, paths: Vec<PathEntry>) {
+        self.path_table.insert(dest, paths);
+    }
+
+    /// PathWithdraw：移除某路径；空集时移除该 dest 的路径表
+    pub fn withdraw_path(&mut self, dest: u32, path_id: u64) {
+        self.remove_key_path(path_id);
+        if let Some(paths) = self.path_table.get_mut(&dest) {
+            paths.retain(|p| p.path_id != path_id);
+            if paths.is_empty() {
+                self.path_table.remove(&dest);
+            }
+        }
+    }
+
+    pub fn paths_for(&self, dest: u32) -> Option<&Vec<PathEntry>> {
+        self.path_table.get(&dest)
+    }
+
+    /// 吊销联动：清空该 dest 的全部路径（runtime Revoked 事件）
+    pub fn remove_paths_for(&mut self, dest: u32) {
+        if let Some(paths) = self.path_table.remove(&dest) {
+            for p in paths {
+                self.key_path_table.remove(&p.path_id);
+                self.path_health.remove(&p.path_id);
+            }
+        }
+    }
+
+    /// flow hash 选路径（每目标 2~4 候选）：首选未过期、有 key_path 的路径；
+    /// 主路径健康 miss 达阈值 → 切备用（快速切换）。
+    pub fn pick_path(&mut self, dest: u32, flow_hash: u64) -> Option<PathEntry> {
+        let now = unix_seconds();
+        let paths = self.path_table.get(&dest)?;
+        let live: Vec<&PathEntry> = paths
+            .iter()
+            .filter(|p| !p.expired(now) && self.key_path_table.contains_key(&p.path_id))
+            .collect();
+        if live.is_empty() {
+            return None;
+        }
+        // 主路径 = 有序候选第一条；flow hash 仅在候选健康时做负载
+        let healthy: Vec<&PathEntry> = live
+            .iter()
+            .copied()
+            .filter(|p| {
+                self.path_health.get(&p.path_id).copied().unwrap_or(0) < PATH_HEALTH_MISS_LIMIT
+            })
+            .collect();
+        let pool = if healthy.is_empty() { live } else { healthy };
+        let idx = (flow_hash as usize) % pool.len();
+        Some(pool[idx].clone())
+    }
+
+    /// 路径活性上报：健康 miss 清零 / 累计（runtime 按数据面心跳/PathProbe 喂）
+    pub fn path_miss(&mut self, path_id: u64) {
+        let miss = self.path_health.entry(path_id).or_insert(0);
+        *miss = miss.saturating_add(1);
+    }
+
+    pub fn path_ok(&mut self, path_id: u64) {
+        self.path_health.insert(path_id, 0);
+    }
+
+    /// peer 级：数据面心跳 miss → 该 peer 主路径（候选第一条）miss（快速切换，
+    /// CONTROL_PLANE §3.11——备用路径活性由独立探活承担）
+    pub fn path_miss_peer(&mut self, dest: u32) {
+        if let Some(paths) = self.path_table.get(&dest).cloned() {
+            if let Some(main) = paths.first() {
+                self.path_miss(main.path_id);
+            }
+        }
+    }
+
+    /// peer 级：收包成功 → 该 peer 全部路径健康恢复
+    pub fn path_ok_peer(&mut self, dest: u32) {
+        if let Some(paths) = self.path_table.get(&dest).cloned() {
+            for p in paths {
+                self.path_ok(p.path_id);
+            }
+        }
     }
 
     pub fn set_key_dst(&mut self, node_id: u32, key: [u8; 32]) {
@@ -296,13 +433,61 @@ impl MeshData {
     }
 
     /// 构建加密数据帧（seq 自增）。需会话已建立。
-    pub fn build_data_frame(&mut self, to: u32, payload: &[u8]) -> Result<Vec<u8>, SendError> {
-        self.build_typed_frame(to, packet_type::UNICAST, payload)
+    /// 返回 (帧, 首跳)：有 v2 路径时首跳 = 路径第一跳（经 relay），帧为 v2 帧头；
+    /// 否则首跳 = None（直连 dest），帧为 v1 帧头（path_id=0 隐式默认路径，v1 兼容）。
+    pub fn build_data_frame(
+        &mut self,
+        to: u32,
+        payload: &[u8],
+        flow_hash: u64,
+    ) -> Result<(Vec<u8>, Option<u32>), SendError> {
+        let path = self.pick_path(to, flow_hash);
+        let frame = match path {
+            Some(ref p) => self.build_typed_frame_v2(to, p, packet_type::UNICAST, payload)?,
+            None => self.build_typed_frame(to, packet_type::UNICAST, payload)?,
+        };
+        let first_hop = path.as_ref().and_then(|p| p.hops.first()).copied();
+        Ok((frame, first_hop))
     }
 
-    /// 心跳帧（AEAD 空载荷，仅已建会话对；CONNECTIVITY §6 / FRAME_HEADER §2.5）
+    /// 心跳帧（AEAD 空载荷，仅已建会话对；CONNECTIVITY §6 / FRAME_HEADER §2.5）。
+    /// 心跳恒走默认路径（v1 帧头 + key_dst）——路径活性由 PathProbe 承担。
     pub fn build_heartbeat_frame(&mut self, to: u32) -> Result<Vec<u8>, SendError> {
         self.build_typed_frame(to, packet_type::HEARTBEAT, &[])
+    }
+
+    /// v2 数据帧：路径授权（key_path 签发 route_mac），path_id 纳入 AAD（FRAME_HEADER §9）
+    fn build_typed_frame_v2(
+        &mut self,
+        to: u32,
+        path: &PathEntry,
+        packet_type: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, SendError> {
+        let session = self.sessions.get_mut(&to).ok_or(SendError::NoSession)?;
+        let key_path = self
+            .key_path_table
+            .get(&path.path_id)
+            .copied()
+            .ok_or(SendError::NoKeyDst)?;
+        let seq = session.next_seq();
+        let header = MeshFrameHeader {
+            version: VERSION2,
+            packet_type,
+            to_node_id: to,
+            from_node_id: self.self_node_id,
+            seq,
+            path_id: path.path_id,
+            ..Default::default()
+        };
+        build_frame(
+            &header,
+            &key_path,
+            &session.keys().tx_key,
+            session.keys().salt,
+            payload,
+        )
+        .map_err(|_| SendError::Aead)
     }
 
     fn build_typed_frame(
@@ -385,6 +570,23 @@ impl MeshData {
 
     pub async fn send_to_node(&self, to_node_id: u32, frame: &[u8]) -> std::io::Result<bool> {
         match self.endpoint_table.get(&to_node_id) {
+            Some(addr) => {
+                self.socket.send_to(frame, addr).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// 按路径首跳发送（v2）：首跳 = 路径第一跳（relay 或 dest 本身）
+    pub async fn send_to_node_hop(
+        &self,
+        to_node_id: u32,
+        first_hop: Option<u32>,
+        frame: &[u8],
+    ) -> std::io::Result<bool> {
+        let hop = first_hop.unwrap_or(to_node_id);
+        match self.endpoint_table.get(&hop) {
             Some(addr) => {
                 self.socket.send_to(frame, addr).await?;
                 Ok(true)
@@ -607,18 +809,38 @@ impl MeshData {
     }
 
     /// AEAD 解密收尾：已建会话的 UNICAST/HEARTBEAT 帧统一走这里
+    /// 路由密钥按帧头版本选择：v1 = key_dst（默认路径）；v2 = 该 path_id 的 key_path
     fn handle_session_frame(&mut self, from: u32, frame: &[u8], heartbeat: bool) -> IncomingEvent {
         let Some(session) = self.sessions.get_mut(&from) else {
             return IncomingEvent::Dropped {
                 reason: DropReason::NoSession,
             };
         };
-        let Some(key_dst) = self.key_dst_table.get(&self.self_node_id).copied() else {
+        let Some(header) = MeshFrameHeader::decode(frame).ok() else {
             return IncomingEvent::Dropped {
-                reason: DropReason::NoKeyDst,
+                reason: DropReason::Short,
             };
         };
-        match session.open(frame, &key_dst, Instant::now()) {
+        let route_key = if header.version == VERSION2 {
+            match self.key_path_table.get(&header.path_id) {
+                Some(k) => *k,
+                None => {
+                    return IncomingEvent::Dropped {
+                        reason: DropReason::NoKeyDst,
+                    }
+                }
+            }
+        } else {
+            match self.key_dst_table.get(&self.self_node_id) {
+                Some(k) => *k,
+                None => {
+                    return IncomingEvent::Dropped {
+                        reason: DropReason::NoKeyDst,
+                    }
+                }
+            }
+        };
+        match session.open(frame, &route_key, Instant::now()) {
             Ok((_, payload)) => {
                 if heartbeat && !payload.is_empty() {
                     return IncomingEvent::Dropped {
@@ -657,7 +879,7 @@ impl MeshData {
                 }
             }
         };
-        if header.version != VERSION {
+        if header.version != VERSION && header.version != VERSION2 {
             return RelayOutcome::Dropped {
                 reason: DropReason::BadVersion,
             };
@@ -665,17 +887,29 @@ impl MeshData {
         if header.to_node_id == BROADCAST_NODE_ID {
             return self.relay_broadcast(&header, frame).await;
         }
-        let key_dst = match self.key_dst_table.get(&header.to_node_id) {
-            Some(k) => *k,
-            None => {
-                return RelayOutcome::Dropped {
-                    reason: DropReason::NoKeyDst,
+        // 路由密钥按帧头版本选择：v2 = 该 path_id 的 key_path（路径级授权，
+        // CONTROL_PLANE §3.11.5——转发节点必须持路径授权才能校验/转发）
+        let route_key = if header.version == VERSION2 {
+            match self.key_path_table.get(&header.path_id) {
+                Some(k) => *k,
+                None => {
+                    return RelayOutcome::Dropped {
+                        reason: DropReason::NoKeyDst,
+                    }
+                }
+            }
+        } else {
+            match self.key_dst_table.get(&header.to_node_id) {
+                Some(k) => *k,
+                None => {
+                    return RelayOutcome::Dropped {
+                        reason: DropReason::NoKeyDst,
+                    }
                 }
             }
         };
-        if landscape_rill_core::crypto::route_mac(&key_dst, &header.auth_input())
-            != header.route_mac
-        {
+        let (ai, ai_len) = header.auth_input();
+        if landscape_rill_core::crypto::route_mac(&route_key, &ai[..ai_len]) != header.route_mac {
             return RelayOutcome::Dropped {
                 reason: DropReason::BadRouteMac,
             };
@@ -691,14 +925,21 @@ impl MeshData {
                 reason: DropReason::TtlExpired,
             };
         }
-        let endpoint = match self.endpoint_table.get(&header.to_node_id) {
-            Some(e) => *e,
-            None => {
-                return RelayOutcome::Dropped {
-                    reason: DropReason::NoEndpoint,
-                }
-            }
+        // 转发端点：v2 路径按路径下一跳（本节点在 hops 中的后继），v1 直连目标端点
+        let next_hop = if header.version == VERSION2 {
+            self.path_next_hop(&header)
+        } else {
+            None
         };
+        let endpoint =
+            match next_hop.or_else(|| self.endpoint_table.get(&header.to_node_id).copied()) {
+                Some(e) => e,
+                None => {
+                    return RelayOutcome::Dropped {
+                        reason: DropReason::NoEndpoint,
+                    }
+                }
+            };
         let mut out = frame.to_vec();
         out[3] -= 1;
         match self.socket.send_to(&out, endpoint).await {
@@ -709,6 +950,17 @@ impl MeshData {
                 reason: DropReason::NoEndpoint,
             },
         }
+    }
+
+    /// v2 路径转发下一跳：本节点在路径 hops 中的后继节点
+    fn path_next_hop(&self, header: &MeshFrameHeader) -> Option<SocketAddr> {
+        let paths = self.path_table.get(&header.to_node_id)?;
+        let path = paths
+            .iter()
+            .find(|p| p.path_id == header.path_id && !p.expired(unix_seconds()))?;
+        let idx = path.hops.iter().position(|h| *h == self.self_node_id)?;
+        let next = path.hops.get(idx + 1)?;
+        self.endpoint_table.get(next).copied()
     }
 
     /// 广播帧泛洪路径（FRAME_HEADER §2.6）：
@@ -725,7 +977,8 @@ impl MeshData {
                 reason: DropReason::NoKeyDst,
             };
         };
-        if landscape_rill_core::crypto::route_mac(&bkey, &header.auth_input()) != header.route_mac {
+        let (ai, ai_len) = header.auth_input();
+        if landscape_rill_core::crypto::route_mac(&bkey, &ai[..ai_len]) != header.route_mac {
             return RelayOutcome::Dropped {
                 reason: DropReason::BadRouteMac,
             };
@@ -786,7 +1039,7 @@ impl MeshData {
 mod tests {
     use super::*;
     use landscape_rill_core::crypto::{derive_key_dst, KEY_DST_LEN};
-    use landscape_rill_core::frame::{build_frame, packet_type};
+    use landscape_rill_core::frame::{build_frame, packet_type, HEADER_LEN_V2, TAG_LEN, VERSION2};
     use landscape_rill_core::handshake::{BINDING_LEN, SESSION_KEY_LEN};
 
     const MASTER: [u8; 32] = [0x42; 32];
@@ -869,8 +1122,8 @@ mod tests {
         );
         assert!(a.has_session(2) && b.has_session(1));
 
-        let frame = a.build_data_frame(2, b"hello mesh").unwrap();
-        a.send_to_node(2, &frame).await.unwrap();
+        let (frame, hop) = a.build_data_frame(2, b"hello mesh", 0).unwrap();
+        a.send_to_node_hop(2, hop, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
             IncomingEvent::Data {
@@ -879,8 +1132,8 @@ mod tests {
             }
         );
 
-        let frame = b.build_data_frame(1, b"reply").unwrap();
-        b.send_to_node(1, &frame).await.unwrap();
+        let (frame, hop) = b.build_data_frame(1, b"reply", 0).unwrap();
+        b.send_to_node_hop(1, hop, &frame).await.unwrap();
         assert_eq!(
             a.handle_incoming().await.unwrap(),
             IncomingEvent::Data {
@@ -1038,7 +1291,7 @@ mod tests {
             SendError::NoSession
         );
         assert_eq!(
-            a.build_data_frame(2, b"x").unwrap_err(),
+            a.build_data_frame(2, b"x", 0).unwrap_err(),
             SendError::NoSession
         );
     }
@@ -1061,7 +1314,7 @@ mod tests {
             IncomingEvent::Established { peer: 1 }
         );
 
-        let mut frame = a.build_data_frame(2, b"payload").unwrap();
+        let mut frame = a.build_data_frame(2, b"payload", 0).unwrap().0;
         let n = frame.len();
         frame[n - 1] ^= 0xff;
         a.send_to_node(2, &frame).await.unwrap();
@@ -1091,7 +1344,7 @@ mod tests {
             IncomingEvent::Established { peer: 1 }
         );
 
-        let frame = a.build_data_frame(2, b"payload").unwrap();
+        let frame = a.build_data_frame(2, b"payload", 0).unwrap().0;
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
@@ -1154,7 +1407,8 @@ mod tests {
         let mut frame = vec![0u8; HEADER_LEN + 4];
         let mut h = header.clone();
         h.len = 4;
-        h.route_mac = landscape_rill_core::crypto::route_mac(&node_key(2), &h.auth_input());
+        let (ai, ai_len) = h.auth_input();
+        h.route_mac = landscape_rill_core::crypto::route_mac(&node_key(2), &ai[..ai_len]);
         h.encode(&mut frame);
         frame[HEADER_LEN..].copy_from_slice(b"ctrl");
         a.send_to_node(2, &frame).await.unwrap();
@@ -1211,6 +1465,216 @@ mod tests {
                 reason: DropReason::BadRouteMac
             }
         );
+    }
+
+    // ==================== v2 路径（CONTROL_PLANE §3.11 / FRAME_HEADER §9） ====================
+
+    fn path_key(_path_id: u64) -> [u8; KEY_DST_LEN] {
+        [0x77; 32] // 测试用 key_path（真实 = derive_key_path）
+    }
+
+    #[tokio::test]
+    async fn v2_data_frame_roundtrip_via_direct_path() {
+        let (mut a, mut b) = setup_pair().await;
+        // 完整握手（v1 帧）
+        let msg1 = a.initiate_handshake(2).unwrap().unwrap();
+        a.send_to_node(2, &msg1).await.unwrap();
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
+        // 路径注入（direct：hops=[2]）
+        let path = PathEntry {
+            path_id: 0x100,
+            path_epoch: 1,
+            hops: vec![2],
+            expires_at: unix_seconds() + 3600,
+        };
+        a.set_paths(2, vec![path.clone()]);
+        a.set_key_path(0x100, path_key(0x100));
+        b.set_key_path(0x100, path_key(0x100));
+        // v2 数据帧（42B + path_id）
+        let (frame, first_hop) = a.build_data_frame(2, b"hello path", 0x1234).unwrap();
+        assert_eq!(first_hop, Some(2));
+        assert_eq!(frame.len(), HEADER_LEN_V2 + 10 + TAG_LEN);
+        assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION2);
+        assert_eq!(MeshFrameHeader::decode(&frame).unwrap().path_id, 0x100);
+        a.send_to_node_hop(2, first_hop, &frame).await.unwrap();
+        // B 收帧：path_id 选 key_path 校验 + 解密
+        match b.handle_incoming().await.unwrap() {
+            IncomingEvent::Data { from, payload } => {
+                assert_eq!(from, 1);
+                assert_eq!(payload, b"hello path");
+            }
+            other => panic!("expected data, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_frame_without_key_path_dropped() {
+        // path_id 无对应 key_path → NoKeyDst（fail-closed）
+        let (mut a, mut b) = setup_pair().await;
+        let msg1 = a.initiate_handshake(2).unwrap().unwrap();
+        a.send_to_node(2, &msg1).await.unwrap();
+        let _ = b.handle_incoming().await.unwrap();
+        let _ = a.handle_incoming().await.unwrap();
+        let _ = b.handle_incoming().await.unwrap();
+        let path = PathEntry {
+            path_id: 0x200,
+            path_epoch: 1,
+            hops: vec![2],
+            expires_at: unix_seconds() + 3600,
+        };
+        a.set_paths(2, vec![path]);
+        a.set_key_path(0x200, path_key(0x200));
+        // B 无 key_path(0x200)
+        let (frame, hop) = a.build_data_frame(2, b"secret", 1).unwrap();
+        a.send_to_node_hop(2, hop, &frame).await.unwrap();
+        match b.handle_incoming().await.unwrap() {
+            IncomingEvent::Dropped {
+                reason: DropReason::NoKeyDst,
+            } => {}
+            other => panic!("expected NoKeyDst drop, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_frame_forwarded_through_relay_path() {
+        // A(1) → R(3) → B(2)：v2 帧经 relay 按路径转发（key_path 校验）
+        // 握手直连（真实场景 netmap 全量互连）；数据面走 relay 路径
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut r = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        let a_addr = a.local_addr().unwrap();
+        let r_addr = r.local_addr().unwrap();
+        let b_addr = b.local_addr().unwrap();
+        for id in [1u32, 2, 3] {
+            a.set_key_dst(id, node_key(id));
+            r.set_key_dst(id, node_key(id));
+            b.set_key_dst(id, node_key(id));
+        }
+        a.set_handshake_context(ctx(1));
+        r.set_handshake_context(ctx(3));
+        b.set_handshake_context(ctx(2));
+        a.set_peer_static(2, peer_static(2));
+        b.set_peer_static(1, peer_static(1));
+        a.set_binding_verifier(verifier);
+        b.set_binding_verifier(verifier);
+        a.set_endpoint(2, b_addr);
+        b.set_endpoint(1, a_addr);
+        // A 的路径首跳 = R（relay 路径发送端点）
+        a.set_endpoint(3, r_addr);
+        // R 的转发表：知道 B 的端点
+        r.set_endpoint(2, b_addr);
+        // 握手直连 A↔B
+        let msg1 = a.initiate_handshake(2).unwrap().unwrap();
+        a.send_to_node(2, &msg1).await.unwrap();
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
+        // 路径注入：A → B 经 R（hops=[3,2]）；R 持有同路径做转发
+        let path = PathEntry {
+            path_id: 0x300,
+            path_epoch: 1,
+            hops: vec![3, 2],
+            expires_at: unix_seconds() + 3600,
+        };
+        for node in [&mut a, &mut r, &mut b] {
+            node.set_key_path(0x300, path_key(0x300));
+        }
+        a.set_paths(2, vec![path.clone()]);
+        r.set_paths(2, vec![path.clone()]);
+        // A 发 v2 帧（首跳 = R）
+        let (frame, first_hop) = a.build_data_frame(2, b"via relay", 0xabc).unwrap();
+        assert_eq!(first_hop, Some(3));
+        assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION2);
+        a.send_to_node_hop(2, first_hop, &frame).await.unwrap();
+        // R 校验 key_path 并转发到 B
+        let (_, rcv4) = r.recv_frame().await.unwrap();
+        assert_eq!(r.relay(&rcv4).await, RelayOutcome::Forwarded { to: 2 });
+        // B 收帧解密
+        match b.handle_incoming().await.unwrap() {
+            IncomingEvent::Data { from, payload } => {
+                assert_eq!(from, 1);
+                assert_eq!(payload, b"via relay");
+            }
+            other => panic!("expected data, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_path_switches_on_health_miss() {
+        // 快速切换（CONTROL_PLANE §3.11）：主路径 miss 达阈值 → flow hash 选备用
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let p1 = PathEntry {
+            path_id: 1,
+            path_epoch: 1,
+            hops: vec![2],
+            expires_at: unix_seconds() + 3600,
+        };
+        let p2 = PathEntry {
+            path_id: 2,
+            path_epoch: 1,
+            hops: vec![3, 2],
+            expires_at: unix_seconds() + 3600,
+        };
+        a.set_key_path(1, path_key(1));
+        a.set_key_path(2, path_key(2));
+        a.set_paths(2, vec![p1.clone(), p2.clone()]);
+        // 健康时：flow hash 0 → 路径 1
+        let picked = a.pick_path(2, 0).unwrap();
+        assert_eq!(picked.path_id, 1);
+        // 主路径 miss 达阈值 → 切备用
+        for _ in 0..PATH_HEALTH_MISS_LIMIT {
+            a.path_miss_peer(2);
+        }
+        let picked = a.pick_path(2, 0).unwrap();
+        assert_eq!(picked.path_id, 2);
+        // 收包恢复 → 主路径回归
+        a.path_ok_peer(2);
+        let picked = a.pick_path(2, 0).unwrap();
+        assert_eq!(picked.path_id, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_path_skipped() {
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let expired = PathEntry {
+            path_id: 9,
+            path_epoch: 1,
+            hops: vec![2],
+            expires_at: 1, // 已过期
+        };
+        a.set_key_path(9, path_key(9));
+        a.set_paths(2, vec![expired]);
+        assert!(a.pick_path(2, 0).is_none());
     }
 
     #[tokio::test]
@@ -1276,11 +1740,27 @@ mod tests {
             .unwrap();
         relay.set_key_dst(3, node_key(3));
         let mut frame = frame_from(1, 3, b"payload", 64, 1);
-        frame[0] = 0x02;
+        frame[0] = 0x03; // 非法版本（0x01=v1，0x02=v2）
         assert_eq!(
             relay.relay(&frame).await,
             RelayOutcome::Dropped {
                 reason: DropReason::BadVersion
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_frame_shorter_than_header_rejected() {
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        let frame = frame_from(1, 3, b"payload", 64, 1);
+        let mut short = frame[..HEADER_LEN].to_vec(); // 34B
+        short[0] = VERSION2; // v2 帧头要求 42B
+        assert_eq!(
+            relay.relay(&short).await,
+            RelayOutcome::Dropped {
+                reason: DropReason::Short
             }
         );
     }

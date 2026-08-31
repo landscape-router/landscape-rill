@@ -72,6 +72,20 @@ pub fn derive_key_dst(master_key: &[u8], to_node_id: u32) -> [u8; KEY_DST_LEN] {
     out
 }
 
+/// 路径授权密钥（CONTROL_PLANE §3.11.5）：KDF(主密钥, path_id, path_epoch)
+/// v2 route_mac 改用；按路径签发、只发路径参与者。
+pub fn derive_key_path(master_key: &[u8], path_id: u64, path_epoch: u32) -> [u8; KEY_DST_LEN] {
+    let mut info = Vec::with_capacity(20);
+    info.extend_from_slice(b"key_path");
+    info.extend_from_slice(&path_id.to_be_bytes());
+    info.extend_from_slice(&path_epoch.to_be_bytes());
+    let mut out = [0u8; KEY_DST_LEN];
+    Hkdf::<Sha256>::new(None, master_key)
+        .expand(&info, &mut out)
+        .expect("hkdf expand");
+    out
+}
+
 pub fn derive_sip_key(key_dst: &[u8], index: u8) -> [u8; SIP_KEY_LEN] {
     let mut info = Vec::with_capacity(7);
     info.extend_from_slice(b"sipkey");
