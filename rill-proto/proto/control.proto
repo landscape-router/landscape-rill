@@ -133,7 +133,7 @@ message PathResponse {
 message CandidatePath {
   uint64 path_id = 1;
   uint32 path_epoch = 2;
-  repeated fixed32 hops = 3;    // 有序跳（首跳 = 发送端点；direct = [目的]）
+  bytes hops = 3;               // 有序跳，每个 node_id 4B 大端（首跳 = 发送端点；direct = [目的]）
   uint64 expires_at = 4;        // unix 秒
   bytes key_path = 5;           // KDF(主密钥, path_id, path_epoch)，按路径签发
 }

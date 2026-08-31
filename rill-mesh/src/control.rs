@@ -14,6 +14,22 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const CHALLENGE_NONCE_LEN: usize = 16;
 
+/// hops → bytes（每 node_id 4B 大端；avoid quick-protobuf packed fixed32 对齐缺陷）
+pub fn hops_bytes(hops: &[u32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(hops.len() * 4);
+    for h in hops {
+        out.extend_from_slice(&h.to_be_bytes());
+    }
+    out
+}
+
+/// bytes → hops（4B 大端）
+pub fn hops_to_vec(hops: &[u8]) -> Vec<u32> {
+    let (full, rem) = hops.as_chunks::<4>();
+    debug_assert!(rem.is_empty());
+    full.iter().map(|c| u32::from_be_bytes(*c)).collect()
+}
+
 pub struct MeshLegConfig {
     pub coordinator_host: String,
     pub coordinator_port: u16,
@@ -514,7 +530,7 @@ impl CoordinatorServer {
                         .map(|(c, key)| CandidatePath {
                             path_id: c.path_id,
                             path_epoch: c.path_epoch,
-                            hops: c.hops.iter().copied().collect(),
+                            hops: Cow::Owned(hops_bytes(&c.hops)),
                             expires_at: c.expires_at,
                             key_path: Cow::Owned(key.to_vec()),
                         })
@@ -564,7 +580,7 @@ impl CoordinatorServer {
                             .map(|c| CandidatePath {
                                 path_id: c.path_id,
                                 path_epoch: c.path_epoch,
-                                hops: c.hops.iter().copied().collect(),
+                                hops: Cow::Owned(hops_bytes(&c.hops)),
                                 expires_at: c.expires_at,
                                 key_path: Cow::Owned(
                                     self.coordinator
@@ -814,7 +830,7 @@ impl ControlSession {
                     .map(|c| PathCandidateMsg {
                         path_id: c.path_id,
                         path_epoch: c.path_epoch,
-                        hops: c.hops.iter().copied().collect(),
+                        hops: hops_to_vec(&c.hops),
                         expires_at: c.expires_at,
                         key_path: c.key_path.to_vec(),
                     })
