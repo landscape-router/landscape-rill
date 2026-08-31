@@ -1,5 +1,5 @@
-use landscape_rill_core::control::registry::{binding_message, IdentitySigner};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use landscape_rill_core::control::registry::{binding_message, IdentitySigner};
 
 pub const BINDING_SIG_LEN: usize = 64;
 

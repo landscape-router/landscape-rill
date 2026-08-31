@@ -2,16 +2,19 @@
 
 > 本目录承载：CI 结构说明 + `check-docs.sh` 一致性检查。
 
-## 1. CI 结构（当前无 workflow，规划）
+## 1. CI 结构（workflow 按场景分文件，已落地）
 
-| 层 | 入口 | 频率 |
-|---|---|---|
-| Rust 单元测试 | `cargo test`（fmt/clippy 同批） | PR / push |
-| 文档一致性 | `ci/check-docs.sh` | PR / push |
-| docker e2e | `e2e/run_e2e.sh` | push / 手动 |
-| P0 过渡验证 | `e2e/p0_tailscale/run_p0.sh` | 手动 / 低频 |
+**约定：一个 e2e 场景目录 = 一个 workflow 文件**（与 `e2e/` 目录结构一一对应；后续 ts2021/dn42 腿 e2e 各加一个文件）。单元测试属代码侧校验，归 `check.yml`，不单独建 workflow。
 
-验收状态更新约定：**AI 经 `gh run watch` 确认 CI 结果后更新 tests/ 场景状态与证据列**（CI 持续绿即验收），人工可读、证据可复核。
+| workflow | 内容 | 触发 | required |
+|---|---|---|---|
+| `check.yml` | fmt / clippy(`-D warnings`) / `cargo test --workspace` / `ci/check-docs.sh` | PR + push | 是 |
+| `e2e-mesh.yml` | `e2e/run_e2e.sh`（coord + node-a/b，IPv4+IPv6 ping） | PR + push main + workflow_dispatch | 否 |
+| `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
+
+- 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）
+- **不含 cargo audit**（REQ-039 未合并，届时并入 check.yml）
+- e2e 不设 required（成本高，低频/手动路径）
 
 ## 2. check-docs.sh 检查规则
 

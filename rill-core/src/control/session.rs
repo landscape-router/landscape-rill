@@ -213,6 +213,9 @@ mod tests {
     fn challenge_ok_while_registered_invalid() {
         let mut s = ClientSession::new();
         register(&mut s, 7);
-        assert_eq!(s.handle(SessionEvent::ChallengeOk), Err(SessionError::InvalidTransition));
+        assert_eq!(
+            s.handle(SessionEvent::ChallengeOk),
+            Err(SessionError::InvalidTransition)
+        );
     }
 }

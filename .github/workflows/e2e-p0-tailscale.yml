@@ -1,0 +1,16 @@
+# P0 过渡验证占位：官方 Tailscale 客户端经自建 headscale 入网（e2e/p0_tailscale/run_p0.sh）
+# 低频手动验证（docs/ci/README.md §1），仅 workflow_dispatch 触发，不做普通门禁
+name: e2e-p0-tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  p0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: p0 tailscale e2e
+        run: ./e2e/p0_tailscale/run_p0.sh

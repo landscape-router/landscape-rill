@@ -53,7 +53,10 @@ impl Prefix {
                 bits[..4].copy_from_slice(&v4.octets());
                 Self { bits, len: 32 }
             }
-            IpAddr::V6(v6) => Self { bits: v6.octets(), len: 128 },
+            IpAddr::V6(v6) => Self {
+                bits: v6.octets(),
+                len: 128,
+            },
         }
     }
 
@@ -138,7 +141,9 @@ pub struct LpmTable {
 
 impl LpmTable {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn insert(&mut self, entry: RouteEntry) {
@@ -147,7 +152,8 @@ impl LpmTable {
 
     pub fn remove(&mut self, prefix: &Prefix, source: RouteSource, via: &RouteVia) -> bool {
         let before = self.entries.len();
-        self.entries.retain(|e| !(e.prefix == *prefix && e.source == source && &e.via == via));
+        self.entries
+            .retain(|e| !(e.prefix == *prefix && e.source == source && &e.via == via));
         self.entries.len() != before
     }
 
@@ -156,8 +162,11 @@ impl LpmTable {
     }
 
     pub fn matches(&self, addr: &IpAddr) -> Vec<&RouteEntry> {
-        let mut matched: Vec<&RouteEntry> =
-            self.entries.iter().filter(|e| e.prefix.matches(addr)).collect();
+        let mut matched: Vec<&RouteEntry> = self
+            .entries
+            .iter()
+            .filter(|e| e.prefix.matches(addr))
+            .collect();
         matched.sort_by_key(|e| e.prefix.len);
         matched
     }
@@ -175,7 +184,9 @@ impl Default for RouteEngine {
 
 impl RouteEngine {
     pub fn new() -> Self {
-        Self { table: LpmTable::new() }
+        Self {
+            table: LpmTable::new(),
+        }
     }
 
     pub fn table(&self) -> &LpmTable {
@@ -187,8 +198,12 @@ impl RouteEngine {
     }
 
     pub fn lookup(&self, addr: &IpAddr) -> Vec<(&RouteEntry, u8)> {
-        let mut candidates: Vec<(&RouteEntry, u8)> =
-            self.table.matches(addr).into_iter().map(|e| (e, e.source.priority())).collect();
+        let mut candidates: Vec<(&RouteEntry, u8)> = self
+            .table
+            .matches(addr)
+            .into_iter()
+            .map(|e| (e, e.source.priority()))
+            .collect();
         candidates.sort_by_key(|(e, p)| (std::cmp::Reverse(e.prefix.len), *p));
         candidates
     }
@@ -198,7 +213,10 @@ impl RouteEngine {
         addr: &IpAddr,
         reachable: &dyn Fn(&RouteEntry) -> bool,
     ) -> Option<&RouteEntry> {
-        self.lookup(addr).into_iter().map(|(entry, _)| entry).find(|entry| reachable(entry))
+        self.lookup(addr)
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .find(|entry| reachable(entry))
     }
 
     /// 移除某 mesh 节点的全部路由（吊销/netmap 消失）
@@ -332,7 +350,11 @@ mod tests {
         engine.insert(mesh_route("10.0.0.0/24", 1));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         let policy = |_: &IpAddr, _: &RouteEntry| true;
-        let best = engine.lookup(&ip).into_iter().find(|(e, _)| policy(&ip, e)).map(|(e, _)| e);
+        let best = engine
+            .lookup(&ip)
+            .into_iter()
+            .find(|(e, _)| policy(&ip, e))
+            .map(|(e, _)| e);
         assert!(best.is_some());
     }
 

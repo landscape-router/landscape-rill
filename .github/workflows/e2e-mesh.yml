@@ -1,0 +1,19 @@
+# mesh docker e2e：coord + node-a/node-b，IPv4 + IPv6 ping 断言（e2e/run_e2e.sh）
+# PR 也触发但不设 required（低频成本换 mesh 改动提前断裂发现）；场景目录约定见 docs/ci/README.md §1
+name: e2e-mesh
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  mesh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: mesh e2e
+        run: ./e2e/run_e2e.sh

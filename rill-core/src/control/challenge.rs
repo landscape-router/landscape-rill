@@ -79,7 +79,13 @@ mod tests {
         let eph_priv = rand_key(2);
         let eph_pub = pub_of(&eph_priv);
         let tag = compute_tag(&node_priv, &eph_pub, &[0xab; NONCE_LEN], 7);
-        assert!(!verify_tag(&node_pub, &eph_priv, &[0xcd; NONCE_LEN], 7, &tag));
+        assert!(!verify_tag(
+            &node_pub,
+            &eph_priv,
+            &[0xcd; NONCE_LEN],
+            7,
+            &tag
+        ));
     }
 
     #[test]

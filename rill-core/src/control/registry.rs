@@ -66,7 +66,10 @@ impl Registry {
         routes: Vec<String>,
         signer: &dyn IdentitySigner,
     ) -> Result<RegisterOutcome, RegisterError> {
-        let policy = self.auth_keys.get(auth_key).ok_or(RegisterError::InvalidAuthKey)?;
+        let policy = self
+            .auth_keys
+            .get(auth_key)
+            .ok_or(RegisterError::InvalidAuthKey)?;
         if let Some(node_id) = self.pubkeys.get(static_pubkey) {
             let node_id = *node_id;
             let entry = self.entries.get(&node_id).unwrap();
@@ -151,11 +154,13 @@ mod tests {
         let mut reg = Registry::new(0x0000_0001);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
-        let out1 =
-            reg.register("ak-1", &key(1), 0x0d, vec!["10.0.0.0/24".into()], &signer).unwrap();
+        let out1 = reg
+            .register("ak-1", &key(1), 0x0d, vec!["10.0.0.0/24".into()], &signer)
+            .unwrap();
         assert_eq!(out1, RegisterOutcome::NewNode(1));
-        let out2 =
-            reg.register("ak-1", &key(1), 0x0d, vec!["10.0.0.0/24".into()], &signer).unwrap_err();
+        let out2 = reg
+            .register("ak-1", &key(1), 0x0d, vec!["10.0.0.0/24".into()], &signer)
+            .unwrap_err();
         assert_eq!(out2, RegisterError::InvalidAuthKey);
     }
 
@@ -177,8 +182,11 @@ mod tests {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
-        reg.register("ak-r", &key(1), 0x01, vec![], &signer).unwrap();
-        let err = reg.register("ak-r", &key(1), 0x02, vec![], &signer).unwrap_err();
+        reg.register("ak-r", &key(1), 0x01, vec![], &signer)
+            .unwrap();
+        let err = reg
+            .register("ak-r", &key(1), 0x02, vec![], &signer)
+            .unwrap_err();
         assert_eq!(err, RegisterError::PubkeyMismatch);
     }
 
@@ -186,7 +194,9 @@ mod tests {
     fn invalid_auth_key_rejected() {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
-        let err = reg.register("nope", &key(1), 0, vec![], &signer).unwrap_err();
+        let err = reg
+            .register("nope", &key(1), 0, vec![], &signer)
+            .unwrap_err();
         assert_eq!(err, RegisterError::InvalidAuthKey);
     }
 

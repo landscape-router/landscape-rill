@@ -16,9 +16,7 @@ impl std::fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
-pub async fn read_frame<R: AsyncRead + Unpin>(
-    reader: &mut R,
-) -> Result<Vec<u8>, std::io::Error> {
+pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, std::io::Error> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);

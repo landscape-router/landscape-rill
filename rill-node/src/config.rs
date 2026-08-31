@@ -92,7 +92,9 @@ pub struct DnsCache {
 
 impl DnsCache {
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     pub fn resolve(&mut self, host: &str) -> Option<Vec<std::net::IpAddr>> {
@@ -140,9 +142,10 @@ impl DnsCache {
     }
 
     pub fn next_retry(&self, host: &str) -> Option<Duration> {
-        self.entries
-            .get(host)
-            .map(|e| e.next_try.saturating_duration_since(std::time::Instant::now()))
+        self.entries.get(host).map(|e| {
+            e.next_try
+                .saturating_duration_since(std::time::Instant::now())
+        })
     }
 }
 
@@ -201,7 +204,10 @@ mod tests {
     fn bad_announce_route_rejected() {
         let mut c = valid_config();
         c.announce_routes = vec!["not-a-cidr".into()];
-        assert_eq!(c.validate(), Err(ConfigError::InvalidRoute("not-a-cidr".into())));
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::InvalidRoute("not-a-cidr".into()))
+        );
         c.announce_routes = vec!["10.0.0.0/24".into()];
         assert_eq!(c.validate(), Ok(()));
         assert_eq!(Prefix::parse(&c.announce_routes[0]).unwrap().len, 24);

@@ -70,7 +70,8 @@ impl Coordinator {
         routes: Vec<String>,
     ) -> Result<RegisterData, RegisterError> {
         let outcome =
-            self.registry.register(auth_key, static_pubkey, capabilities, routes, &self.signer)?;
+            self.registry
+                .register(auth_key, static_pubkey, capabilities, routes, &self.signer)?;
         let node_id = match outcome {
             landscape_rill_core::control::registry::RegisterOutcome::NewNode(id) => {
                 self.netmap_version += 1;
@@ -195,7 +196,9 @@ mod tests {
     }
 
     fn register_node(c: &mut Coordinator, seed: u8) -> u32 {
-        c.register("ak-1", &pubkey(seed), 0x01, vec![]).unwrap().node_id
+        c.register("ak-1", &pubkey(seed), 0x01, vec![])
+            .unwrap()
+            .node_id
     }
 
     #[test]

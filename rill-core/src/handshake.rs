@@ -141,7 +141,10 @@ impl HandshakeInitiator {
             return Err(HandshakeError::WrongStep);
         }
         let mut body = [0u8; MSG1_BODY_LEN + crate::frame::TAG_LEN];
-        let n = self.state.write_message(&[], &mut body).map_err(HandshakeError::Noise)?;
+        let n = self
+            .state
+            .write_message(&[], &mut body)
+            .map_err(HandshakeError::Noise)?;
         self.sent_msg1 = true;
         let mut out = Vec::with_capacity(MSG1_PAYLOAD_LEN);
         out.extend_from_slice(&self.target_node_id.to_be_bytes());
@@ -157,9 +160,14 @@ impl HandshakeInitiator {
         if payload.len() != MSG2_PAYLOAD_LEN {
             return Err(HandshakeError::MalformedPayload);
         }
-        self.state.read_message(payload, &mut []).map_err(HandshakeError::Noise)?;
+        self.state
+            .read_message(payload, &mut [])
+            .map_err(HandshakeError::Noise)?;
         let mut body = [0u8; MSG3_BODY_LEN + crate::frame::TAG_LEN];
-        let n = self.state.write_message(&[], &mut body).map_err(HandshakeError::Noise)?;
+        let n = self
+            .state
+            .write_message(&[], &mut body)
+            .map_err(HandshakeError::Noise)?;
         self.sent_msg3 = true;
         let mut out = Vec::with_capacity(MSG3_PAYLOAD_LEN);
         out.extend_from_slice(&self.identity_binding);
@@ -233,7 +241,9 @@ impl HandshakeResponder {
         if target != self.self_node_id {
             return Err(HandshakeError::WrongTarget);
         }
-        self.state.read_message(&payload[NODE_ID_LEN..], &mut []).map_err(HandshakeError::Noise)?;
+        self.state
+            .read_message(&payload[NODE_ID_LEN..], &mut [])
+            .map_err(HandshakeError::Noise)?;
         self.read_msg1 = true;
         Ok(())
     }
@@ -244,7 +254,10 @@ impl HandshakeResponder {
             return Err(HandshakeError::WrongStep);
         }
         let mut body = [0u8; MSG2_BODY_LEN + crate::frame::TAG_LEN];
-        let n = self.state.write_message(&[], &mut body).map_err(HandshakeError::Noise)?;
+        let n = self
+            .state
+            .write_message(&[], &mut body)
+            .map_err(HandshakeError::Noise)?;
         self.sent_msg2 = true;
         Ok(body[..n].to_vec())
     }
@@ -268,8 +281,11 @@ impl HandshakeResponder {
             return Err(HandshakeError::MalformedPayload);
         }
         let binding = &payload[..BINDING_LEN];
-        let salt =
-            u32::from_be_bytes(payload[BINDING_LEN..BINDING_LEN + SALT_LEN].try_into().unwrap());
+        let salt = u32::from_be_bytes(
+            payload[BINDING_LEN..BINDING_LEN + SALT_LEN]
+                .try_into()
+                .unwrap(),
+        );
         self.state
             .read_message(&payload[BINDING_LEN + SALT_LEN..], &mut [])
             .map_err(HandshakeError::Noise)?;
@@ -292,7 +308,9 @@ impl HandshakeResponder {
 
 fn rekey_chain(key: &[u8; SESSION_KEY_LEN]) -> [u8; SESSION_KEY_LEN] {
     let mut out = [0u8; SESSION_KEY_LEN];
-    Hkdf::<Sha256>::new(None, key).expand(REKEY_INFO, &mut out).expect("hkdf expand");
+    Hkdf::<Sha256>::new(None, key)
+        .expand(REKEY_INFO, &mut out)
+        .expect("hkdf expand");
     out
 }
 
@@ -473,8 +491,14 @@ mod tests {
             seq,
             ..Default::default()
         };
-        build_frame(&header, &derive_key_dst(&KEY_DST, 2), &keys.tx_key, keys.salt, payload)
-            .unwrap()
+        build_frame(
+            &header,
+            &derive_key_dst(&KEY_DST, 2),
+            &keys.tx_key,
+            keys.salt,
+            payload,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -500,7 +524,10 @@ mod tests {
         .unwrap();
         let mut responder = HandshakeResponder::new(&keys(2), NETWORK_ID, VERSION, 2).unwrap();
         let msg1 = initiator.write_msg1().unwrap();
-        assert_eq!(responder.read_msg1(&msg1).unwrap_err(), HandshakeError::WrongTarget);
+        assert_eq!(
+            responder.read_msg1(&msg1).unwrap_err(),
+            HandshakeError::WrongTarget
+        );
     }
 
     #[test]
@@ -530,7 +557,10 @@ mod tests {
     #[test]
     fn malformed_msg1_rejected() {
         let mut responder = HandshakeResponder::new(&keys(2), NETWORK_ID, VERSION, 2).unwrap();
-        assert_eq!(responder.read_msg1(&[0u8; 4]).unwrap_err(), HandshakeError::MalformedPayload);
+        assert_eq!(
+            responder.read_msg1(&[0u8; 4]).unwrap_err(),
+            HandshakeError::MalformedPayload
+        );
     }
 
     #[test]
@@ -596,7 +626,10 @@ mod tests {
         responder.read_msg1(&msg1).unwrap();
         let msg2 = responder.write_msg2().unwrap();
         initiator.read_msg2(&msg2).unwrap();
-        assert_eq!(initiator.finish().unwrap_err(), HandshakeError::PeerStaticMismatch);
+        assert_eq!(
+            initiator.finish().unwrap_err(),
+            HandshakeError::PeerStaticMismatch
+        );
     }
 
     #[test]
@@ -637,7 +670,10 @@ mod tests {
         .unwrap();
         assert_eq!(initiator.finish().unwrap_err(), HandshakeError::WrongStep);
         assert_eq!(initiator.write_msg1().unwrap().len(), MSG1_PAYLOAD_LEN);
-        assert_eq!(initiator.write_msg1().unwrap_err(), HandshakeError::WrongStep);
+        assert_eq!(
+            initiator.write_msg1().unwrap_err(),
+            HandshakeError::WrongStep
+        );
     }
 
     #[test]
@@ -673,12 +709,16 @@ mod tests {
         let now = Instant::now();
 
         let frame = make_session_frame(init_session.keys(), 0, b"hello");
-        let (h, payload) = resp_session.open(&frame, &derive_key_dst(&KEY_DST, 2), now).unwrap();
+        let (h, payload) = resp_session
+            .open(&frame, &derive_key_dst(&KEY_DST, 2), now)
+            .unwrap();
         assert_eq!(h.from_node_id, 1);
         assert_eq!(payload, b"hello");
 
         assert_eq!(
-            resp_session.open(&frame, &derive_key_dst(&KEY_DST, 2), now).unwrap_err(),
+            resp_session
+                .open(&frame, &derive_key_dst(&KEY_DST, 2), now)
+                .unwrap_err(),
             OpenError::Replay
         );
     }
@@ -694,7 +734,9 @@ mod tests {
         let n = frame.len();
         frame[n - 1] ^= 0xff;
         assert_eq!(
-            resp_session.open(&frame, &derive_key_dst(&KEY_DST, 2), now).unwrap_err(),
+            resp_session
+                .open(&frame, &derive_key_dst(&KEY_DST, 2), now)
+                .unwrap_err(),
             OpenError::Aead
         );
     }
@@ -708,7 +750,10 @@ mod tests {
 
         let before = make_session_frame(init_session.keys(), 0, b"before");
         assert_eq!(
-            resp_session.open(&before, &derive_key_dst(&KEY_DST, 2), t0).unwrap().1,
+            resp_session
+                .open(&before, &derive_key_dst(&KEY_DST, 2), t0)
+                .unwrap()
+                .1,
             b"before"
         );
 
@@ -718,7 +763,11 @@ mod tests {
         let after = make_session_frame(init_session.keys(), 0, b"after");
         assert_eq!(
             resp_session
-                .open(&after, &derive_key_dst(&KEY_DST, 2), t0 + Duration::from_secs(1))
+                .open(
+                    &after,
+                    &derive_key_dst(&KEY_DST, 2),
+                    t0 + Duration::from_secs(1)
+                )
                 .unwrap()
                 .1,
             b"after"
@@ -727,7 +776,11 @@ mod tests {
         let stray = make_session_frame(&init_keys, 5, b"stray");
         assert_eq!(
             resp_session
-                .open(&stray, &derive_key_dst(&KEY_DST, 2), t0 + Duration::from_secs(2))
+                .open(
+                    &stray,
+                    &derive_key_dst(&KEY_DST, 2),
+                    t0 + Duration::from_secs(2)
+                )
                 .unwrap()
                 .1,
             b"stray"
@@ -735,7 +788,11 @@ mod tests {
 
         assert_eq!(
             resp_session
-                .open(&stray, &derive_key_dst(&KEY_DST, 2), t0 + Duration::from_secs(6))
+                .open(
+                    &stray,
+                    &derive_key_dst(&KEY_DST, 2),
+                    t0 + Duration::from_secs(6)
+                )
                 .unwrap_err(),
             OpenError::Aead
         );
@@ -754,7 +811,10 @@ mod tests {
         for i in 0u8..3 {
             let frame = make_session_frame(init_session.keys(), i as u32, &[i]);
             assert_eq!(
-                resp_session.open(&frame, &derive_key_dst(&KEY_DST, 2), t0).unwrap().1,
+                resp_session
+                    .open(&frame, &derive_key_dst(&KEY_DST, 2), t0)
+                    .unwrap()
+                    .1,
                 vec![i]
             );
         }

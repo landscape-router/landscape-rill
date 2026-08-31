@@ -275,7 +275,11 @@ impl MeshData {
             return Ok(None);
         }
         let ctx = self.ctx.as_ref().ok_or(SendError::NoContext)?;
-        let peer_static = self.peer_statics.get(&peer).copied().ok_or(SendError::NoPeerBinding)?;
+        let peer_static = self
+            .peer_statics
+            .get(&peer)
+            .copied()
+            .ok_or(SendError::NoPeerBinding)?;
         let mut initiator = HandshakeInitiator::new(
             &ctx.local_static,
             ctx.network_id,
@@ -317,8 +321,14 @@ impl MeshData {
             seq,
             ..Default::default()
         };
-        build_frame(&header, key_dst, &session.keys().tx_key, session.keys().salt, payload)
-            .map_err(|_| SendError::Aead)
+        build_frame(
+            &header,
+            key_dst,
+            &session.keys().tx_key,
+            session.keys().salt,
+            payload,
+        )
+        .map_err(|_| SendError::Aead)
     }
 
     fn build_handshake_frame(&self, to: u32, payload: &[u8]) -> Result<Vec<u8>, SendError> {
@@ -366,7 +376,11 @@ impl MeshData {
     }
 
     fn endpoint_ids(&self) -> Vec<u32> {
-        self.endpoint_table.keys().copied().filter(|id| *id != self.self_node_id).collect()
+        self.endpoint_table
+            .keys()
+            .copied()
+            .filter(|id| *id != self.self_node_id)
+            .collect()
     }
 
     pub async fn send_to_node(&self, to_node_id: u32, frame: &[u8]) -> std::io::Result<bool> {
@@ -403,17 +417,23 @@ impl MeshData {
 
     async fn dispatch_delivered(&mut self, from: u32, frame: &[u8]) -> IncomingEvent {
         let Some(header) = MeshFrameHeader::decode(frame).ok() else {
-            return IncomingEvent::Dropped { reason: DropReason::Short };
+            return IncomingEvent::Dropped {
+                reason: DropReason::Short,
+            };
         };
         let Some(payload) = frame_payload(frame) else {
-            return IncomingEvent::Dropped { reason: DropReason::Short };
+            return IncomingEvent::Dropped {
+                reason: DropReason::Short,
+            };
         };
         match header.packet_type {
             packet_type::HANDSHAKE => self.handle_handshake(from, payload).await,
             packet_type::UNICAST => self.handle_session_frame(from, frame, false),
             packet_type::HEARTBEAT => self.handle_session_frame(from, frame, true),
             packet_type::BROADCAST => self.handle_broadcast_frame(from, frame),
-            _ => IncomingEvent::Dropped { reason: DropReason::UnsupportedType },
+            _ => IncomingEvent::Dropped {
+                reason: DropReason::UnsupportedType,
+            },
         }
     }
 
@@ -421,21 +441,29 @@ impl MeshData {
     /// 按源节点的独立重放窗口拦截重放。
     fn handle_broadcast_frame(&mut self, from: u32, frame: &[u8]) -> IncomingEvent {
         let Some(bkey) = self.broadcast_key else {
-            return IncomingEvent::Dropped { reason: DropReason::NoKeyDst };
+            return IncomingEvent::Dropped {
+                reason: DropReason::NoKeyDst,
+            };
         };
         let Some(header) = MeshFrameHeader::decode(frame).ok() else {
-            return IncomingEvent::Dropped { reason: DropReason::Short };
+            return IncomingEvent::Dropped {
+                reason: DropReason::Short,
+            };
         };
         let window = self.broadcast_replay.entry(from).or_default();
         if !window.check_and_mark(header.seq) {
-            return IncomingEvent::Dropped { reason: DropReason::Replay };
+            return IncomingEvent::Dropped {
+                reason: DropReason::Replay,
+            };
         }
         match open_frame(frame, &bkey, &bkey, 0) {
             Ok((_, payload)) => IncomingEvent::Broadcast { from, payload },
-            Err(landscape_rill_core::frame::OpenError::RouteMac) => {
-                IncomingEvent::Dropped { reason: DropReason::BadRouteMac }
-            }
-            Err(_) => IncomingEvent::Dropped { reason: DropReason::Aead },
+            Err(landscape_rill_core::frame::OpenError::RouteMac) => IncomingEvent::Dropped {
+                reason: DropReason::BadRouteMac,
+            },
+            Err(_) => IncomingEvent::Dropped {
+                reason: DropReason::Aead,
+            },
         }
     }
 
@@ -455,7 +483,10 @@ impl MeshData {
 
     async fn handle_msg1(&mut self, from: u32, payload: &[u8]) -> IncomingEvent {
         let Some(ctx) = self.ctx.clone() else {
-            return IncomingEvent::Rejected { peer: from, reason: HandshakeError::WrongStep };
+            return IncomingEvent::Rejected {
+                peer: from,
+                reason: HandshakeError::WrongStep,
+            };
         };
         let mut responder = match HandshakeResponder::new(
             &ctx.local_static,
@@ -464,53 +495,93 @@ impl MeshData {
             self.self_node_id,
         ) {
             Ok(r) => r,
-            Err(e) => return IncomingEvent::Rejected { peer: from, reason: e },
+            Err(e) => {
+                return IncomingEvent::Rejected {
+                    peer: from,
+                    reason: e,
+                }
+            }
         };
         if let Err(e) = responder.read_msg1(payload) {
-            return IncomingEvent::Rejected { peer: from, reason: e };
+            return IncomingEvent::Rejected {
+                peer: from,
+                reason: e,
+            };
         }
         let msg2 = match responder.write_msg2() {
             Ok(m) => m,
-            Err(e) => return IncomingEvent::Rejected { peer: from, reason: e },
+            Err(e) => {
+                return IncomingEvent::Rejected {
+                    peer: from,
+                    reason: e,
+                }
+            }
         };
         self.responders.insert(from, responder);
         match self.send_response(from, &msg2).await {
             true => IncomingEvent::Responded { peer: from },
-            false => IncomingEvent::Dropped { reason: DropReason::NoEndpoint },
+            false => IncomingEvent::Dropped {
+                reason: DropReason::NoEndpoint,
+            },
         }
     }
 
     async fn handle_msg2(&mut self, from: u32, payload: &[u8]) -> IncomingEvent {
         let Some(mut initiator) = self.initiators.remove(&from) else {
-            return IncomingEvent::Rejected { peer: from, reason: HandshakeError::WrongStep };
+            return IncomingEvent::Rejected {
+                peer: from,
+                reason: HandshakeError::WrongStep,
+            };
         };
         let msg3 = match initiator.read_msg2(payload) {
             Ok(m) => m,
-            Err(e) => return IncomingEvent::Rejected { peer: from, reason: e },
+            Err(e) => {
+                return IncomingEvent::Rejected {
+                    peer: from,
+                    reason: e,
+                }
+            }
         };
         let keys = match initiator.finish() {
             Ok(k) => k,
-            Err(e) => return IncomingEvent::Rejected { peer: from, reason: e },
+            Err(e) => {
+                return IncomingEvent::Rejected {
+                    peer: from,
+                    reason: e,
+                }
+            }
         };
         let frame = match self.build_handshake_frame(from, &msg3) {
             Ok(f) => f,
-            Err(_) => return IncomingEvent::Dropped { reason: DropReason::NoKeyDst },
+            Err(_) => {
+                return IncomingEvent::Dropped {
+                    reason: DropReason::NoKeyDst,
+                }
+            }
         };
         match self.send_to_node(from, &frame).await {
             Ok(true) => {
                 self.sessions.insert(from, Session::new(from, keys));
                 IncomingEvent::Established { peer: from }
             }
-            _ => IncomingEvent::Dropped { reason: DropReason::NoEndpoint },
+            _ => IncomingEvent::Dropped {
+                reason: DropReason::NoEndpoint,
+            },
         }
     }
 
     async fn handle_msg3(&mut self, from: u32, payload: &[u8]) -> IncomingEvent {
         let Some(verifier) = self.binding_verifier.as_ref() else {
-            return IncomingEvent::Rejected { peer: from, reason: HandshakeError::BadBinding };
+            return IncomingEvent::Rejected {
+                peer: from,
+                reason: HandshakeError::BadBinding,
+            };
         };
         let Some(mut responder) = self.responders.remove(&from) else {
-            return IncomingEvent::Rejected { peer: from, reason: HandshakeError::WrongStep };
+            return IncomingEvent::Rejected {
+                peer: from,
+                reason: HandshakeError::WrongStep,
+            };
         };
         let result = responder.read_msg3(payload, from, |node_id, static_pubkey, binding| {
             verifier(node_id, static_pubkey, binding)
@@ -520,7 +591,10 @@ impl MeshData {
                 self.sessions.insert(from, Session::new(from, keys));
                 IncomingEvent::Established { peer: from }
             }
-            Err(e) => IncomingEvent::Rejected { peer: from, reason: e },
+            Err(e) => IncomingEvent::Rejected {
+                peer: from,
+                reason: e,
+            },
         }
     }
 
@@ -535,15 +609,21 @@ impl MeshData {
     /// AEAD 解密收尾：已建会话的 UNICAST/HEARTBEAT 帧统一走这里
     fn handle_session_frame(&mut self, from: u32, frame: &[u8], heartbeat: bool) -> IncomingEvent {
         let Some(session) = self.sessions.get_mut(&from) else {
-            return IncomingEvent::Dropped { reason: DropReason::NoSession };
+            return IncomingEvent::Dropped {
+                reason: DropReason::NoSession,
+            };
         };
         let Some(key_dst) = self.key_dst_table.get(&self.self_node_id).copied() else {
-            return IncomingEvent::Dropped { reason: DropReason::NoKeyDst };
+            return IncomingEvent::Dropped {
+                reason: DropReason::NoKeyDst,
+            };
         };
         match session.open(frame, &key_dst, Instant::now()) {
             Ok((_, payload)) => {
                 if heartbeat && !payload.is_empty() {
-                    return IncomingEvent::Dropped { reason: DropReason::Aead };
+                    return IncomingEvent::Dropped {
+                        reason: DropReason::Aead,
+                    };
                 }
                 if heartbeat {
                     IncomingEvent::Heartbeat { from }
@@ -551,52 +631,83 @@ impl MeshData {
                     IncomingEvent::Data { from, payload }
                 }
             }
-            Err(landscape_rill_core::handshake::OpenError::Replay) => {
-                IncomingEvent::Dropped { reason: DropReason::Replay }
-            }
-            Err(landscape_rill_core::handshake::OpenError::RouteMac) => {
-                IncomingEvent::Dropped { reason: DropReason::BadRouteMac }
-            }
-            Err(_) => IncomingEvent::Dropped { reason: DropReason::Aead },
+            Err(landscape_rill_core::handshake::OpenError::Replay) => IncomingEvent::Dropped {
+                reason: DropReason::Replay,
+            },
+            Err(landscape_rill_core::handshake::OpenError::RouteMac) => IncomingEvent::Dropped {
+                reason: DropReason::BadRouteMac,
+            },
+            Err(_) => IncomingEvent::Dropped {
+                reason: DropReason::Aead,
+            },
         }
     }
 
     pub async fn relay(&mut self, frame: &[u8]) -> RelayOutcome {
         if frame.len() < HEADER_LEN {
-            return RelayOutcome::Dropped { reason: DropReason::Short };
+            return RelayOutcome::Dropped {
+                reason: DropReason::Short,
+            };
         }
         let header = match MeshFrameHeader::decode(frame) {
             Ok(h) => h,
-            Err(_) => return RelayOutcome::Dropped { reason: DropReason::Short },
+            Err(_) => {
+                return RelayOutcome::Dropped {
+                    reason: DropReason::Short,
+                }
+            }
         };
         if header.version != VERSION {
-            return RelayOutcome::Dropped { reason: DropReason::BadVersion };
+            return RelayOutcome::Dropped {
+                reason: DropReason::BadVersion,
+            };
         }
         if header.to_node_id == BROADCAST_NODE_ID {
             return self.relay_broadcast(&header, frame).await;
         }
         let key_dst = match self.key_dst_table.get(&header.to_node_id) {
             Some(k) => *k,
-            None => return RelayOutcome::Dropped { reason: DropReason::NoKeyDst },
+            None => {
+                return RelayOutcome::Dropped {
+                    reason: DropReason::NoKeyDst,
+                }
+            }
         };
-        if landscape_rill_core::crypto::route_mac(&key_dst, &header.auth_input()) != header.route_mac {
-            return RelayOutcome::Dropped { reason: DropReason::BadRouteMac };
+        if landscape_rill_core::crypto::route_mac(&key_dst, &header.auth_input())
+            != header.route_mac
+        {
+            return RelayOutcome::Dropped {
+                reason: DropReason::BadRouteMac,
+            };
         }
         if header.to_node_id == self.self_node_id {
-            return RelayOutcome::Delivered { frame: frame.to_vec(), from: header.from_node_id };
+            return RelayOutcome::Delivered {
+                frame: frame.to_vec(),
+                from: header.from_node_id,
+            };
         }
         if header.ttl == 0 {
-            return RelayOutcome::Dropped { reason: DropReason::TtlExpired };
+            return RelayOutcome::Dropped {
+                reason: DropReason::TtlExpired,
+            };
         }
         let endpoint = match self.endpoint_table.get(&header.to_node_id) {
             Some(e) => *e,
-            None => return RelayOutcome::Dropped { reason: DropReason::NoEndpoint },
+            None => {
+                return RelayOutcome::Dropped {
+                    reason: DropReason::NoEndpoint,
+                }
+            }
         };
         let mut out = frame.to_vec();
         out[3] -= 1;
         match self.socket.send_to(&out, endpoint).await {
-            Ok(_) => RelayOutcome::Forwarded { to: header.to_node_id },
-            Err(_) => RelayOutcome::Dropped { reason: DropReason::NoEndpoint },
+            Ok(_) => RelayOutcome::Forwarded {
+                to: header.to_node_id,
+            },
+            Err(_) => RelayOutcome::Dropped {
+                reason: DropReason::NoEndpoint,
+            },
         }
     }
 
@@ -605,25 +716,41 @@ impl MeshData {
     /// (from, seq) 去重（30s）→ ttl>0 → 自交付 + ttl-1 泛洪（除自己与源，出口令牌桶限速）。
     async fn relay_broadcast(&mut self, header: &MeshFrameHeader, frame: &[u8]) -> RelayOutcome {
         if header.packet_type != packet_type::BROADCAST {
-            return RelayOutcome::Dropped { reason: DropReason::UnsupportedType };
+            return RelayOutcome::Dropped {
+                reason: DropReason::UnsupportedType,
+            };
         }
         let Some(bkey) = self.broadcast_key else {
-            return RelayOutcome::Dropped { reason: DropReason::NoKeyDst };
+            return RelayOutcome::Dropped {
+                reason: DropReason::NoKeyDst,
+            };
         };
         if landscape_rill_core::crypto::route_mac(&bkey, &header.auth_input()) != header.route_mac {
-            return RelayOutcome::Dropped { reason: DropReason::BadRouteMac };
+            return RelayOutcome::Dropped {
+                reason: DropReason::BadRouteMac,
+            };
         }
         if header.from_node_id == self.self_node_id {
-            return RelayOutcome::Dropped { reason: DropReason::Duplicate };
+            return RelayOutcome::Dropped {
+                reason: DropReason::Duplicate,
+            };
         }
         self.prune_flood_seen();
-        if self.flood_seen.contains_key(&(header.from_node_id, header.seq)) {
-            return RelayOutcome::Dropped { reason: DropReason::Duplicate };
+        if self
+            .flood_seen
+            .contains_key(&(header.from_node_id, header.seq))
+        {
+            return RelayOutcome::Dropped {
+                reason: DropReason::Duplicate,
+            };
         }
         if header.ttl == 0 {
-            return RelayOutcome::Dropped { reason: DropReason::TtlExpired };
+            return RelayOutcome::Dropped {
+                reason: DropReason::TtlExpired,
+            };
         }
-        self.flood_seen.insert((header.from_node_id, header.seq), Instant::now());
+        self.flood_seen
+            .insert((header.from_node_id, header.seq), Instant::now());
         let mut forwarded = Vec::new();
         if self.flood_bucket.take() {
             let mut out = frame.to_vec();
@@ -700,8 +827,12 @@ mod tests {
     }
 
     async fn setup_pair() -> (MeshData, MeshData) {
-        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1).await.unwrap();
-        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         let a_addr = a.local_addr().unwrap();
         let b_addr = b.local_addr().unwrap();
         for id in [1u32, 2] {
@@ -724,23 +855,38 @@ mod tests {
         let (mut a, mut b) = setup_pair().await;
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
-        assert_eq!(a.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 2 });
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
         assert!(a.has_session(2) && b.has_session(1));
 
         let frame = a.build_data_frame(2, b"hello mesh").unwrap();
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Data { from: 1, payload: b"hello mesh".to_vec() }
+            IncomingEvent::Data {
+                from: 1,
+                payload: b"hello mesh".to_vec()
+            }
         );
 
         let frame = b.build_data_frame(1, b"reply").unwrap();
         b.send_to_node(1, &frame).await.unwrap();
         assert_eq!(
             a.handle_incoming().await.unwrap(),
-            IncomingEvent::Data { from: 2, payload: b"reply".to_vec() }
+            IncomingEvent::Data {
+                from: 2,
+                payload: b"reply".to_vec()
+            }
         );
     }
 
@@ -749,9 +895,18 @@ mod tests {
         let (mut a, mut b) = setup_pair().await;
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
-        assert_eq!(a.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 2 });
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
         assert_eq!(a.initiate_handshake(2).unwrap(), None);
     }
 
@@ -771,7 +926,10 @@ mod tests {
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Rejected { peer: 1, reason: HandshakeError::WrongTarget }
+            IncomingEvent::Rejected {
+                peer: 1,
+                reason: HandshakeError::WrongTarget
+            }
         );
     }
 
@@ -781,11 +939,20 @@ mod tests {
         b.set_binding_verifier(|_, _, _| false);
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
-        assert_eq!(a.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 2 });
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Rejected { peer: 1, reason: HandshakeError::BadBinding }
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Rejected {
+                peer: 1,
+                reason: HandshakeError::BadBinding
+            }
         );
         assert!(a.has_session(2));
         assert!(!b.has_session(1));
@@ -800,9 +967,15 @@ mod tests {
         b.set_handshake_context(ctx_b);
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
         match a.handle_incoming().await.unwrap() {
-            IncomingEvent::Rejected { peer: 2, reason: HandshakeError::Noise(_) } => {}
+            IncomingEvent::Rejected {
+                peer: 2,
+                reason: HandshakeError::Noise(_),
+            } => {}
             other => panic!("expected Noise rejection, got {:?}", other),
         }
         assert!(!a.has_session(2));
@@ -822,7 +995,10 @@ mod tests {
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Rejected { peer: 1, reason: HandshakeError::WrongStep }
+            IncomingEvent::Rejected {
+                peer: 1,
+                reason: HandshakeError::WrongStep
+            }
         );
     }
 
@@ -831,20 +1007,40 @@ mod tests {
         let (mut a, mut b) = setup_pair().await;
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
-        assert_eq!(a.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 2 });
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
 
         let hb = a.build_heartbeat_frame(2).unwrap();
         a.send_to_node(2, &hb).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Heartbeat { from: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Heartbeat { from: 1 }
+        );
     }
 
     #[tokio::test]
     async fn heartbeat_before_session_rejected() {
-        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1).await.unwrap();
-        assert_eq!(a.build_heartbeat_frame(2).unwrap_err(), SendError::NoSession);
-        assert_eq!(a.build_data_frame(2, b"x").unwrap_err(), SendError::NoSession);
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            a.build_heartbeat_frame(2).unwrap_err(),
+            SendError::NoSession
+        );
+        assert_eq!(
+            a.build_data_frame(2, b"x").unwrap_err(),
+            SendError::NoSession
+        );
     }
 
     #[tokio::test]
@@ -852,9 +1048,18 @@ mod tests {
         let (mut a, mut b) = setup_pair().await;
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
-        assert_eq!(a.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 2 });
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
 
         let mut frame = a.build_data_frame(2, b"payload").unwrap();
         let n = frame.len();
@@ -862,7 +1067,9 @@ mod tests {
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Dropped { reason: DropReason::Aead }
+            IncomingEvent::Dropped {
+                reason: DropReason::Aead
+            }
         );
     }
 
@@ -871,27 +1078,45 @@ mod tests {
         let (mut a, mut b) = setup_pair().await;
         let msg1 = a.initiate_handshake(2).unwrap().unwrap();
         a.send_to_node(2, &msg1).await.unwrap();
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Responded { peer: 1 });
-        assert_eq!(a.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 2 });
-        assert_eq!(b.handle_incoming().await.unwrap(), IncomingEvent::Established { peer: 1 });
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Responded { peer: 1 }
+        );
+        assert_eq!(
+            a.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 2 }
+        );
+        assert_eq!(
+            b.handle_incoming().await.unwrap(),
+            IncomingEvent::Established { peer: 1 }
+        );
 
         let frame = a.build_data_frame(2, b"payload").unwrap();
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Data { from: 1, payload: b"payload".to_vec() }
+            IncomingEvent::Data {
+                from: 1,
+                payload: b"payload".to_vec()
+            }
         );
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Dropped { reason: DropReason::Replay }
+            IncomingEvent::Dropped {
+                reason: DropReason::Replay
+            }
         );
     }
 
     #[tokio::test]
     async fn data_without_session_dropped() {
-        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1).await.unwrap();
-        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         let b_addr = b.local_addr().unwrap();
         a.set_key_dst(2, node_key(2));
         b.set_key_dst(2, node_key(2));
@@ -901,14 +1126,20 @@ mod tests {
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Dropped { reason: DropReason::NoSession }
+            IncomingEvent::Dropped {
+                reason: DropReason::NoSession
+            }
         );
     }
 
     #[tokio::test]
     async fn unsupported_type_dropped() {
-        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1).await.unwrap();
-        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         let b_addr = b.local_addr().unwrap();
         a.set_key_dst(2, node_key(2));
         b.set_key_dst(2, node_key(2));
@@ -929,14 +1160,20 @@ mod tests {
         a.send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             b.handle_incoming().await.unwrap(),
-            IncomingEvent::Dropped { reason: DropReason::UnsupportedType }
+            IncomingEvent::Dropped {
+                reason: DropReason::UnsupportedType
+            }
         );
     }
 
     #[tokio::test]
     async fn forward_through_relay() {
-        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
-        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3).await.unwrap();
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+            .await
+            .unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let b_addr = b.local_addr().unwrap();
 
@@ -962,50 +1199,68 @@ mod tests {
 
     #[tokio::test]
     async fn tampered_frame_dropped() {
-        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         relay.set_key_dst(3, node_key(3));
         let mut frame = frame_from(1, 3, b"payload", 64, 1);
         frame[8] ^= 0x01;
         assert_eq!(
             relay.relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::BadRouteMac }
+            RelayOutcome::Dropped {
+                reason: DropReason::BadRouteMac
+            }
         );
     }
 
     #[tokio::test]
     async fn ttl_expired_dropped() {
-        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         relay.set_key_dst(3, node_key(3));
         let frame = frame_from(1, 3, b"payload", 0, 1);
         assert_eq!(
             relay.relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::TtlExpired }
+            RelayOutcome::Dropped {
+                reason: DropReason::TtlExpired
+            }
         );
     }
 
     #[tokio::test]
     async fn no_endpoint_dropped() {
-        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         relay.set_key_dst(3, node_key(3));
         let frame = frame_from(1, 3, b"payload", 64, 1);
         assert_eq!(
             relay.relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::NoEndpoint }
+            RelayOutcome::Dropped {
+                reason: DropReason::NoEndpoint
+            }
         );
     }
 
     #[tokio::test]
     async fn short_frame_dropped() {
-        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         assert_eq!(
             relay.relay(&[0u8; 10]).await,
-            RelayOutcome::Dropped { reason: DropReason::Short }
+            RelayOutcome::Dropped {
+                reason: DropReason::Short
+            }
         );
     }
 
     #[tokio::test]
     async fn delivered_to_self() {
-        let mut node = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3).await.unwrap();
+        let mut node = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+            .await
+            .unwrap();
         node.set_key_dst(3, node_key(3));
         let frame = frame_from(1, 3, b"payload", 64, 1);
         match node.relay(&frame).await {
@@ -1016,19 +1271,25 @@ mod tests {
 
     #[tokio::test]
     async fn bad_version_dropped() {
-        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         relay.set_key_dst(3, node_key(3));
         let mut frame = frame_from(1, 3, b"payload", 64, 1);
         frame[0] = 0x02;
         assert_eq!(
             relay.relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::BadVersion }
+            RelayOutcome::Dropped {
+                reason: DropReason::BadVersion
+            }
         );
     }
 
     #[tokio::test]
     async fn send_to_unknown_node_returns_false() {
-        let a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1).await.unwrap();
+        let a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
         let frame = frame_from(1, 9, b"payload", 64, 1);
         assert!(!a.send_to_node(9, &frame).await.unwrap());
     }
@@ -1040,10 +1301,16 @@ mod tests {
     async fn broadcast_setup(ids: &[u32]) -> Vec<MeshData> {
         let mut nodes = Vec::new();
         for id in ids {
-            nodes.push(MeshData::bind("127.0.0.1:0".parse().unwrap(), *id).await.unwrap());
+            nodes.push(
+                MeshData::bind("127.0.0.1:0".parse().unwrap(), *id)
+                    .await
+                    .unwrap(),
+            );
         }
-        let addrs: Vec<(u32, SocketAddr)> =
-            nodes.iter().map(|n| (n.self_node_id, n.local_addr().unwrap())).collect();
+        let addrs: Vec<(u32, SocketAddr)> = nodes
+            .iter()
+            .map(|n| (n.self_node_id, n.local_addr().unwrap()))
+            .collect();
         for node in nodes.iter_mut() {
             node.set_broadcast_key(broadcast_key());
             for (peer, addr) in &addrs {
@@ -1064,14 +1331,22 @@ mod tests {
         nodes[0].send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             nodes[1].handle_incoming().await.unwrap(),
-            IncomingEvent::Broadcast { from: 1, payload: payload.to_vec() }
+            IncomingEvent::Broadcast {
+                from: 1,
+                payload: payload.to_vec()
+            }
         );
     }
 
     #[tokio::test]
     async fn broadcast_before_key_dropped() {
-        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1).await.unwrap();
-        assert_eq!(a.build_broadcast_frame(b"x").unwrap_err(), SendError::NoKeyDst);
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            a.build_broadcast_frame(b"x").unwrap_err(),
+            SendError::NoKeyDst
+        );
     }
 
     #[tokio::test]
@@ -1085,7 +1360,9 @@ mod tests {
         ));
         assert_eq!(
             nodes[1].handle_broadcast_frame(1, &frame),
-            IncomingEvent::Dropped { reason: DropReason::Replay }
+            IncomingEvent::Dropped {
+                reason: DropReason::Replay
+            }
         );
     }
 
@@ -1096,7 +1373,9 @@ mod tests {
         nodes[0].send_to_node(2, &frame).await.unwrap();
         let outcome = nodes[1].relay(&frame).await;
         match outcome {
-            RelayOutcome::Flooded { from, forwarded, .. } => {
+            RelayOutcome::Flooded {
+                from, forwarded, ..
+            } => {
                 assert_eq!(from, 1);
                 assert_eq!(forwarded, vec![3]);
             }
@@ -1104,7 +1383,10 @@ mod tests {
         }
         assert_eq!(
             nodes[2].handle_incoming().await.unwrap(),
-            IncomingEvent::Broadcast { from: 1, payload: b"hello all".to_vec() }
+            IncomingEvent::Broadcast {
+                from: 1,
+                payload: b"hello all".to_vec()
+            }
         );
     }
 
@@ -1125,11 +1407,16 @@ mod tests {
         let mut nodes = broadcast_setup(&[1, 2]).await;
         let frame = nodes[0].build_broadcast_frame(b"hello").unwrap();
         nodes[0].send_to_node(2, &frame).await.unwrap();
-        assert!(matches!(nodes[1].relay(&frame).await, RelayOutcome::Flooded { .. }));
+        assert!(matches!(
+            nodes[1].relay(&frame).await,
+            RelayOutcome::Flooded { .. }
+        ));
         nodes[0].send_to_node(2, &frame).await.unwrap();
         assert_eq!(
             nodes[1].relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::Duplicate }
+            RelayOutcome::Dropped {
+                reason: DropReason::Duplicate
+            }
         );
     }
 
@@ -1139,7 +1426,9 @@ mod tests {
         let frame = nodes[0].build_broadcast_frame(b"loop").unwrap();
         assert_eq!(
             nodes[0].relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::Duplicate }
+            RelayOutcome::Dropped {
+                reason: DropReason::Duplicate
+            }
         );
     }
 
@@ -1148,16 +1437,25 @@ mod tests {
         let mut nodes = broadcast_setup(&[1, 2]).await;
         let mut frame = nodes[0].build_broadcast_frame(b"x").unwrap();
         frame[3] = 0;
-        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3).await.unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+            .await
+            .unwrap();
         b.set_broadcast_key(broadcast_key());
-        assert_eq!(b.relay(&frame).await, RelayOutcome::Dropped { reason: DropReason::TtlExpired });
+        assert_eq!(
+            b.relay(&frame).await,
+            RelayOutcome::Dropped {
+                reason: DropReason::TtlExpired
+            }
+        );
     }
 
     #[tokio::test]
     async fn broadcast_wrong_type_dropped() {
         let _nodes = broadcast_setup(&[1, 2]).await;
         // 单播载荷伪装 to=广播保留值：type≠广播 → 广播路径拒绝
-        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2).await.unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
         b.set_broadcast_key(broadcast_key());
         let header = MeshFrameHeader {
             packet_type: packet_type::UNICAST,
@@ -1168,7 +1466,9 @@ mod tests {
         let frame = build_frame(&header, &[0x24; 32], &[0x24; 32], 0, b"x").unwrap();
         assert_eq!(
             b.relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::UnsupportedType }
+            RelayOutcome::Dropped {
+                reason: DropReason::UnsupportedType
+            }
         );
     }
 
@@ -1179,7 +1479,9 @@ mod tests {
         frame[8] ^= 0x01;
         assert_eq!(
             nodes[1].relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::BadRouteMac }
+            RelayOutcome::Dropped {
+                reason: DropReason::BadRouteMac
+            }
         );
     }
 
@@ -1187,10 +1489,14 @@ mod tests {
     async fn broadcast_no_key_dropped() {
         let mut nodes = broadcast_setup(&[1, 2]).await;
         let frame = nodes[0].build_broadcast_frame(b"x").unwrap();
-        let mut no_key = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3).await.unwrap();
+        let mut no_key = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+            .await
+            .unwrap();
         assert_eq!(
             no_key.relay(&frame).await,
-            RelayOutcome::Dropped { reason: DropReason::NoKeyDst }
+            RelayOutcome::Dropped {
+                reason: DropReason::NoKeyDst
+            }
         );
     }
 
@@ -1212,7 +1518,10 @@ mod tests {
     #[tokio::test]
     async fn flood_skips_self_endpoint() {
         let mut nodes = broadcast_setup(&[1, 2]).await;
-        let (a_addr, b_addr) = (nodes[0].local_addr().unwrap(), nodes[1].local_addr().unwrap());
+        let (a_addr, b_addr) = (
+            nodes[0].local_addr().unwrap(),
+            nodes[1].local_addr().unwrap(),
+        );
         nodes[1].set_endpoint(1, a_addr);
         nodes[1].set_endpoint(2, b_addr);
         let sent = nodes[1].flood(b"self test").await;

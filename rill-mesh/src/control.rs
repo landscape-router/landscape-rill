@@ -1,7 +1,7 @@
+use crate::framing;
 use landscape_rill_coord::coordinator::Coordinator;
 use landscape_rill_core::control::session::{ClientSession, SessionState};
 use landscape_rill_proto::wire::control::*;
-use crate::framing;
 use quick_protobuf::{BytesReader, MessageRead, MessageWrite, Writer};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -24,9 +24,17 @@ pub struct MeshLegConfig {
 
 #[derive(Debug)]
 pub enum MeshEvent {
-    Netmap { version: u64 },
-    Revoked { node_id: u32 },
-    KeyDist { to_node_id: u32, key: Vec<u8>, key_version: u32 },
+    Netmap {
+        version: u64,
+    },
+    Revoked {
+        node_id: u32,
+    },
+    KeyDist {
+        to_node_id: u32,
+        key: Vec<u8>,
+        key_version: u32,
+    },
 }
 
 pub struct MeshClient {
@@ -36,7 +44,10 @@ pub struct MeshClient {
 
 impl MeshClient {
     pub fn new(static_key: [u8; 32]) -> Self {
-        Self { session: ClientSession::new(), static_key }
+        Self {
+            session: ClientSession::new(),
+            static_key,
+        }
     }
 
     /// 重连场景：以已注册的 node_id 恢复会话（挑战 tag 计算需要）
@@ -66,7 +77,11 @@ impl MeshClient {
             protocol_version: PROTOCOL_VERSION,
             hostname: Cow::Borrowed(""),
             os: Cow::Borrowed(""),
-            routes: config.announce_routes.iter().map(|r| Cow::Borrowed(r.as_str())).collect(),
+            routes: config
+                .announce_routes
+                .iter()
+                .map(|r| Cow::Borrowed(r.as_str()))
+                .collect(),
         };
         envelope_bytes(MsgType::REGISTER, &msg)
     }
@@ -84,7 +99,10 @@ impl MeshClient {
             challenge.nonce.as_ref(),
             node_id,
         );
-        let ack = ChallengeAck { node_id, tag: Cow::Owned(tag.to_vec()) };
+        let ack = ChallengeAck {
+            node_id,
+            tag: Cow::Owned(tag.to_vec()),
+        };
         envelope_bytes(MsgType::CHALLENGE_ACK, &ack)
     }
 
@@ -99,7 +117,10 @@ pub fn envelope_bytes<T: MessageWrite>(msg_type: MsgType, msg: &T) -> Vec<u8> {
         let mut writer = Writer::new(&mut body);
         msg.write_message(&mut writer).unwrap();
     }
-    let envelope = Envelope { msg_type, body: Cow::Owned(body) };
+    let envelope = Envelope {
+        msg_type,
+        body: Cow::Owned(body),
+    };
     let mut out = Vec::new();
     {
         let mut writer = Writer::new(&mut out);
@@ -140,7 +161,10 @@ pub async fn write_msg<W: AsyncWriteExt + Unpin>(
     msg_type: MsgType,
     body: &[u8],
 ) -> std::io::Result<()> {
-    let envelope = Envelope { msg_type, body: Cow::Borrowed(body) };
+    let envelope = Envelope {
+        msg_type,
+        body: Cow::Borrowed(body),
+    };
     let mut out = Vec::new();
     {
         let mut w = Writer::new(&mut out);
@@ -170,8 +194,9 @@ pub async fn client_tls_stream(
     for cert in certs {
         roots.add(cert)?;
     }
-    let config =
-        rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
     // tokio 的 (host, port) 走 getaddrinfo（容器内 compose DNS/公网 DNS 均可解析）
     let tcp = TcpStream::connect((host, port)).await?;
@@ -188,8 +213,9 @@ pub async fn server_tls_stream(
         rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem)).collect::<Result<_, _>>()?;
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no key"))?;
-    let config =
-        rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let (tcp, _) = listener.accept().await?;
     Ok(acceptor.accept(tcp).await?)
@@ -211,7 +237,11 @@ pub fn netmap_push_message(coordinator: &Coordinator) -> NetmapPush<'static> {
     NetmapPush {
         version: coordinator.netmap_version(),
         entries,
-        relay_list: coordinator.relay_list().iter().map(|s| Cow::Owned(s.clone())).collect(),
+        relay_list: coordinator
+            .relay_list()
+            .iter()
+            .map(|s| Cow::Owned(s.clone()))
+            .collect(),
     }
 }
 
@@ -268,8 +298,12 @@ impl CoordinatorServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let push = netmap_push_message(&self.coordinator);
         write_msg(stream, MsgType::NETMAP_PUSH, &envelope_body(&push)).await?;
-        let node_ids: Vec<u32> =
-            self.coordinator.netmap_snapshot().into_iter().map(|n| n.node_id).collect();
+        let node_ids: Vec<u32> = self
+            .coordinator
+            .netmap_snapshot()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
         for node_id in node_ids {
             if let Some(body) = key_dist_message(&self.coordinator, node_id) {
                 write_msg(stream, MsgType::KEY_DIST, &body).await?;
@@ -288,7 +322,8 @@ impl CoordinatorServer {
         let mut state = ConnectionState::default();
         loop {
             let (msg_type, body) = read_envelope(stream).await?;
-            self.handle_message(&mut state, stream, msg_type, &body).await?;
+            self.handle_message(&mut state, stream, msg_type, &body)
+                .await?;
         }
     }
 
@@ -308,7 +343,11 @@ impl CoordinatorServer {
                 let mut pubkey = [0u8; 32];
                 pubkey.copy_from_slice(req.static_pubkey.as_ref());
                 let routes: Vec<String> = if req.routes.is_empty() {
-                    req.hostname.as_ref().split(',').map(str::to_string).collect()
+                    req.hostname
+                        .as_ref()
+                        .split(',')
+                        .map(str::to_string)
+                        .collect()
                 } else {
                     req.routes.iter().map(|r| r.to_string()).collect()
                 };
@@ -417,7 +456,10 @@ impl CoordinatorServer {
                     self.coordinator.heartbeat(node_id, unix_seconds());
                     // 周期收敛：端点/离线等软状态随心跳广播（v1 无增量推送）
                     self.push_snapshot(stream).await?;
-                    let lease = Lease { granted: true, expires_at: unix_seconds() + 60 };
+                    let lease = Lease {
+                        granted: true,
+                        expires_at: unix_seconds() + 60,
+                    };
                     write_msg(stream, MsgType::LEASE, &envelope_body(&lease)).await?;
                 }
             }
@@ -468,12 +510,28 @@ pub struct NetmapData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
-    Registered { node_id: u32, network_id: u32, identity_binding: Vec<u8> },
+    Registered {
+        node_id: u32,
+        network_id: u32,
+        identity_binding: Vec<u8>,
+    },
     Netmap(NetmapData),
-    KeyDist { to_node_id: u32, key: Vec<u8>, key_version: u32, broadcast_key: Vec<u8> },
-    Lease { granted: bool, expires_at: u64 },
-    Challenge { ack: Vec<u8> },
-    Revoked { node_id: u32 },
+    KeyDist {
+        to_node_id: u32,
+        key: Vec<u8>,
+        key_version: u32,
+        broadcast_key: Vec<u8>,
+    },
+    Lease {
+        granted: bool,
+        expires_at: u64,
+    },
+    Challenge {
+        ack: Vec<u8>,
+    },
+    Revoked {
+        node_id: u32,
+    },
 }
 
 pub struct ControlSession {
@@ -497,7 +555,9 @@ impl ControlSession {
             None => MeshClient::new(config.static_key),
         };
         let mut session = Self { client, stream };
-        session.send_envelope(&session.client.register_request(config)).await?;
+        session
+            .send_envelope(&session.client.register_request(config))
+            .await?;
         Ok(session)
     }
 
@@ -536,9 +596,15 @@ impl ControlSession {
                 let identity_binding = resp.proto().identity_binding.to_vec();
                 self.client
                     .session_mut()
-                    .handle(landscape_rill_core::control::session::SessionEvent::RegisterOk { node_id })
+                    .handle(
+                        landscape_rill_core::control::session::SessionEvent::RegisterOk { node_id },
+                    )
                     .map_err(io_err)?;
-                Ok(ControlEvent::Registered { node_id, network_id, identity_binding })
+                Ok(ControlEvent::Registered {
+                    node_id,
+                    network_id,
+                    identity_binding,
+                })
             }
             MsgType::NETMAP_PUSH => {
                 let owned = NetmapPushOwned::try_from(body).map_err(decoding_err)?;
@@ -562,7 +628,12 @@ impl ControlSession {
                 Ok(ControlEvent::Netmap(NetmapData {
                     version: owned.proto().version,
                     entries,
-                    relay_list: owned.proto().relay_list.iter().map(|s| s.to_string()).collect(),
+                    relay_list: owned
+                        .proto()
+                        .relay_list
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
                 }))
             }
             MsgType::KEY_DIST => {
@@ -595,7 +666,9 @@ impl ControlSession {
             MsgType::REVOKE => {
                 let mut reader = BytesReader::from_bytes(&body);
                 let revoke = Revoke::from_reader(&mut reader, &body).map_err(decoding_err)?;
-                Ok(ControlEvent::Revoked { node_id: revoke.node_id })
+                Ok(ControlEvent::Revoked {
+                    node_id: revoke.node_id,
+                })
             }
             other => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -620,10 +693,16 @@ mod tests {
 
     fn ca_pair() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut params = rcgen::CertificateParams::new(vec!["coord.test".into()]).unwrap();
-        params.subject_alt_names.push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let ca = params.self_signed(&key_pair).unwrap();
-        (ca.pem().into_bytes(), ca.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+        (
+            ca.pem().into_bytes(),
+            ca.pem().into_bytes(),
+            key_pair.serialize_pem().into_bytes(),
+        )
     }
 
     #[tokio::test]
@@ -638,14 +717,17 @@ mod tests {
             let mut listener = listener;
             let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
             let mut server = CoordinatorServer::new(master, seed);
-            server
-                .coordinator
-                .add_auth_key("ak-loop", landscape_rill_core::control::registry::AuthKeyPolicy::OneTime);
+            server.coordinator.add_auth_key(
+                "ak-loop",
+                landscape_rill_core::control::registry::AuthKeyPolicy::OneTime,
+            );
             server.handle_connection(&mut tls).await.unwrap();
         });
 
         let host = addr.ip().to_string();
-        let mut tls = client_tls_stream(&host, addr.port(), &ca_cert).await.unwrap();
+        let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
         let client = MeshClient::new([0x33; 32]);
         let config = MeshLegConfig {
             coordinator_host: host,
@@ -701,7 +783,9 @@ mod tests {
     async fn tls_echo_two_frames() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut params = rcgen::CertificateParams::new(vec!["coord.test".into()]).unwrap();
-        params.subject_alt_names.push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let ca = params.self_signed(&key_pair).unwrap();
         let cert = ca.pem().into_bytes();
@@ -712,7 +796,9 @@ mod tests {
         let cert2 = cert.clone();
         let server = tokio::spawn(async move {
             let mut listener = listener;
-            let mut tls = server_tls_stream(&mut listener, &cert2, &key).await.unwrap();
+            let mut tls = server_tls_stream(&mut listener, &cert2, &key)
+                .await
+                .unwrap();
             let f1 = framing::read_frame(&mut tls).await.unwrap();
             let _ = f1;
             let reply1 = b"response-one".to_vec();
@@ -722,7 +808,9 @@ mod tests {
         });
         let host = addr.ip().to_string();
         let mut tls = client_tls_stream(&host, addr.port(), &cert).await.unwrap();
-        framing::write_frame(&mut tls, b"hello".as_slice()).await.unwrap();
+        framing::write_frame(&mut tls, b"hello".as_slice())
+            .await
+            .unwrap();
         let r1 = framing::read_frame(&mut tls).await.unwrap();
         let r2 = framing::read_frame(&mut tls).await.unwrap();
         drop(server);

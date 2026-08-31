@@ -125,7 +125,9 @@ mod hex32 {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
         let s = String::deserialize(d)?;
         let bytes = decode(&s).map_err(serde::de::Error::custom)?;
-        bytes.try_into().map_err(|_| serde::de::Error::custom("expected 32 bytes (64 hex chars)"))
+        bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected 32 bytes (64 hex chars)"))
     }
 
     #[allow(dead_code)]
@@ -180,7 +182,10 @@ async fn run_coord(coord: CoordFile) -> Result<(), Box<dyn std::error::Error>> {
     let cert = std::fs::read(&coord.tls_cert_path)?;
     let key = std::fs::read(&coord.tls_key_path)?;
     let mut listener = TcpListener::bind(coord.listen_addr.parse::<SocketAddr>()?).await?;
-    let server = Arc::new(Mutex::new(CoordinatorServer::new(coord.master_key, coord.signing_seed)));
+    let server = Arc::new(Mutex::new(CoordinatorServer::new(
+        coord.master_key,
+        coord.signing_seed,
+    )));
     {
         let mut guard = server.lock().await;
         for ak in &coord.auth_keys {
@@ -203,7 +208,11 @@ async fn run_coord(coord: CoordFile) -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => break,
                 };
                 let mut guard = srv.lock().await;
-                if guard.handle_message(&mut conn, &mut tls, msg_type, &body).await.is_err() {
+                if guard
+                    .handle_message(&mut conn, &mut tls, msg_type, &body)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -221,12 +230,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let seed: [u8; 32] = seed
                 .try_into()
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad seed"))?;
-            let vk = ed25519_dalek::VerifyingKey::from(&ed25519_dalek::SigningKey::from_bytes(&seed));
+            let vk =
+                ed25519_dalek::VerifyingKey::from(&ed25519_dalek::SigningKey::from_bytes(&seed));
             println!("{}", hex32::encode_owned(&vk.to_bytes()));
             Ok(())
         }
         None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH)),
-        Some(Command::Run { config }) => run_daemon(&config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))),
+        Some(Command::Run { config }) => {
+            run_daemon(&config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)))
+        }
     }
 }
 
@@ -236,7 +248,9 @@ fn run_daemon(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let file: FileConfig = serde_json::from_str(&text)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{:?}", e)))?;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async move {
         if let Some(coord) = file.coord {
             tokio::spawn(async move {
@@ -298,7 +312,10 @@ fn run_daemon(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "[node] starting (coordinator={}, tun={})",
             config.coordinator_url,
-            opts.tun.as_ref().map(|t| t.name.clone()).unwrap_or_else(|| "-".into())
+            opts.tun
+                .as_ref()
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| "-".into())
         );
         let node = Node::new(config, opts).await?;
         node.run().await;

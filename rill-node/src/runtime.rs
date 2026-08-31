@@ -5,15 +5,15 @@
 //! 无 tun 环境（无 /dev/net/tun）下全链路可主机验证；run() 仅在容器环境启用 tun。
 
 use crate::config::{Config, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_SESSION_REKEY_HOURS};
+use crate::packet::parse_packet;
+use crate::tun::{TunConfig, TunDevice};
+use ed25519_dalek::VerifyingKey;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
 use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
 use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
 use landscape_rill_mesh::data::{IncomingEvent, MeshData};
-use crate::packet::parse_packet;
-use crate::tun::{TunConfig, TunDevice};
-use ed25519_dalek::VerifyingKey;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -245,8 +245,9 @@ impl Node {
             return LanOutcome::Flooded { peers };
         }
         let (via, _prefix) = {
-            let Some(entry) =
-                self.engine.lookup_best(&info.dst, &|e| matches!(e.via, RouteVia::Mesh(_)))
+            let Some(entry) = self
+                .engine
+                .lookup_best(&info.dst, &|e| matches!(e.via, RouteVia::Mesh(_)))
             else {
                 return LanOutcome::Dropped;
             };
@@ -376,7 +377,8 @@ impl Node {
                     let now = Instant::now();
                     self.recent_multicast_writes
                         .retain(|_, t| now.duration_since(*t) < MULTICAST_REWRITE_GUARD);
-                    self.recent_multicast_writes.insert((info.src, info.dst, info.total_len), now);
+                    self.recent_multicast_writes
+                        .insert((info.src, info.dst, info.total_len), now);
                 }
             }
         }
@@ -416,11 +418,18 @@ impl Node {
         ev: ControlEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match ev {
-            ControlEvent::Registered { node_id, network_id, identity_binding } => {
+            ControlEvent::Registered {
+                node_id,
+                network_id,
+                identity_binding,
+            } => {
                 self.node_id = Some(node_id);
                 self.network_id = network_id;
                 self.mesh.set_self_node_id(node_id);
-                eprintln!("[node] registered: node_id={} network_id={}", node_id, network_id);
+                eprintln!(
+                    "[node] registered: node_id={} network_id={}",
+                    node_id, network_id
+                );
                 let ctx = HandshakeContext {
                     network_id,
                     version: VERSION,
@@ -429,9 +438,15 @@ impl Node {
                 };
                 self.mesh.set_handshake_context(ctx);
                 let vk = VerifyingKey::from_bytes(&self.cfg.coord_signing_pubkey)?;
-                self.mesh.set_binding_verifier(move |node_id, static_pubkey, binding| {
-                    landscape_rill_coord::signer::verify_binding(&vk, node_id, static_pubkey, binding)
-                });
+                self.mesh
+                    .set_binding_verifier(move |node_id, static_pubkey, binding| {
+                        landscape_rill_coord::signer::verify_binding(
+                            &vk,
+                            node_id,
+                            static_pubkey,
+                            binding,
+                        )
+                    });
                 // 端点上报：数据面 UDP 地址（真实出口 IP + 端口）→ coordinator 并入 netmap
                 if let Some(control) = self.control.as_mut() {
                     if let Ok(addr) = self.mesh.local_addr() {
@@ -447,8 +462,10 @@ impl Node {
                 // 挑战通过后服务端重推 netmap：Reconnecting → ChallengeOk
                 if let Some(control) = self.control.as_mut() {
                     if matches!(control.client().state(), SessionState::Reconnecting { .. }) {
-                        let _ =
-                            control.client_mut().session_mut().handle(SessionEvent::ChallengeOk);
+                        let _ = control
+                            .client_mut()
+                            .session_mut()
+                            .handle(SessionEvent::ChallengeOk);
                     }
                 }
                 self.apply_netmap(&netmap);
@@ -459,7 +476,12 @@ impl Node {
                     netmap.entries.iter().map(|e| e.routes.len()).sum::<usize>()
                 );
             }
-            ControlEvent::KeyDist { to_node_id, key, key_version, broadcast_key } => {
+            ControlEvent::KeyDist {
+                to_node_id,
+                key,
+                key_version,
+                broadcast_key,
+            } => {
                 if key.len() == 32 {
                     let mut k = [0u8; 32];
                     k.copy_from_slice(&key);
@@ -510,7 +532,8 @@ impl Node {
                 continue;
             }
             fresh.insert(entry.node_id);
-            self.mesh.set_peer_static(entry.node_id, entry.static_pubkey);
+            self.mesh
+                .set_peer_static(entry.node_id, entry.static_pubkey);
             for ep in &entry.endpoints {
                 if let Ok(addr) = ep.parse::<SocketAddr>() {
                     self.mesh.set_endpoint(entry.node_id, addr);
@@ -550,10 +573,16 @@ mod tests {
     fn coord_ca() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut params = rcgen::CertificateParams::new(vec!["coord.test".into()]).unwrap();
-        params.subject_alt_names.push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let ca = params.self_signed(&key_pair).unwrap();
-        (ca.pem().into_bytes(), ca.pem().into_bytes(), key_pair.serialize_pem().into_bytes())
+        (
+            ca.pem().into_bytes(),
+            ca.pem().into_bytes(),
+            key_pair.serialize_pem().into_bytes(),
+        )
     }
 
     /// 唯一 CA 路径（并行测试互不覆盖）
@@ -571,7 +600,11 @@ mod tests {
         let master = [0x11; 32];
         let seed = [0x22; 32];
         let server = Arc::new(Mutex::new(CoordinatorServer::new(master, seed)));
-        server.lock().await.coordinator.add_auth_key("ak-test", AuthKeyPolicy::Reusable);
+        server
+            .lock()
+            .await
+            .coordinator
+            .add_auth_key("ak-test", AuthKeyPolicy::Reusable);
         let srv = server.clone();
         tokio::spawn(async move {
             let mut listener = listener;
@@ -588,7 +621,10 @@ mod tests {
                                 Err(_) => break,
                             };
                         let mut guard = srv.lock().await;
-                        if guard.handle_message(&mut conn, &mut tls, msg_type, &body).await.is_err()
+                        if guard
+                            .handle_message(&mut conn, &mut tls, msg_type, &body)
+                            .await
+                            .is_err()
                         {
                             break;
                         }
@@ -653,7 +689,11 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            assert!(Instant::now() < deadline, "pump_until_all timeout [{}]", label);
+            assert!(
+                Instant::now() < deadline,
+                "pump_until_all timeout [{}]",
+                label
+            );
             for node in nodes.iter_mut() {
                 let _ = tokio::time::timeout(Duration::from_millis(100), node.pump_control()).await;
                 let _ = tokio::time::timeout(Duration::from_millis(100), node.pump_mesh()).await;
@@ -686,12 +726,18 @@ mod tests {
     #[tokio::test]
     async fn e2e_register_netmap_keydist_handshake_data() {
         let (url, ca) = start_coord().await;
-        let mut a = Node::new(node_config(&url, &ca, 1, vec!["10.0.0.0/24".into()]), fast_opts())
-            .await
-            .unwrap();
-        let mut b = Node::new(node_config(&url, &ca, 2, vec!["10.0.0.0/24".into()]), fast_opts())
-            .await
-            .unwrap();
+        let mut a = Node::new(
+            node_config(&url, &ca, 1, vec!["10.0.0.0/24".into()]),
+            fast_opts(),
+        )
+        .await
+        .unwrap();
+        let mut b = Node::new(
+            node_config(&url, &ca, 2, vec!["10.0.0.0/24".into()]),
+            fast_opts(),
+        )
+        .await
+        .unwrap();
 
         a.connect_control().await.unwrap();
         b.connect_control().await.unwrap();
@@ -701,20 +747,28 @@ mod tests {
         pump_until_all(&mut [&mut a, &mut b], "keydst2", |n| n.mesh.has_key_dst(2)).await;
         pump_until_all(&mut [&mut a, &mut b], "keydst1", |n| n.mesh.has_key_dst(1)).await;
         pump_until_all(&mut [&mut a, &mut b], "routes", |n| {
-            !n.engine.lookup(&"10.0.0.2".parse::<IpAddr>().unwrap()).is_empty()
+            !n.engine
+                .lookup(&"10.0.0.2".parse::<IpAddr>().unwrap())
+                .is_empty()
         })
         .await;
 
         // A → B：懒握手 → 加密帧 → B 解密
         let packet = v4_packet([10, 0, 0, 2]);
         establish_session(&mut a, &mut b, &packet, 2).await;
-        assert_eq!(a.pump_lan_packet(&packet).await, LanOutcome::Sent { peer: 2 });
+        assert_eq!(
+            a.pump_lan_packet(&packet).await,
+            LanOutcome::Sent { peer: 2 }
+        );
         let payload = b.pump_mesh().await.expect("B 应收到解密载荷");
         assert_eq!(payload, packet);
 
         // 反向
         establish_session(&mut b, &mut a, &packet, 1).await;
-        assert_eq!(b.pump_lan_packet(&packet).await, LanOutcome::Sent { peer: 1 });
+        assert_eq!(
+            b.pump_lan_packet(&packet).await,
+            LanOutcome::Sent { peer: 1 }
+        );
         let payload = a.pump_mesh().await.expect("A 应收到解密载荷");
         assert_eq!(payload, packet);
     }
@@ -722,16 +776,25 @@ mod tests {
     #[tokio::test]
     async fn multicast_flooded_across_nodes() {
         let (url, ca) = start_coord().await;
-        let mut a = Node::new(node_config(&url, &ca, 1, vec!["10.0.0.0/24".into()]), fast_opts())
-            .await
-            .unwrap();
-        let mut b = Node::new(node_config(&url, &ca, 2, vec!["10.0.0.0/24".into()]), fast_opts())
-            .await
-            .unwrap();
+        let mut a = Node::new(
+            node_config(&url, &ca, 1, vec!["10.0.0.0/24".into()]),
+            fast_opts(),
+        )
+        .await
+        .unwrap();
+        let mut b = Node::new(
+            node_config(&url, &ca, 2, vec!["10.0.0.0/24".into()]),
+            fast_opts(),
+        )
+        .await
+        .unwrap();
         a.connect_control().await.unwrap();
         b.connect_control().await.unwrap();
         pump_until_all(&mut [&mut a, &mut b], "registered", |n| n.registered()).await;
-        pump_until_all(&mut [&mut a, &mut b], "broadcast_key", |n| n.broadcast_key.is_some()).await;
+        pump_until_all(&mut [&mut a, &mut b], "broadcast_key", |n| {
+            n.broadcast_key.is_some()
+        })
+        .await;
         pump_until_all(&mut [&mut a, &mut b], "endpoints", |n| {
             let peer = if n.node_id() == Some(1) { 2 } else { 1 };
             n.mesh.endpoint(peer).is_some()
@@ -739,27 +802,39 @@ mod tests {
         .await;
 
         // IPv6 组播（ND NS）→ 泛洪（不走路由表，无需会话）
-        let ns =
-            v6_multicast_packet([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0x00, 0x00, 0x02]);
-        assert_eq!(a.pump_lan_packet(&ns).await, LanOutcome::Flooded { peers: 1 });
+        let ns = v6_multicast_packet([
+            0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0x00, 0x00, 0x02,
+        ]);
+        assert_eq!(
+            a.pump_lan_packet(&ns).await,
+            LanOutcome::Flooded { peers: 1 }
+        );
         assert_eq!(b.pump_mesh().await.expect("B 应收到广播解密载荷"), ns);
     }
 
     #[tokio::test]
     async fn data_heartbeat_misses_drop_session() {
         let (url, ca) = start_coord().await;
-        let mut a = Node::new(node_config(&url, &ca, 1, vec!["10.0.0.0/24".into()]), fast_opts())
-            .await
-            .unwrap();
-        let mut b = Node::new(node_config(&url, &ca, 2, vec!["10.0.0.0/24".into()]), fast_opts())
-            .await
-            .unwrap();
+        let mut a = Node::new(
+            node_config(&url, &ca, 1, vec!["10.0.0.0/24".into()]),
+            fast_opts(),
+        )
+        .await
+        .unwrap();
+        let mut b = Node::new(
+            node_config(&url, &ca, 2, vec!["10.0.0.0/24".into()]),
+            fast_opts(),
+        )
+        .await
+        .unwrap();
         a.connect_control().await.unwrap();
         b.connect_control().await.unwrap();
         pump_until_all(&mut [&mut a, &mut b], "registered", |n| n.registered()).await;
         pump_until_all(&mut [&mut a, &mut b], "keydst2", |n| n.mesh.has_key_dst(2)).await;
         pump_until_all(&mut [&mut a, &mut b], "routes", |n| {
-            !n.engine.lookup(&"10.0.0.2".parse::<IpAddr>().unwrap()).is_empty()
+            !n.engine
+                .lookup(&"10.0.0.2".parse::<IpAddr>().unwrap())
+                .is_empty()
         })
         .await;
 

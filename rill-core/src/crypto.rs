@@ -102,11 +102,7 @@ pub fn seal(
     let cipher = ChaCha20Poly1305::new_from_slice(session_key).unwrap();
     let mut buffer = plaintext.to_vec();
     cipher
-        .encrypt_in_place(
-            &Nonce::from(nonce(salt, counter)),
-            aad,
-            &mut buffer,
-        )
+        .encrypt_in_place(&Nonce::from(nonce(salt, counter)), aad, &mut buffer)
         .map_err(|_| AeadError)?;
     Ok(buffer)
 }
@@ -121,11 +117,7 @@ pub fn open(
     let cipher = ChaCha20Poly1305::new_from_slice(session_key).unwrap();
     let mut buffer = ciphertext.to_vec();
     cipher
-        .decrypt_in_place(
-            &Nonce::from(nonce(salt, counter)),
-            aad,
-            &mut buffer,
-        )
+        .decrypt_in_place(&Nonce::from(nonce(salt, counter)), aad, &mut buffer)
         .map_err(|_| AeadError)?;
     Ok(buffer)
 }
@@ -179,7 +171,8 @@ mod tests {
         let b = hex_literal("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
         let a_pub = hex_literal("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
         let b_pub = hex_literal("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
-        let shared = hex_literal("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+        let shared =
+            hex_literal("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
         assert_eq!(x25519_shared(&a, &b_pub), shared);
         assert_eq!(x25519_shared(&b, &a_pub), shared);
         assert_eq!(PublicKey::from(&StaticSecret::from(a)).to_bytes(), a_pub);

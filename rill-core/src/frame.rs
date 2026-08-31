@@ -192,7 +192,10 @@ pub struct ReplayWindow {
 
 impl ReplayWindow {
     pub fn new() -> Self {
-        Self { base: 0, bitmap: [0u64; 16] }
+        Self {
+            base: 0,
+            bitmap: [0u64; 16],
+        }
     }
 
     pub fn check_and_mark(&mut self, seq: u32) -> bool {
@@ -255,7 +258,10 @@ mod tests {
         let mut buf = [0u8; HEADER_LEN];
         h.encode(&mut buf);
         for cut in 0..HEADER_LEN {
-            assert_eq!(MeshFrameHeader::decode(&buf[..cut]), Err(DecodeError::Truncated));
+            assert_eq!(
+                MeshFrameHeader::decode(&buf[..cut]),
+                Err(DecodeError::Truncated)
+            );
         }
     }
 
@@ -274,7 +280,10 @@ mod tests {
         let payload = b"payload";
         let mut frame = build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, payload).unwrap();
         frame[8] ^= 0x01;
-        assert_eq!(open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap_err(), OpenError::RouteMac);
+        assert_eq!(
+            open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap_err(),
+            OpenError::RouteMac
+        );
     }
 
     #[test]
@@ -327,7 +336,10 @@ mod tests {
         let frame = build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, payload).unwrap();
         let mut frame = frame;
         frame[0] = 0x02;
-        assert_eq!(open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap_err(), OpenError::Version);
+        assert_eq!(
+            open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap_err(),
+            OpenError::Version
+        );
     }
 
     #[test]

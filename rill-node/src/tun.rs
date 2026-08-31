@@ -46,7 +46,10 @@ impl TunDevice {
         if let Some((addr, prefix)) = config.address6 {
             set_ipv6_address(&device.tun_name()?, addr, prefix).await?;
         }
-        Ok(Self { device, mtu: config.mtu })
+        Ok(Self {
+            device,
+            mtu: config.mtu,
+        })
     }
 
     pub fn name(&self) -> String {
@@ -63,7 +66,10 @@ impl TunDevice {
         buf.truncate(n);
         #[cfg(target_os = "windows")]
         if buf.len() < PACKET_INFORMATION_LENGTH {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short tun read"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "short tun read",
+            ));
         }
         #[cfg(target_os = "windows")]
         buf.drain(..PACKET_INFORMATION_LENGTH);
@@ -102,7 +108,11 @@ pub async fn set_ipv6_address(
         .await
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "link not found"))??;
     let index = link.header.index;
-    handle.address().add(index, IpAddr::V6(addr), prefix).execute().await?;
+    handle
+        .address()
+        .add(index, IpAddr::V6(addr), prefix)
+        .execute()
+        .await?;
     Ok(())
 }
 
