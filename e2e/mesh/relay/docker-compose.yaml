@@ -1,8 +1,8 @@
-# mesh e2e 拓扑：coordinator + node-a + node-b（每节点一容器）
-# 网络：bridge 互通；节点 privileged + /dev/net/tun（用户态 tun0 = LAN 侧）
+# relay e2e 拓扑：coordinator + node-a + node-b（relay）+ node-c，线形 a—b—c
+# 网络：net1={coord,a,b} net2={coord,b,c}（b/coord 双网卡）；c 与 a 无直连 UDP 可达性
 # 网段：RFC 1918 192.168.240.0/23（mesh e2e 专用段，避开 docker 默认池与 CGNAT；
 #       192.168.242.0/24 起预留 headscale/ts2021 集成）
-# 配置：镜像内置二进制/CA/证书，config.json 每服务挂载（build/ 下生成）
+# 验证：c→a 直连候选 miss → 快速切换 relay 路径（经 b）；b 日志出现 relayed frame
 services:
   coord:
     build:
@@ -12,8 +12,10 @@ services:
     volumes:
       - ../../build/coord.json:/etc/landscape/overlay.json
     networks:
-      mesh:
+      net1:
         ipv4_address: 192.168.240.10
+      net2:
+        ipv4_address: 192.168.241.10
 
   node-a:
     build:
@@ -30,7 +32,7 @@ services:
     volumes:
       - ../../build/node-a.json:/etc/landscape/overlay.json
     networks:
-      mesh:
+      net1:
         ipv4_address: 192.168.240.11
 
   node-b:
@@ -48,12 +50,37 @@ services:
     volumes:
       - ../../build/node-b.json:/etc/landscape/overlay.json
     networks:
-      mesh:
+      net1:
         ipv4_address: 192.168.240.21
+      net2:
+        ipv4_address: 192.168.241.21
+
+  node-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-c.json:/etc/landscape/overlay.json
+    networks:
+      net2:
+        ipv4_address: 192.168.241.31
 
 networks:
-  mesh:
+  net1:
     driver: bridge
     ipam:
       config:
         - subnet: 192.168.240.0/24
+  net2:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.241.0/24

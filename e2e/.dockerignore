@@ -1,0 +1,2 @@
+# e2e 构建 context（e2e/ 根）排除项：p0 独立场景与运行时生成物不进 mesh 镜像
+p0_tailscale/

@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# mesh e2e 初始化：base 镜像 → CA/证书 → 密钥/信任锚 → 编译 → 配置 → 构建启动 → 路由/黑洞注入
+# 幂等：开头强制 cleanup（容器/网络/build 全清），可重复执行；断言逻辑在 run_e2e.sh
+set -euo pipefail
+
+E2E_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$E2E_DIR/.." && pwd)"
+BUILD_DIR="$E2E_DIR/build"
+SCENARIO="${MESH_E2E_SCENARIO:-direct}"
+COMPOSE="docker compose -f $E2E_DIR/mesh/direct/docker-compose.yaml"
+OVERLAY="$ROOT_DIR/target/release/lrill"
+
+hex() { openssl rand -hex 32; }
+
+# 幂等前提：启动前必清理
+"$E2E_DIR/cleanup.sh"
+
+# 场景选择：relay 用线形拓扑（b 双网卡），其余用直连拓扑
+if [ "$SCENARIO" = "relay" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/relay/docker-compose.yaml"
+fi
+
+echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"
+E2E_DNS="${MESH_E2E_DNS:-$(awk '$1=="nameserver" && $2 !~ /^(127\.|::1$)/{print $2; exit}' /etc/resolv.conf)}"
+[ -n "$E2E_DNS" ] || E2E_DNS="1.1.1.1"  # 宿主仅 loopback stub（CI）时回退公共 DNS
+if ! docker image inspect mesh-e2e-base >/dev/null 2>&1; then
+  docker run --dns "$E2E_DNS" debian:trixie-slim sh -c \
+    "apt-get update && apt-get install -y --no-install-recommends \
+       iproute2 iputils-ping ca-certificates && rm -rf /var/lib/apt/lists/*"
+  docker commit "$(docker ps -lq)" mesh-e2e-base
+fi
+
+echo "==> 1/6 生成 CA 与服务端证书"
+mkdir -p "$BUILD_DIR"
+
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    -keyout "$BUILD_DIR/ca.key" -out "$BUILD_DIR/ca.pem" \
+    -days 30 -nodes -subj "/CN=mesh-e2e-ca" 2>/dev/null
+
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+    -keyout "$BUILD_DIR/coord.key" -out "$BUILD_DIR/coord.csr" \
+    -nodes -subj "/CN=coord" 2>/dev/null
+
+cat > "$BUILD_DIR/coord.ext" <<'EOF'
+subjectAltName = DNS:coord, IP:127.0.0.1
+EOF
+openssl x509 -req -in "$BUILD_DIR/coord.csr" -CA "$BUILD_DIR/ca.pem" -CAkey "$BUILD_DIR/ca.key" \
+    -CAcreateserial -out "$BUILD_DIR/coord.crt" -days 30 \
+    -extfile "$BUILD_DIR/coord.ext" 2>/dev/null
+
+echo "==> 2/6 生成密钥与信任锚"
+MASTER_KEY=$(hex)
+SIGNING_SEED=$(hex)
+NODE_A_KEY=$(hex)
+NODE_B_KEY=$(hex)
+NODE_C_KEY=$(hex)
+
+echo "==> 3/6 编译二进制"
+"$ROOT_DIR/scripts/build.sh"
+cp "$ROOT_DIR/target/release/lrill" "$BUILD_DIR/lrill"
+COORD_PUBKEY=$("$OVERLAY" pubkey "$SIGNING_SEED")
+
+echo "==> 4/6 生成配置"
+# lrk auth key（REQ-036）：生成即归域绑定 network=lab
+NODE_A_AUTHKEY=$("$OVERLAY" authkey --network lab)
+NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
+NODE_C_AUTHKEY=$("$OVERLAY" authkey --network lab)
+gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key
+  cat > "$BUILD_DIR/$1" <<EOF
+{
+  "coordinator_url": "https://coord:8443",
+  "auth_key": "$6",
+  "static_key_seed": "$2",
+  "capabilities": 1,
+  "announce_routes": $5,
+  "coord_signing_pubkey": "$COORD_PUBKEY",
+  "ca_cert_path": "/etc/landscape/ca.pem",
+  "tun": { "name": "land0", "mtu": 1420, "address4": "$3", "address6": "$4" }
+}
+EOF
+}
+
+gen_node_config node-a.json "$NODE_A_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_A_AUTHKEY"
+gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" '["10.43.0.0/24", "fd00:3::/64"]' "$NODE_B_AUTHKEY"
+gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY"
+
+cat > "$BUILD_DIR/coord.json" <<EOF
+{
+  "coord": {
+    "network": "lab",
+    "listen_addr": "0.0.0.0:8443",
+    "master_key": "$MASTER_KEY",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "auth_keys": [
+      { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+      { "key": "$NODE_B_AUTHKEY", "policy": "reusable" },
+      { "key": "$NODE_C_AUTHKEY", "policy": "reusable" }
+    ],
+    "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
+  }
+}
+EOF
+
+if [ "$SCENARIO" = "relay" ]; then
+  # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，
+  # 否则 docker 网桥自身路由会命中；ip route get 命中默认路由不可用）
+  if ip route show 192.168.240.0/24 | grep -q . || ip route show 192.168.241.0/24 | grep -q .; then
+    echo "FAIL: 宿主已配置 192.168.240.0/23 路由，与 e2e 网段冲突" >&2
+    exit 1
+  fi
+fi
+
+echo "==> 5/6 构建并启动"
+$COMPOSE build -q
+$COMPOSE up -d --force-recreate
+
+echo "==> 6/6 等待注册 + 注入 mesh 路由/黑洞（场景: $SCENARIO）"
+for _ in $(seq 1 30); do
+  docker logs mesh-coord 2>/dev/null | grep -q "listening" && break
+  sleep 1
+done
+sleep 3
+
+# 内核最小参与：mesh 前缀 → tun0（生产由 runtime 自动注入）
+# direct 场景：a↔b；relay 场景：a↔c（经 b 中继）
+if [ "$SCENARIO" = "relay" ]; then
+  docker exec mesh-node-a ip route add 10.44.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ip -6 route add fd00:4::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
+  # 模拟"c↔a 无直连 UDP 可达性"（docker host ip_forward 会在网桥间路由，须主动隔离）：
+  # 固定 IP（compose ipam）：a=192.168.240.11 / c=192.168.241.31，互加黑洞路由，只黑这两个 /32
+  docker exec mesh-node-c ip route add blackhole 192.168.240.11/32 2>/dev/null || true
+  docker exec mesh-node-a ip route add blackhole 192.168.241.31/32 2>/dev/null || true
+else
+  docker exec mesh-node-a ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
+fi
+
+echo "==> setup 完成（场景: $SCENARIO）"
