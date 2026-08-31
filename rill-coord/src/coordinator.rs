@@ -148,6 +148,7 @@ impl Coordinator {
         let node_id = match outcome {
             landscape_rill_core::control::registry::RegisterOutcome::NewNode(id) => {
                 self.netmap_version += 1;
+                self.sync_relays(); // relay 候选随新节点注册更新（relay 位 opt-in）
                 id
             }
             landscape_rill_core::control::registry::RegisterOutcome::Existing(id) => id,
@@ -332,6 +333,28 @@ mod tests {
         let out = c.register("ak-1", &pubkey(1), 0x01, vec![]).unwrap();
         assert_eq!(out.node_id, 1);
         assert_eq!(c.netmap_version(), v1);
+    }
+
+    #[test]
+    fn relay_list_follows_registration() {
+        let mut c = setup();
+        c.add_auth_key("ak-2", AuthKeyPolicy::Reusable);
+        c.add_auth_key("ak-3", AuthKeyPolicy::Reusable);
+        let relay = c
+            .register("ak-1", &pubkey(1), 0x01, vec![])
+            .unwrap()
+            .node_id;
+        let src = c
+            .register("ak-2", &pubkey(2), 0x00, vec![])
+            .unwrap()
+            .node_id;
+        let dst = c
+            .register("ak-3", &pubkey(3), 0x00, vec![])
+            .unwrap()
+            .node_id;
+        let cands = c.request_paths(src, dst, 4);
+        assert!(cands.iter().any(|(p, _)| p.hops == vec![relay, dst]));
+        assert_eq!(cands.len(), 2); // direct + relay
     }
 
     #[test]

@@ -128,6 +128,7 @@ message PathResponse {
   fixed32 destination_node_id = 1;
   repeated CandidatePath candidates = 2;
   uint64 path_version = 3;      // 该目标路径集版本
+  fixed32 source_node_id = 4;   // 路径发起方（= 请求方，响应必然可写发送路径表）
 }
 
 message CandidatePath {
@@ -143,6 +144,7 @@ message PathUpdate {
   fixed32 destination_node_id = 1;
   repeated CandidatePath candidates = 2;
   uint64 path_version = 3;
+  fixed32 source_node_id = 4;  // 路径发起方（节点端：仅 source=自己 时写入发送路径表）
 }
 
 // PathWithdraw：coordinator → 节点，路径撤销（吊销/过期/联邦取消）

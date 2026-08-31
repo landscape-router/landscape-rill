@@ -1013,6 +1013,7 @@ dependencies = [
  "landscape-rill-coord",
  "landscape-rill-core",
  "landscape-rill-mesh",
+ "netlink-packet-route",
  "rcgen",
  "rtnetlink",
  "rustls",

@@ -7,7 +7,7 @@ use landscape_rill_core::handshake::{
     MSG1_PAYLOAD_LEN, MSG2_PAYLOAD_LEN, MSG3_PAYLOAD_LEN,
 };
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
@@ -49,7 +49,8 @@ impl PathEntry {
 pub struct MeshData {
     socket: UdpSocket,
     key_dst_table: HashMap<u32, [u8; 32]>,
-    endpoint_table: HashMap<u32, SocketAddr>,
+    /// 端点表：node_id → 候选端点列表（多宿主通告全部；发送按可达性逐个尝试）
+    endpoint_table: HashMap<u32, Vec<SocketAddr>>,
     self_node_id: u32,
     ctx: Option<HandshakeContext>,
     peer_statics: HashMap<u32, [u8; 32]>,
@@ -73,6 +74,15 @@ pub struct MeshData {
     path_table: HashMap<u32, Vec<PathEntry>>,
     /// 主路径健康 miss 计数（快速切换，CONTROL_PLANE §3.11）
     path_health: HashMap<u64, u32>,
+    /// 入站路径记录：from_node_id → 帧实际到达的上一跳（UDP 发送者归属节点；
+    /// 直连 = from 自身，经中继 = relay 节点）。逐路径活性更新的依据。
+    ingress_hop: HashMap<u32, u32>,
+    /// 端点活性 miss 计数：(端点归属节点, 端点) → miss。发送成功但无响应
+    /// （UDP 黑洞：sendto Ok 但包被网关丢弃）时由握手重试/心跳驱动递增，
+    /// 发送排序时活性差的端点置后，逐个排除。
+    endpoint_health: HashMap<(u32, SocketAddr), u32>,
+    /// 上次对该发送目标实际使用的端点（miss 定位用——黑洞端点无法从收包侧感知）
+    last_sent_endpoint: HashMap<u32, SocketAddr>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -215,6 +225,9 @@ impl MeshData {
             key_path_table: HashMap::new(),
             path_table: HashMap::new(),
             path_health: HashMap::new(),
+            ingress_hop: HashMap::new(),
+            endpoint_health: HashMap::new(),
+            last_sent_endpoint: HashMap::new(),
         })
     }
 
@@ -329,6 +342,65 @@ impl MeshData {
         }
     }
 
+    /// 逐路径活性（v1.5）：按帧实际到达的上一跳更新——首跳 == 入站跳的路径
+    /// ok，其余 miss。直连帧（入站 == 源节点）全 ok；经中继的帧证明中继路径
+    /// 存活、直连路径死亡，避免收到中继帧误重置直连 miss（不对称拓扑快速切换）。
+    fn apply_ingress_health(&mut self, from: u32) {
+        let Some(ingress) = self.ingress_hop.get(&from).copied() else {
+            return;
+        };
+        let Some(paths) = self.path_table.get(&from).cloned() else {
+            return;
+        };
+        for p in paths {
+            let hop0 = p.hops.first().copied().unwrap_or(from);
+            if hop0 == ingress {
+                self.path_ok(p.path_id);
+            } else {
+                self.path_miss(p.path_id);
+            }
+        }
+    }
+
+    /// 端点归属反查：UDP 发送者地址 → 节点（NAT 改写等未匹配场景 = None）
+    fn endpoint_owner(&self, addr: SocketAddr) -> Option<u32> {
+        self.endpoint_table
+            .iter()
+            .find_map(|(id, addrs)| addrs.contains(&addr).then_some(*id))
+    }
+
+    /// 发送端点排序：活性 miss 少优先；同活性时上次未用的优先（轮换尝试，
+    /// 避免黑洞端点被反复选中）
+    fn order_endpoints(&self, hop: u32, dest: u32, addrs: &mut [SocketAddr]) {
+        let last = self.last_sent_endpoint.get(&dest).copied();
+        addrs.sort_by_key(|a| {
+            (
+                self.endpoint_health.get(&(hop, *a)).copied().unwrap_or(0),
+                Some(*a) == last,
+            )
+        });
+    }
+
+    /// 端点级活性 miss：上次对该目标实际使用的端点 miss+1（UDP 黑洞端点
+    /// 逐个排除，与 path_miss_peer 同源驱动）
+    pub fn miss_endpoint(&mut self, dest: u32) {
+        let Some(addr) = self.last_sent_endpoint.get(&dest).copied() else {
+            return;
+        };
+        let Some(owner) = self.endpoint_owner(addr) else {
+            return;
+        };
+        let m = self.endpoint_health.entry((owner, addr)).or_insert(0);
+        *m = m.saturating_add(1);
+    }
+
+    /// 收帧：来源端点活性恢复（入站帧证明该端点可达）
+    fn note_endpoint_ok(&mut self, owner: u32, addr: SocketAddr) {
+        if let Some(m) = self.endpoint_health.get_mut(&(owner, addr)) {
+            *m = 0;
+        }
+    }
+
     pub fn set_key_dst(&mut self, node_id: u32, key: [u8; 32]) {
         self.key_dst_table.insert(node_id, key);
     }
@@ -337,12 +409,33 @@ impl MeshData {
         self.key_dst_table.remove(&node_id);
     }
 
+    /// 全量替换端点列表（netmap 全量语义）；过滤无 scope 的链路本地地址（不可路由）
+    pub fn set_endpoints(&mut self, node_id: u32, addrs: Vec<SocketAddr>) {
+        let usable: Vec<SocketAddr> = addrs
+            .into_iter()
+            .filter(|a| {
+                !a.ip().is_unspecified()
+                    && match a.ip() {
+                        IpAddr::V6(v6) => !v6.is_unicast_link_local(),
+                        _ => true,
+                    }
+            })
+            .collect();
+        if !usable.is_empty() {
+            self.endpoint_table.insert(node_id, usable);
+        }
+    }
+
+    /// 单端点注入（测试/单端点场景便捷入口）
     pub fn set_endpoint(&mut self, node_id: u32, addr: SocketAddr) {
-        self.endpoint_table.insert(node_id, addr);
+        self.set_endpoints(node_id, vec![addr]);
     }
 
     pub fn endpoint(&self, node_id: u32) -> Option<SocketAddr> {
-        self.endpoint_table.get(&node_id).copied()
+        self.endpoint_table
+            .get(&node_id)
+            .and_then(|v| v.first())
+            .copied()
     }
 
     pub fn set_handshake_context(&mut self, ctx: HandshakeContext) {
@@ -570,29 +663,61 @@ impl MeshData {
 
     pub async fn send_to_node(&self, to_node_id: u32, frame: &[u8]) -> std::io::Result<bool> {
         match self.endpoint_table.get(&to_node_id) {
-            Some(addr) => {
-                self.socket.send_to(frame, addr).await?;
-                Ok(true)
+            Some(addrs) => {
+                for addr in addrs {
+                    if self.socket.send_to(frame, addr).await.is_ok() {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
             None => Ok(false),
         }
     }
 
-    /// 按路径首跳发送（v2）：首跳 = 路径第一跳（relay 或 dest 本身）
+    /// 按路径首跳发送（v2）：首跳 = 路径第一跳（relay 或 dest 本身）。
+    /// 多端点按活性排序逐个尝试（黑洞端点靠 miss 置后，见 order_endpoints）。
     pub async fn send_to_node_hop(
-        &self,
+        &mut self,
         to_node_id: u32,
         first_hop: Option<u32>,
         frame: &[u8],
     ) -> std::io::Result<bool> {
         let hop = first_hop.unwrap_or(to_node_id);
         match self.endpoint_table.get(&hop) {
-            Some(addr) => {
-                self.socket.send_to(frame, addr).await?;
-                Ok(true)
+            Some(addrs) => {
+                let mut ordered = addrs.clone();
+                self.order_endpoints(hop, to_node_id, &mut ordered);
+                let mut last_err = None;
+                let mut last_tried = None;
+                for addr in ordered {
+                    last_tried = Some(addr);
+                    match self.socket.send_to(frame, addr).await {
+                        Ok(_) => {
+                            self.last_sent_endpoint.insert(to_node_id, addr);
+                            return Ok(true);
+                        }
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                // 发送失败（无路由等）→ 主路径 + 端点 miss，推进快速切换
+                self.path_miss_peer(to_node_id);
+                if let Some(addr) = last_tried {
+                    if let Some(owner) = self.endpoint_owner(addr) {
+                        let m = self.endpoint_health.entry((owner, addr)).or_insert(0);
+                        *m = m.saturating_add(1);
+                    }
+                }
+                Err(last_err.unwrap_or_else(|| std::io::Error::other("no endpoint")))
             }
             None => Ok(false),
         }
+    }
+
+    /// 到目的的首跳（候选路径第一条 hops[0]）；无路径表 = 直发（v1 语义）
+    pub fn path_first_hop(&mut self, dest: u32) -> Option<u32> {
+        self.pick_path(dest, 0)
+            .and_then(|p| p.hops.first().copied())
     }
 
     pub async fn recv_frame(&self) -> std::io::Result<(SocketAddr, Vec<u8>)> {
@@ -602,14 +727,25 @@ impl MeshData {
         Ok((from, buf))
     }
 
-    /// 收帧处理：relay 路径校验 → 按包类型分发（握手/数据/心跳/广播）
+    /// 收帧处理：relay 路径校验 → 按包类型分发（握手/数据/心跳/广播）。
+    /// 入站路径记录 + 逐路径活性在分发前更新（帧实际到达的上一跳 = UDP 发送者归属）。
     pub async fn handle_incoming(&mut self) -> std::io::Result<IncomingEvent> {
-        let (_, frame) = self.recv_frame().await?;
+        let (from_addr, frame) = self.recv_frame().await?;
         match self.relay(&frame).await {
             RelayOutcome::Delivered { frame, from } => {
+                if let Some(ingress) = self.endpoint_owner(from_addr) {
+                    self.ingress_hop.insert(from, ingress);
+                    self.note_endpoint_ok(ingress, from_addr);
+                }
+                self.apply_ingress_health(from);
                 Ok(self.dispatch_delivered(from, &frame).await)
             }
             RelayOutcome::Flooded { frame, from, .. } => {
+                if let Some(ingress) = self.endpoint_owner(from_addr) {
+                    self.ingress_hop.insert(from, ingress);
+                    self.note_endpoint_ok(ingress, from_addr);
+                }
+                self.apply_ingress_health(from);
                 Ok(self.dispatch_delivered(from, &frame).await)
             }
             RelayOutcome::Forwarded { to } => Ok(IncomingEvent::Relayed { to }),
@@ -761,7 +897,8 @@ impl MeshData {
                 }
             }
         };
-        match self.send_to_node(from, &frame).await {
+        let hop = self.path_first_hop(from);
+        match self.send_to_node_hop(from, hop, &frame).await {
             Ok(true) => {
                 self.sessions.insert(from, Session::new(from, keys));
                 IncomingEvent::Established { peer: from }
@@ -800,12 +937,13 @@ impl MeshData {
         }
     }
 
-    async fn send_response(&self, to: u32, payload: &[u8]) -> bool {
+    async fn send_response(&mut self, to: u32, payload: &[u8]) -> bool {
         let frame = match self.build_handshake_frame(to, payload) {
             Ok(f) => f,
             Err(_) => return false,
         };
-        matches!(self.send_to_node(to, &frame).await, Ok(true))
+        let hop = self.path_first_hop(to);
+        matches!(self.send_to_node_hop(to, hop, &frame).await, Ok(true))
     }
 
     /// AEAD 解密收尾：已建会话的 UNICAST/HEARTBEAT 帧统一走这里
@@ -931,15 +1069,19 @@ impl MeshData {
         } else {
             None
         };
-        let endpoint =
-            match next_hop.or_else(|| self.endpoint_table.get(&header.to_node_id).copied()) {
-                Some(e) => e,
-                None => {
-                    return RelayOutcome::Dropped {
-                        reason: DropReason::NoEndpoint,
-                    }
-                }
+        let endpoint = match next_hop {
+            Some(e) => Some(e),
+            None => self
+                .endpoint_table
+                .get(&header.to_node_id)
+                .and_then(|v| v.first())
+                .copied(),
+        };
+        let Some(endpoint) = endpoint else {
+            return RelayOutcome::Dropped {
+                reason: DropReason::NoEndpoint,
             };
+        };
         let mut out = frame.to_vec();
         out[3] -= 1;
         match self.socket.send_to(&out, endpoint).await {
@@ -960,7 +1102,10 @@ impl MeshData {
             .find(|p| p.path_id == header.path_id && !p.expired(unix_seconds()))?;
         let idx = path.hops.iter().position(|h| *h == self.self_node_id)?;
         let next = path.hops.get(idx + 1)?;
-        self.endpoint_table.get(next).copied()
+        self.endpoint_table
+            .get(next)
+            .and_then(|v| v.first())
+            .copied()
     }
 
     /// 广播帧泛洪路径（FRAME_HEADER §2.6）：
@@ -1008,11 +1153,18 @@ impl MeshData {
         if self.flood_bucket.take() {
             let mut out = frame.to_vec();
             out[3] -= 1;
-            for (id, ep) in &self.endpoint_table {
-                if *id != self.self_node_id
-                    && *id != header.from_node_id
-                    && self.socket.send_to(&out, *ep).await.is_ok()
-                {
+            for (id, addrs) in &self.endpoint_table {
+                if *id == self.self_node_id || *id == header.from_node_id {
+                    continue;
+                }
+                let mut ok = false;
+                for ep in addrs {
+                    if self.socket.send_to(&out, *ep).await.is_ok() {
+                        ok = true;
+                        break;
+                    }
+                }
+                if ok {
                     forwarded.push(*id);
                 }
             }
@@ -1659,6 +1811,120 @@ mod tests {
         a.path_ok_peer(2);
         let picked = a.pick_path(2, 0).unwrap();
         assert_eq!(picked.path_id, 1);
+    }
+
+    #[tokio::test]
+    async fn relayed_ingress_misses_direct_path() {
+        // 经中继到达的帧（UDP 发送者 = relay）：直连路径 miss 递增（中继帧不续命
+        // 直连），中继路径 ok——不对称拓扑下响应方也能收敛到中继路径
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        a.set_endpoint(2, b.local_addr().unwrap());
+        b.set_endpoint(1, a.local_addr().unwrap());
+        a.set_key_dst(1, node_key(1)); // 自身 key_dst（relay 路由校验用）
+        let direct = PathEntry {
+            path_id: 1,
+            path_epoch: 1,
+            hops: vec![3],
+            expires_at: unix_seconds() + 3600,
+        };
+        let relayed = PathEntry {
+            path_id: 2,
+            path_epoch: 1,
+            hops: vec![2, 3],
+            expires_at: unix_seconds() + 3600,
+        };
+        a.set_key_path(1, path_key(1));
+        a.set_key_path(2, path_key(2));
+        a.set_paths(3, vec![direct, relayed]);
+        // 直连预置 miss 2 次（距阈值差 1）
+        a.path_miss_peer(3);
+        a.path_miss_peer(3); // 节点 3 的 msg1 由中继 b 转发到 a（帧头 from=3，UDP 发送者=2）
+        let header = MeshFrameHeader {
+            to_node_id: 1,
+            from_node_id: 3,
+            ..Default::default()
+        };
+        let frame = build_handshake_frame(&header, &node_key(1), &[0u8; MSG1_PAYLOAD_LEN]);
+        b.send_to_node(1, &frame).await.unwrap();
+        let _ = a.handle_incoming().await.unwrap();
+        // 入站跳=2：直连 miss 达阈值被剔除 → flow hash 选中继路径
+        assert_eq!(a.pick_path(3, 0).unwrap().path_id, 2);
+    }
+
+    #[tokio::test]
+    async fn direct_ingress_resets_path_health() {
+        // 直连到达的帧（UDP 发送者 = 源节点）：全部路径健康恢复，主路径回归
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        a.set_endpoint(3, b.local_addr().unwrap()); // b 充当节点 3 的端点
+        b.set_endpoint(1, a.local_addr().unwrap());
+        a.set_key_dst(1, node_key(1)); // 自身 key_dst（relay 路由校验用）
+        let direct = PathEntry {
+            path_id: 1,
+            path_epoch: 1,
+            hops: vec![3],
+            expires_at: unix_seconds() + 3600,
+        };
+        let relayed = PathEntry {
+            path_id: 2,
+            path_epoch: 1,
+            hops: vec![2, 3],
+            expires_at: unix_seconds() + 3600,
+        };
+        a.set_key_path(1, path_key(1));
+        a.set_key_path(2, path_key(2));
+        a.set_paths(3, vec![direct, relayed]);
+        for _ in 0..PATH_HEALTH_MISS_LIMIT {
+            a.path_miss_peer(3);
+        }
+        assert_eq!(a.pick_path(3, 0).unwrap().path_id, 2); // 直连已剔除
+                                                           // 节点 3 直接发来帧（UDP 发送者 = 3 的端点）
+        let header = MeshFrameHeader {
+            to_node_id: 1,
+            from_node_id: 3,
+            ..Default::default()
+        };
+        let frame = build_handshake_frame(&header, &node_key(1), &[0u8; MSG1_PAYLOAD_LEN]);
+        b.send_to_node(1, &frame).await.unwrap();
+        let _ = a.handle_incoming().await.unwrap();
+        // 直连路径恢复 → 主路径回归
+        assert_eq!(a.pick_path(3, 0).unwrap().path_id, 1);
+    }
+
+    #[tokio::test]
+    async fn miss_endpoint_rotates_send_order() {
+        // 多端点节点：黑洞端点 miss 后置 → 发送轮换到活性好的端点
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let ep1 = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+        let ep2 = UdpSocket::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+        let a1 = ep1.local_addr().unwrap();
+        let a2 = ep2.local_addr().unwrap();
+        a.set_endpoints(2, vec![a1, a2]);
+        let mut buf = [0u8; 8];
+        // 活性相同 → 原顺序第一个（ep1）
+        a.send_to_node_hop(2, Some(2), b"m1").await.unwrap();
+        let (n, _) = ep1.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"m1");
+        // 黑洞 miss（上次发送无响应）→ 下次发送轮换到 ep2
+        a.miss_endpoint(2);
+        a.send_to_node_hop(2, Some(2), b"m2").await.unwrap();
+        let (n, _) = ep2.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"m2");
     }
 
     #[tokio::test]

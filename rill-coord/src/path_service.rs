@@ -40,8 +40,12 @@ impl PathSet {
 /// 路径事件（心跳推送，节点以 source 身份取走）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathEvent {
-    /// 路径集变更（全量替换该 dest 的候选）
-    Update { dest: u32, set: PathSet },
+    /// 路径集变更（全量替换该 dest 的候选；source = 路径发起方）
+    Update {
+        source: u32,
+        dest: u32,
+        set: PathSet,
+    },
     /// 路径撤销
     Withdraw { dest: u32, path_id: u64 },
 }
@@ -77,17 +81,20 @@ impl PathService {
     /// max_candidates 上限 4（CONTROL_PLANE §3.11：每目标 2~4 候选）。
     pub fn request(&mut self, source: u32, dest: u32, max: u32, now: u64) -> Vec<PathCandidate> {
         let key = (source, dest);
-        if let Some(set) = self.map.get(&key) {
-            if !set.expired(now) {
-                return set.candidates.clone();
-            }
-        }
         let relays: Vec<u32> = self
             .relays
             .iter()
             .copied()
             .filter(|r| *r != source && *r != dest)
             .collect();
+        if let Some(set) = self.map.get(&key).cloned() {
+            if !set.expired(now) {
+                // 幂等命中：refresh 推送全部参与者（路径下发走心跳推送通道，
+                // 即时响应可能丢失；refresh 保证请求方最终收敛）
+                self.push_to_participants(source, dest, &relays, &set);
+                return set.candidates.clone();
+            }
+        }
         let version = self.map.get(&key).map(|s| s.version).unwrap_or(0) + 1;
         let mut candidates = vec![PathCandidate {
             path_id: self.alloc_path_id(),
@@ -112,24 +119,34 @@ impl PathService {
             version,
             candidates,
         };
+        // 路径参与者全量下发（CONTROL_PLANE §3.11.5：key_path 只发路径参与者）：
+        // source = 路径选择方；dest 与 relay 为接收/转发校验方，同样需要 key_path
+        self.push_to_participants(source, dest, &relays, &set);
+        self.map.insert(key, set);
+        self.map[&key].candidates.clone()
+    }
+
+    /// 路径集事件推给全部参与者（source/dest/relay）；source 也推——即时
+    /// PathResponse 可能丢失，心跳推送通道是权威下发路径
+    /// 路径集事件推给全部参与者（source/dest/relay）；source 也推——即时
+    /// PathResponse 可能丢失，心跳推送通道是权威下发路径
+    fn push_to_participants(&mut self, source: u32, dest: u32, relays: &[u32], set: &PathSet) {
         let event = PathEvent::Update {
+            source,
             dest,
             set: set.clone(),
         };
-        // 路径参与者全量下发（CONTROL_PLANE §3.11.5：key_path 只发路径参与者）：
-        // source = 路径选择方；dest 与 relay 为接收/转发校验方，同样需要 key_path
         self.pending.entry(source).or_default().push(event);
-        for participant in std::iter::once(dest).chain(relays) {
+        for participant in std::iter::once(dest).chain(relays.iter().copied()) {
             self.pending
                 .entry(participant)
                 .or_default()
                 .push(PathEvent::Update {
+                    source,
                     dest,
                     set: set.clone(),
                 });
         }
-        self.map.insert(key, set);
-        self.map[&key].candidates.clone()
     }
 
     /// 吊销联动：撤销所有涉及 node_id 的路径（作为源/目的 = 全撤；仅中继 = 撤该候选保留其余）。
@@ -188,6 +205,7 @@ impl PathService {
                         .entry(source)
                         .or_default()
                         .push(PathEvent::Update {
+                            source,
                             dest,
                             set: set.clone(),
                         });
@@ -261,7 +279,8 @@ mod tests {
         let evs = ps.take_events(1);
         assert_eq!(evs.len(), 1);
         match &evs[0] {
-            PathEvent::Update { dest, set } => {
+            PathEvent::Update { source, dest, set } => {
+                assert_eq!(*source, 1);
                 assert_eq!(*dest, 2);
                 assert_eq!(set.candidates.len(), 1); // 只剩 direct
                 assert_eq!(set.candidates[0].hops, vec![2]);

@@ -8,6 +8,7 @@ use crate::config::{Config, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_SESSION_REKEY_HO
 use crate::packet::{parse_packet, PacketInfo, TransportProto};
 use crate::tun::{TunConfig, TunDevice};
 use ed25519_dalek::VerifyingKey;
+use futures_util::StreamExt;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
 use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
@@ -21,9 +22,49 @@ use std::time::{Duration, Instant};
 pub const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 pub const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(300);
 pub const DATA_HEARTBEAT_MISSES: u32 = 3;
+/// 握手重试间隔：上次尝试无响应视为该路径 miss（UDP 黑洞探活）
+pub const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// mesh→LAN 广播帧写入 land0 后被内核回送入 tun 的防再泛洪窗口
 /// （组播包指纹，FRAME_HEADER §2.6 防环）
 pub const MULTICAST_REWRITE_GUARD: Duration = Duration::from_secs(2);
+
+/// 本机非 loopback、非 tun 接口的 IPv4/IPv6 地址（端点通告用；失败回退空列表）
+async fn collect_local_ips() -> Vec<IpAddr> {
+    let Ok((connection, handle, _)) = rtnetlink::new_connection() else {
+        return Vec::new();
+    };
+    tokio::spawn(connection);
+    let mut skip = HashSet::new();
+    let mut links = handle.link().get().execute();
+    while let Some(Ok(link)) = links.next().await {
+        let name = link
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                netlink_packet_route::link::LinkAttribute::IfName(n) => Some(n.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if name.starts_with("lo") || name.starts_with("land") || name.starts_with("tun") {
+            skip.insert(link.header.index);
+        }
+    }
+    let mut out = Vec::new();
+    let mut addrs = handle.address().get().execute();
+    while let Some(Ok(a)) = addrs.next().await {
+        if skip.contains(&a.header.index) {
+            continue;
+        }
+        for attr in a.attributes {
+            if let netlink_packet_route::address::AddressAttribute::Address(ip) = attr {
+                if !ip.is_loopback() {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone)]
 pub struct NodeOptions {
@@ -70,7 +111,7 @@ pub struct Node {
     opts: NodeOptions,
     mesh: MeshData,
     /// 对外通告 IP（UDP connect 探测路由表得真实出口；mesh socket 绑 0.0.0.0 需此通告）
-    advertise_ip: Option<IpAddr>,
+    advertise_ips: Vec<IpAddr>,
     engine: RouteEngine,
     control: Option<ControlSession>,
     tun: Option<TunDevice>,
@@ -86,6 +127,11 @@ pub struct Node {
     peer_heartbeats: HashMap<u32, u32>,
     /// netmap 发现 v2 peer 后待发的路径请求（v1.5，CONTROL_PLANE §3.11）
     pending_path_requests: Vec<u32>,
+    /// 本节点主动请求过路径的 dest（PathUpdate 只对它们写入发送路径表；
+    /// 作为 dest/relay 参与者收到的路径仅注入 key_path，不覆盖发送表）
+    path_requested: HashSet<u32>,
+    /// 上次握手尝试时刻（peer → 时间；无响应超时驱动路径 miss）
+    last_handshake_attempt: HashMap<u32, Instant>,
     /// 近期写入 land0 的组播包指纹（(src,dst,len) → 时间）；LAN 侧再读到 = 回环，跳过泛洪
     recent_multicast_writes: HashMap<(IpAddr, IpAddr, usize), Instant>,
 }
@@ -96,14 +142,9 @@ impl Node {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{:?}", e))
         })?;
         let mesh = MeshData::bind("0.0.0.0:0".parse()?, 0).await?;
-        // 探测本机对外 IP（connect 不发包，只走路由表；供 EndpointReport 通告真实地址）
-        let advertise_ip = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-            Ok(probe) => match probe.connect("8.8.8.8:53").await {
-                Ok(()) => probe.local_addr().ok().map(|a| a.ip()),
-                Err(_) => None,
-            },
-            Err(_) => None,
-        };
+        // 枚举本机非 loopback、非 tun 接口地址（供 EndpointReport 通告；多宿主节点
+        // 通告全部端点，coordinator 并入 netmap，对端按可达性选用）
+        let advertise_ips = collect_local_ips().await;
         let tun = match &opts.tun {
             Some(tun_cfg) => Some(TunDevice::open(tun_cfg).await?),
             None => None,
@@ -113,7 +154,7 @@ impl Node {
             cfg,
             opts,
             mesh,
-            advertise_ip,
+            advertise_ips,
             engine: RouteEngine::new(),
             control: None,
             tun,
@@ -128,6 +169,8 @@ impl Node {
             reconnect_backoff: RECONNECT_INITIAL_BACKOFF,
             peer_heartbeats: HashMap::new(),
             pending_path_requests: Vec::new(),
+            path_requested: HashSet::new(),
+            last_handshake_attempt: HashMap::new(),
             recent_multicast_writes: HashMap::new(),
         })
     }
@@ -202,30 +245,30 @@ impl Node {
         match ev {
             IncomingEvent::Data { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
-                self.mesh.path_ok_peer(from);
                 Some(payload)
             }
             IncomingEvent::Broadcast { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
-                self.mesh.path_ok_peer(from);
                 Some(payload)
             }
             IncomingEvent::Heartbeat { from } => {
                 self.peer_heartbeats.insert(from, 0);
-                self.mesh.path_ok_peer(from);
                 None
             }
             IncomingEvent::Established { peer } => {
                 eprintln!("[node] session established with {}", peer);
                 self.peer_heartbeats.insert(peer, 0);
-                self.mesh.path_ok_peer(peer);
                 None
             }
             IncomingEvent::Rejected { peer, reason } => {
                 eprintln!("[node] handshake rejected by {}: {:?}", peer, reason);
                 None
             }
-            IncomingEvent::Responded { .. } | IncomingEvent::Relayed { .. } => None,
+            IncomingEvent::Responded { .. } => None,
+            IncomingEvent::Relayed { to } => {
+                eprintln!("[node] relayed frame to {}", to);
+                None
+            }
             IncomingEvent::Dropped { reason } => {
                 eprintln!("[node] frame dropped: {:?}", reason);
                 None
@@ -258,6 +301,7 @@ impl Node {
                 .engine
                 .lookup_best(&info.dst, &|e| matches!(e.via, RouteVia::Mesh(_)))
             else {
+                eprintln!("[node] no mesh route for {}", info.dst);
                 return LanOutcome::Dropped;
             };
             (entry.via.clone(), entry.prefix)
@@ -265,12 +309,32 @@ impl Node {
         match via {
             RouteVia::Mesh(peer) => {
                 if !self.mesh.has_session(peer) {
+                    // 上次握手尝试超时无响应（UDP 黑洞：sendto 成功但被网关丢弃）→
+                    // 主路径 miss + 丢弃在途发起状态，下一次调用重新发起 msg1，
+                    // 经候选备用路径收敛（CONTROL_PLANE §3.11 快速切换）
+                    if self
+                        .last_handshake_attempt
+                        .get(&peer)
+                        .is_some_and(|t| t.elapsed() >= HANDSHAKE_RETRY_INTERVAL)
+                    {
+                        self.mesh.path_miss_peer(peer);
+                        self.mesh.miss_endpoint(peer);
+                        self.mesh.drop_initiator(peer);
+                    }
                     match self.mesh.initiate_handshake(peer) {
                         Ok(Some(msg1)) => {
-                            let ok = self.mesh.send_to_node(peer, &msg1).await.unwrap_or(false);
+                            // 握手帧走候选路径首跳（v1.5：relay 场景经中继建立会话）
+                            let hop = self.mesh.path_first_hop(peer);
+                            let ok = self
+                                .mesh
+                                .send_to_node_hop(peer, hop, &msg1)
+                                .await
+                                .unwrap_or(false);
                             if !ok {
                                 // 发送失败（端点未收敛）：放弃在途状态，等 netmap 收敛后重试
                                 self.mesh.drop_initiator(peer);
+                            } else {
+                                self.last_handshake_attempt.insert(peer, Instant::now());
                             }
                             LanOutcome::Handshaking { peer }
                         }
@@ -310,10 +374,11 @@ impl Node {
                 }
             }
         }
-        // 待发路径请求（netmap 发现 v2 peer 后；随控制面心跳节奏发送）
+        // 待发路径请求（netmap 发现 v2 peer 后；随控制面心跳节奏发送）。
+        // 收到对应 Paths 事件才移除——即时 PathResponse 可能丢失，靠心跳重发收敛
         if !self.pending_path_requests.is_empty() {
             if let Some(control) = self.control.as_mut() {
-                let reqs = std::mem::take(&mut self.pending_path_requests);
+                let reqs: Vec<u32> = self.pending_path_requests.clone();
                 for dest in reqs {
                     let req = control.client().path_request(dest);
                     if control.send_envelope(&req).await.is_err() {
@@ -331,8 +396,11 @@ impl Node {
                 *miss += 1;
                 // 路径活性联动（v1.5）：miss 累计 → 主路径健康下降 → pick_path 切备用
                 self.mesh.path_miss_peer(peer);
+                self.mesh.miss_endpoint(peer);
                 if let Ok(frame) = self.mesh.build_heartbeat_frame(peer) {
-                    let _ = self.mesh.send_to_node(peer, &frame).await;
+                    // 心跳帧同样走路径首跳（会话经 relay 建立后保活同路径）
+                    let hop = self.mesh.path_first_hop(peer);
+                    let _ = self.mesh.send_to_node_hop(peer, hop, &frame).await;
                 }
                 if *miss >= self.opts.data_heartbeat_misses {
                     self.mesh.drop_session(peer);
@@ -435,7 +503,11 @@ impl Node {
                 self.peer_heartbeats.insert(from, 0);
                 None
             }
-            IncomingEvent::Responded { .. } | IncomingEvent::Relayed { .. } => None,
+            IncomingEvent::Responded { .. } => None,
+            IncomingEvent::Relayed { to } => {
+                eprintln!("[node] relayed frame to {}", to);
+                None
+            }
             IncomingEvent::Dropped { reason } => {
                 eprintln!("[node] frame dropped: {:?}", reason);
                 None
@@ -477,13 +549,19 @@ impl Node {
                             binding,
                         )
                     });
-                // 端点上报：数据面 UDP 地址（真实出口 IP + 端口）→ coordinator 并入 netmap
+                // 端点上报：数据面 UDP 地址（本机各接口 IP + 端口）→ coordinator 并入 netmap
                 if let Some(control) = self.control.as_mut() {
                     if let Ok(addr) = self.mesh.local_addr() {
-                        let ip = self.advertise_ip.unwrap_or(addr.ip());
-                        let ep = SocketAddr::new(ip, addr.port());
-                        eprintln!("[node] endpoint report: {}", ep);
-                        let report = control.endpoint_report_envelope(vec![ep.to_string()]);
+                        let mut eps: Vec<String> = self
+                            .advertise_ips
+                            .iter()
+                            .map(|ip| SocketAddr::new(*ip, addr.port()).to_string())
+                            .collect();
+                        if eps.is_empty() {
+                            eps.push(addr.to_string());
+                        }
+                        eprintln!("[node] endpoint report: {:?}", eps);
+                        let report = control.endpoint_report_envelope(eps);
                         let _ = control.send_envelope(&report).await;
                     }
                 }
@@ -558,18 +636,10 @@ impl Node {
             ControlEvent::Paths {
                 destination_node_id,
                 candidates,
+                source_node_id,
                 ..
             } => {
-                // 候选路径 + key_path 注入（v1.5，CONTROL_PLANE §3.11）
-                let entries: Vec<PathEntry> = candidates
-                    .iter()
-                    .map(|c| PathEntry {
-                        path_id: c.path_id,
-                        path_epoch: c.path_epoch,
-                        hops: c.hops.clone(),
-                        expires_at: c.expires_at,
-                    })
-                    .collect();
+                // key_path 全部注入（路径级授权，CONTROL_PLANE §3.11.5：参与者校验/转发用）
                 for c in &candidates {
                     if c.key_path.len() == 32 {
                         let mut kp = [0u8; 32];
@@ -577,13 +647,34 @@ impl Node {
                         self.mesh.set_key_path(c.path_id, kp);
                     }
                 }
-                self.mesh.set_paths(destination_node_id, entries);
+                // 发送路径表只写自己发起的路径（source = 自己）；作为 dest/relay
+                // 参与者收到的其他源路径仅注入 key_path（覆盖会污染发送选择表）
+                if source_node_id == self.node_id.unwrap_or(u32::MAX) {
+                    let entries: Vec<PathEntry> = candidates
+                        .iter()
+                        .map(|c| PathEntry {
+                            path_id: c.path_id,
+                            path_epoch: c.path_epoch,
+                            hops: c.hops.clone(),
+                            expires_at: c.expires_at,
+                        })
+                        .collect();
+                    self.mesh.set_paths(destination_node_id, entries);
+                    // 已收敛：该 dest 的请求不再重发
+                    self.pending_path_requests
+                        .retain(|d| *d != destination_node_id);
+                }
                 eprintln!(
-                    "[node] paths to {}: {:?}",
+                    "[node] paths to {} (src {}) {:?} (kp: {:?})",
                     destination_node_id,
+                    source_node_id,
                     candidates
                         .iter()
                         .map(|c| (c.path_id, c.hops.clone()))
+                        .collect::<Vec<_>>(),
+                    candidates
+                        .iter()
+                        .map(|c| (c.path_id, c.key_path.len()))
                         .collect::<Vec<_>>()
                 );
             }
@@ -612,11 +703,13 @@ impl Node {
             fresh.insert(entry.node_id);
             self.mesh
                 .set_peer_static(entry.node_id, entry.static_pubkey);
+            let mut addrs: Vec<SocketAddr> = Vec::new();
             for ep in &entry.endpoints {
                 if let Ok(addr) = ep.parse::<SocketAddr>() {
-                    self.mesh.set_endpoint(entry.node_id, addr);
+                    addrs.push(addr);
                 }
             }
+            self.mesh.set_endpoints(entry.node_id, addrs);
             for route in &entry.routes {
                 if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(route) {
                     self.engine.insert(RouteEntry {
@@ -644,6 +737,7 @@ impl Node {
 
     /// 登记待发路径请求（netmap 全量替换每次都会触发，幂等：重复请求 = 刷新路径集）
     fn request_paths_for(&mut self, dest: u32) {
+        self.path_requested.insert(dest);
         if !self.pending_path_requests.contains(&dest) {
             self.pending_path_requests.push(dest);
         }

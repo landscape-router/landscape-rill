@@ -11,6 +11,7 @@ landscape-rill-mesh = { path = "../rill-mesh" }
 tokio.workspace = true
 tun.workspace = true
 rtnetlink.workspace = true
+netlink-packet-route.workspace = true
 futures-util.workspace = true
 ed25519-dalek.workspace = true
 

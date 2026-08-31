@@ -10,6 +10,11 @@
 - Use concise comments in code
 - Only describe in detail when the logic is complex
 
+## Edits
+
+- When changes are concentrated in a single small file (≤500 lines) and touch 3+ spots, rewrite the whole file at once instead of applying edit calls one by one.
+- Otherwise, prefer targeted edits to avoid touching unrelated parts.
+
 ## Doc
 
 - Docs must contain version number and last modified time
@@ -32,3 +37,14 @@ Docs are organized as: requirements (why/when) → design (authoritative behavio
 - Only reference docs where the code binds to a protocol/security contract (constants, wire format, crypto semantics). Pure implementation logic gets no reference.
 - The short name must be registered; `§x.y` must exist as a numbered heading in the target file (checked by `check-docs.sh`).
 - Keep reverse references (design → src paths) sparse; they belong only in "决策记录/实现级决定" sections.
+
+## Protocol Versioning
+
+- The project has never been officially released. As long as crate versions stay below `2.x.x`, protocols (wire format, message families, semantics) may be changed directly without backward compatibility. No `v1`/legacy coexistence or compatibility shims are required.
+- Backward compatibility (and mixed-version interop verification) only starts once a crate version enters `2.x.x`; then `1.x.x` wire behavior must be honored.
+- In-repo protocol negotiation fields (e.g. `protocol_version`) are still part of the design; do not add extra override hooks or compatibility e2e scenarios just to exercise legacy versions.
+
+## Verify
+
+- After any docs change, run `./docs/ci/check-docs.sh`.
+- Local gate before commit: `cargo +stable test --workspace`, `cargo +stable clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, then `./e2e/run_e2e.sh` (default `direct` scenario) and `MESH_E2E_SCENARIO=relay ./e2e/run_e2e.sh`.

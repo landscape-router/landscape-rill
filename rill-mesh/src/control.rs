@@ -518,26 +518,13 @@ impl CoordinatorServer {
                     )
                     .into());
                 };
-                let cands = self.coordinator.request_paths(
+                let _ = self.coordinator.request_paths(
                     source,
                     req.destination_node_id,
                     req.max_candidates,
                 );
-                let resp = PathResponse {
-                    destination_node_id: req.destination_node_id,
-                    candidates: cands
-                        .iter()
-                        .map(|(c, key)| CandidatePath {
-                            path_id: c.path_id,
-                            path_epoch: c.path_epoch,
-                            hops: Cow::Owned(hops_bytes(&c.hops)),
-                            expires_at: c.expires_at,
-                            key_path: Cow::Owned(key.to_vec()),
-                        })
-                        .collect(),
-                    path_version: 1,
-                };
-                write_msg(stream, MsgType::PATH_RESPONSE, &envelope_body(&resp)).await?;
+                // 响应不下发：路径集事件走心跳推送通道（push_path_events），
+                // 与 NETMAP/LEASE 同批次写入——即时写回在并发下不可靠
             }
             MsgType::PATH_PROBE
             | MsgType::PATH_PROBE_RESPONSE
@@ -569,9 +556,14 @@ impl CoordinatorServer {
         stream: &mut W,
         source: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for event in self.coordinator.take_path_events(source) {
+        let events = self.coordinator.take_path_events(source);
+        for event in events {
             match event {
-                landscape_rill_coord::path_service::PathEvent::Update { dest, set } => {
+                landscape_rill_coord::path_service::PathEvent::Update {
+                    source: src,
+                    dest,
+                    set,
+                } => {
                     let msg = PathUpdate {
                         destination_node_id: dest,
                         candidates: set
@@ -590,6 +582,7 @@ impl CoordinatorServer {
                             })
                             .collect(),
                         path_version: set.version,
+                        source_node_id: src,
                     };
                     write_msg(stream, MsgType::PATH_UPDATE, &envelope_body(&msg)).await?;
                 }
@@ -666,6 +659,8 @@ pub enum ControlEvent {
         destination_node_id: u32,
         candidates: Vec<PathCandidateMsg>,
         version: u64,
+        /// 路径发起方：= 自己时路径可写入发送路径表；否则仅 key_path 授权
+        source_node_id: u32,
     },
     /// 路径撤销（PathWithdraw）
     PathWithdrawn {
@@ -822,7 +817,13 @@ impl ControlSession {
                 })
             }
             MsgType::PATH_RESPONSE | MsgType::PATH_UPDATE => {
-                let owned = PathResponseOwned::try_from(body).map_err(decoding_err)?;
+                let owned = match PathResponseOwned::try_from(body) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("[node] PATH parse failed: {:?}", e);
+                        return Err(decoding_err(e));
+                    }
+                };
                 let candidates = owned
                     .proto()
                     .candidates
@@ -839,6 +840,7 @@ impl ControlSession {
                     destination_node_id: owned.proto().destination_node_id,
                     candidates,
                     version: owned.proto().path_version,
+                    source_node_id: owned.proto().source_node_id,
                 })
             }
             MsgType::PATH_WITHDRAW => {
