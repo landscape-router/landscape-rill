@@ -16,7 +16,8 @@ HEADSCALE_VER="${P0_HEADSCALE_VER:-0.29.3}"
 TAILSCALE_VER="${P0_TAILSCALE_VER:-1.102.2}"
 
 echo "==> 0/7 预置 base 镜像（依赖 mesh-e2e-base：iproute2/iputils-ping/ca-certificates）"
-E2E_DNS="${MESH_E2E_DNS:-$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf)}"
+E2E_DNS="${MESH_E2E_DNS:-$(awk '$1=="nameserver" && $2 !~ /^(127\.|::1$)/{print $2; exit}' /etc/resolv.conf)}"
+[ -n "$E2E_DNS" ] || E2E_DNS="1.1.1.1"  # 宿主仅 loopback stub（CI）时回退公共 DNS
 if ! docker image inspect mesh-e2e-base >/dev/null 2>&1; then
   docker run --dns "$E2E_DNS" debian:bookworm-slim sh -c \
     "apt-get update && apt-get install -y --no-install-recommends \

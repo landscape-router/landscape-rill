@@ -18,7 +18,8 @@ OVERLAY="$ROOT_DIR/target/release/lrill"
 hex() { openssl rand -hex 32; }
 
 echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"
-E2E_DNS="${MESH_E2E_DNS:-$(awk '/nameserver/{print $2; exit}' /etc/resolv.conf)}"
+E2E_DNS="${MESH_E2E_DNS:-$(awk '$1=="nameserver" && $2 !~ /^(127\.|::1$)/{print $2; exit}' /etc/resolv.conf)}"
+[ -n "$E2E_DNS" ] || E2E_DNS="1.1.1.1"  # 宿主仅 loopback stub（CI）时回退公共 DNS
 if ! docker image inspect mesh-e2e-base >/dev/null 2>&1; then
   docker run --dns "$E2E_DNS" debian:bookworm-slim sh -c \
     "apt-get update && apt-get install -y --no-install-recommends \

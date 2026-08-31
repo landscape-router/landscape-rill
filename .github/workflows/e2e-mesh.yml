@@ -16,4 +16,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: mesh e2e
+        env:
+          # runner 的 /etc/resolv.conf 仅 systemd-resolved stub，容器内不可达，须显式公共 DNS
+          MESH_E2E_DNS: 1.1.1.1
         run: ./e2e/run_e2e.sh
