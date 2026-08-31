@@ -1,4 +1,5 @@
 use crate::framing;
+use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
 use landscape_rill_core::control::session::{ClientSession, SessionState};
 use landscape_rill_proto::wire::control::*;
@@ -291,6 +292,18 @@ impl CoordinatorServer {
         }
     }
 
+    /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（auth keys + 白名单）
+    pub fn from_config(cfg: &CoordConfig) -> Self {
+        let mut server = Self::new(cfg.master_key, cfg.signing_seed);
+        cfg.apply_to(&mut server.coordinator);
+        server
+    }
+
+    /// 管理面库 API（REQ-038）：配置重载（SIGHUP）入口，增量收敛、不中断在途连接
+    pub fn apply_config(&mut self, cfg: &CoordConfig) {
+        cfg.apply_to(&mut self.coordinator);
+    }
+
     /// 注册成功/挑战通过后：全量 netmap + 逐节点 key_dst + 广播密钥（v1 全量互连）
     async fn push_snapshot<W: AsyncWriteExt + Unpin>(
         &self,
@@ -346,6 +359,7 @@ impl CoordinatorServer {
                     req.hostname
                         .as_ref()
                         .split(',')
+                        .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect()
                 } else {
@@ -400,11 +414,12 @@ impl CoordinatorServer {
                         }
                     }
                     Err(e) => {
+                        eprintln!("[coord] register rejected: {:?}", e);
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             format!("{:?}", e),
                         )
-                        .into())
+                        .into());
                     }
                 }
             }

@@ -4,17 +4,21 @@
 //! - `lrill pubkey <signing_seed_hex>`：signing_seed → Ed25519 公钥，供节点配置信任锚
 //! - `lrill run [config_path]`：前台运行 daemon（缺省 /etc/landscape/overlay.json）；
 //!   systemd 场景由 unit 调用，容器场景由 ENTRYPOINT 调用（REQ-042）
+//! - `lrill authkey --network <slug>`：生成 auth key（lrk 格式，REQ-036），输出仅 stdout
+//! - `lrill up | down | status`：systemd 托管（REQ-042）；无 systemd 环境报错提示 `lrill run`
 //!
 //! 配置文件（JSON，默认 /etc/landscape/overlay.json）：
 //! - node 角色：coordinator_url / auth_key / static_key_seed(hex32) / announce_routes /
 //!   coord_signing_pubkey(hex32) / ca_cert_path / tun（可选）
-//! - coord 角色（可选，同进程共存）：listen_addr / master_key(hex32) / signing_seed(hex32) /
-//!   tls_cert_path / tls_key_path / auth_keys
+//! - coord 角色（可选，同进程共存）：见 rill-coord `CoordConfig`（network / listen_addr /
+//!   master_key / signing_seed / tls / auth_keys / announce_whitelist），加载即校验（fail-closed）
 //!
-//! 密钥均为 64 字符 hex；coord 角色 = 共享注册表多连接服务（ConnectionState 按连接隔离）。
+//! coordinator 配置变更生效 = SIGHUP 重载（增量应用，不中断在途连接；重载失败保持旧配置）。
+//! 配置与执行分离（REQ-038，CONTROL_PLANE §3.12）：CoordConfig 解析/校验在 rill-coord，
+//! 生效走 CoordinatorServer::from_config/apply_config 库 API；本文件只是薄调用层。
 
 use clap::{Parser, Subcommand};
-use landscape_rill_core::control::registry::AuthKeyPolicy;
+use landscape_rill_coord::config::{generate_auth_key, CoordConfig};
 use landscape_rill_mesh::control::{
     read_envelope, server_tls_stream, ConnectionState, CoordinatorServer,
 };
@@ -23,12 +27,13 @@ use landscape_rill_node::runtime::{Node, NodeOptions};
 use landscape_rill_node::tun::TunConfig;
 use serde::{Deserialize, Deserializer, Serializer};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/landscape/overlay.json";
+const UNIT_NAME: &str = "lrill.service";
 
 #[derive(Parser)]
 #[command(name = "lrill", version, about = "landscape-rill edge node daemon")]
@@ -43,6 +48,18 @@ enum Command {
     Pubkey { seed: String },
     /// 前台运行 daemon（缺省配置 /etc/landscape/overlay.json）
     Run { config: Option<PathBuf> },
+    /// 生成 auth key（lrk-<network>-<base32>，输出仅 stdout，不落日志）
+    Authkey {
+        /// 网络标识（归域绑定，须与 coordinator 配置 network 一致）
+        #[arg(long)]
+        network: String,
+    },
+    /// 安装并启动 systemd 服务（无 systemd 环境报错提示 `lrill run`）
+    Up,
+    /// 停止 systemd 服务
+    Down,
+    /// 查询 systemd 服务状态
+    Status,
 }
 
 // ============================================================================
@@ -69,7 +86,7 @@ struct FileConfig {
     #[serde(default)]
     tun: Option<TunFile>,
     #[serde(default)]
-    coord: Option<CoordFile>,
+    coord: Option<CoordConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,47 +111,8 @@ fn default_mtu() -> u16 {
     1420
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct CoordFile {
-    listen_addr: String,
-    #[serde(with = "hex32")]
-    master_key: [u8; 32],
-    #[serde(with = "hex32")]
-    signing_seed: [u8; 32],
-    tls_cert_path: String,
-    tls_key_path: String,
-    #[serde(default)]
-    auth_keys: Vec<AuthKeyFile>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AuthKeyFile {
-    key: String,
-    #[serde(default = "default_policy")]
-    policy: String,
-}
-
-fn default_policy() -> String {
-    "reusable".into()
-}
-
 /// [u8; 32] ⇄ 64 字符 hex（无第三方 hex crate）
 mod hex32 {
-    use super::*;
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
-        let s = String::deserialize(d)?;
-        let bytes = decode(&s).map_err(serde::de::Error::custom)?;
-        bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("expected 32 bytes (64 hex chars)"))
-    }
-
-    #[allow(dead_code)]
-    pub fn serialize<S: Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&encode_owned(v))
-    }
-
     pub(crate) fn decode(s: &str) -> Result<Vec<u8>, String> {
         if !s.len().is_multiple_of(2) {
             return Err("odd hex length".into());
@@ -176,51 +154,177 @@ mod hex32_opt {
 
 // ============================================================================
 // coordinator 角色：共享注册表 + 按连接隔离状态的多连接服务
+// 配置变更（SIGHUP）→ 重新解析 + apply_config 增量应用（REQ-038）
 // ============================================================================
 
-async fn run_coord(coord: CoordFile) -> Result<(), Box<dyn std::error::Error>> {
-    let cert = std::fs::read(&coord.tls_cert_path)?;
-    let key = std::fs::read(&coord.tls_key_path)?;
-    let mut listener = TcpListener::bind(coord.listen_addr.parse::<SocketAddr>()?).await?;
-    let server = Arc::new(Mutex::new(CoordinatorServer::new(
-        coord.master_key,
-        coord.signing_seed,
-    )));
-    {
-        let mut guard = server.lock().await;
-        for ak in &coord.auth_keys {
-            let policy = match ak.policy.as_str() {
-                "onetime" => AuthKeyPolicy::OneTime,
-                _ => AuthKeyPolicy::Reusable,
-            };
-            guard.coordinator.add_auth_key(&ak.key, policy);
-        }
-    }
-    eprintln!("[coord] listening on {}", listener.local_addr()?);
+/// 从 overlay.json 取出嵌套的 coord 配置（coord 角色字段），加载即校验（fail-closed）
+fn load_coord(path: &Path) -> Result<CoordConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let text = std::fs::read_to_string(path)?;
+    let file: FileConfig = serde_json::from_str(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let coord = file.coord.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "配置中无 coord 角色字段")
+    })?;
+    coord.validate().map_err(|e| {
+        Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        ))
+    })?;
+    Ok(coord)
+}
+
+async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = load_coord(config_path)?;
+    let cert = std::fs::read(&config.tls_cert_path)?;
+    let key = std::fs::read(&config.tls_key_path)?;
+    let mut listener = TcpListener::bind(config.listen_addr.parse::<SocketAddr>()?).await?;
+    let server = Arc::new(Mutex::new(CoordinatorServer::from_config(&config)));
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    eprintln!(
+        "[coord] listening on {} (network={}, reload=SIGHUP)",
+        listener.local_addr()?,
+        config.network
+    );
     loop {
-        let mut tls = server_tls_stream(&mut listener, &cert, &key).await?;
-        let srv = server.clone();
-        tokio::spawn(async move {
-            let mut conn = ConnectionState::default();
-            loop {
-                let (msg_type, body) = match read_envelope(&mut tls).await {
-                    Ok(v) => v,
-                    Err(_) => break,
-                };
-                let mut guard = srv.lock().await;
-                if guard
-                    .handle_message(&mut conn, &mut tls, msg_type, &body)
-                    .await
-                    .is_err()
-                {
-                    break;
+        tokio::select! {
+            // 注意：首次 poll 才注册信号监听，首个连接也走同一 select（无提前 await 窗口）
+            _ = hangup.recv() => {
+                eprintln!("[coord] SIGHUP received");
+                match load_coord(config_path) {
+                    Ok(new_cfg) => {
+                        server.lock().await.apply_config(&new_cfg);
+                        eprintln!("[coord] config reloaded (SIGHUP)");
+                    }
+                    Err(e) => eprintln!("[coord] reload failed, keeping old config: {e}"),
                 }
             }
-        });
+            next = accept_next(&mut listener, &cert, &key) => {
+                let tls = next?;
+                let srv = server.clone();
+                tokio::spawn(async move {
+                    let mut conn = ConnectionState::default();
+                    let mut tls = tls;
+                    loop {
+                        let (msg_type, body) = match read_envelope(&mut tls).await {
+                            Ok(v) => v,
+                            Err(_) => break,
+                        };
+                        let mut guard = srv.lock().await;
+                        if guard
+                            .handle_message(&mut conn, &mut tls, msg_type, &body)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn accept_next(
+    listener: &mut TcpListener,
+    cert: &[u8],
+    key: &[u8],
+) -> Result<
+    tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    server_tls_stream(listener, cert, key).await.map_err(|e| {
+        Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(e.to_string()))
+    })
+}
+
+// ============================================================================
+// systemd 托管（REQ-042）：unit 模板生成/安装；无 systemd 明确报错提示 lrill run
+// ============================================================================
+
+fn systemd_unit() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "/usr/local/bin/lrill".into());
+    format!(
+        "[Unit]\n\
+         Description=landscape-rill edge node daemon\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\
+         \n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={exe} run\n\
+         ExecReload=/bin/kill -HUP $MAINPID\n\
+         Restart=on-failure\n\
+         RestartSec=3\n\
+         \n\
+         [Install]\n\
+         WantedBy=multi-user.target\n"
+    )
+}
+
+fn require_systemctl() -> Result<(), String> {
+    if std::process::Command::new("systemctl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return Err("无 systemd 环境：请用 `lrill run` 前台运行".into());
+    }
+    Ok(())
+}
+
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let out = std::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+fn cmd_up() -> Result<(), String> {
+    require_systemctl()?;
+    let unit_path = PathBuf::from("/etc/systemd/system").join(UNIT_NAME);
+    std::fs::write(&unit_path, systemd_unit())
+        .map_err(|e| format!("写入 {}: {e}", unit_path.display()))?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", "--now", UNIT_NAME])?;
+    println!("lrill.service installed and started");
+    Ok(())
+}
+
+fn cmd_down() -> Result<(), String> {
+    require_systemctl()?;
+    systemctl(&["stop", UNIT_NAME])?;
+    systemctl(&["disable", UNIT_NAME])?;
+    println!("lrill.service stopped");
+    Ok(())
+}
+
+fn cmd_status() -> Result<(), String> {
+    require_systemctl()?;
+    let out = std::process::Command::new("systemctl")
+        .args(["status", UNIT_NAME, "--no-pager"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() || !out.stderr.is_empty() {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+        print!("{}", String::from_utf8_lossy(&out.stderr));
+    } else {
+        println!("lrill.service 未运行（或未安装）");
+    }
+    Ok(())
+}
+
+// ============================================================================
+// main
+// ============================================================================
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     match cli.command {
@@ -235,6 +339,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", hex32::encode_owned(&vk.to_bytes()));
             Ok(())
         }
+        Some(Command::Authkey { network }) => {
+            let key = generate_auth_key(&network)?;
+            println!("{key}");
+            Ok(())
+        }
+        Some(Command::Up) => cmd_up().map_err(Into::into),
+        Some(Command::Down) => cmd_down().map_err(Into::into),
+        Some(Command::Status) => cmd_status().map_err(Into::into),
         None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH)),
         Some(Command::Run { config }) => {
             run_daemon(&config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)))
@@ -242,7 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn run_daemon(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| std::io::Error::new(e.kind(), format!("config {}: {}", path.display(), e)))?;
     let file: FileConfig = serde_json::from_str(&text)
@@ -251,10 +363,12 @@ fn run_daemon(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let config_path = path.to_path_buf();
     runtime.block_on(async move {
-        if let Some(coord) = file.coord {
+        if file.coord.is_some() {
+            let path = config_path.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_coord(coord).await {
+                if let Err(e) = run_coord(&path).await {
                     eprintln!("[coord] fatal: {}", e);
                 }
             });
@@ -317,7 +431,9 @@ fn run_daemon(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| "-".into())
         );
-        let node = Node::new(config, opts).await?;
+        let node = Node::new(config, opts)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         node.run().await;
         Ok(())
     })

@@ -43,6 +43,7 @@
 | 帧层对抗 | [security/frame-attacks.md](./security/frame-attacks.md) | `SEC-01` ~ `SEC-11` |
 | 控制面对抗 | [security/control-plane-attacks.md](./security/control-plane-attacks.md) | `SEC-12` ~ `SEC-20` |
 | 租户边界 | [security/tenancy.md](./security/tenancy.md) | `SEC-21` ~ `SEC-28` |
+| 管理面与配置 | [admin.md](./admin.md) | `ADM-01` ~ `ADM-06` |
 | 跨腿联动 | [integration.md](./integration.md) | `E2E-01` ~ `E2E-08` |
 
 ## 4. 验收矩阵（REQ ↔ 场景 ↔ 状态 ↔ 证据）
@@ -84,7 +85,14 @@
 | REQ-033 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
 | REQ-034 | CTL-15 | 待补充 | — |
 | REQ-035 | FRM-08 / CTL-14 | 待补充 | — |
-| REQ-036 ~ REQ-041 | — | 📌 proposed（无验收场景） | — |
+| REQ-036 | ADM-04 / ADM-05 | 已覆盖 | rill-coord/src/config.rs、rill-core/src/control/registry.rs |
+| REQ-037 | — | 📌 proposed（无验收场景） | — |
+| REQ-038 | ADM-01 / ADM-02 | 已覆盖 | rill-coord/src/config.rs、rill-core/src/control/registry.rs、e2e/run_e2e.sh |
+| REQ-038 | ADM-03 | 部分覆盖 | rilld/src/main.rs（SIGHUP 重载手动验证，未自动化） |
+| REQ-039 | — | 📌 proposed（无验收场景） | — |
+| REQ-040 | — | 📌 proposed（无验收场景） | — |
+| REQ-041 | — | 📌 proposed（无验收场景） | — |
+| REQ-042 | ADM-06 | 部分覆盖 | e2e/Dockerfile、e2e/run_e2e.sh、rilld/src/main.rs |
 
 ## 5. 维护规则
 

@@ -58,6 +58,9 @@ cp "$ROOT_DIR/target/release/lrill" "$BUILD_DIR/lrill"
 COORD_PUBKEY=$("$OVERLAY" pubkey "$SIGNING_SEED")
 
 echo "==> 4/6 生成配置"
+# lrk auth key（REQ-036）：生成即归域绑定 network=lab
+NODE_A_AUTHKEY=$("$OVERLAY" authkey --network lab)
+NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
 gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key
   cat > "$BUILD_DIR/$1" <<EOF
 {
@@ -73,21 +76,23 @@ gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=
 EOF
 }
 
-gen_node_config node-a.json "$NODE_A_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "ak-node-a"
-gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" '["10.43.0.0/24", "fd00:3::/64"]' "ak-node-b"
+gen_node_config node-a.json "$NODE_A_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_A_AUTHKEY"
+gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" '["10.43.0.0/24", "fd00:3::/64"]' "$NODE_B_AUTHKEY"
 
 cat > "$BUILD_DIR/coord.json" <<EOF
 {
   "coord": {
+    "network": "lab",
     "listen_addr": "0.0.0.0:8443",
     "master_key": "$MASTER_KEY",
     "signing_seed": "$SIGNING_SEED",
     "tls_cert_path": "/etc/landscape/coord.crt",
     "tls_key_path": "/etc/landscape/coord.key",
     "auth_keys": [
-      { "key": "ak-node-a", "policy": "reusable" },
-      { "key": "ak-node-b", "policy": "reusable" }
-    ]
+      { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+      { "key": "$NODE_B_AUTHKEY", "policy": "reusable" }
+    ],
+    "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
   }
 }
 EOF

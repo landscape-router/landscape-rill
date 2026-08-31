@@ -39,11 +39,17 @@ pub struct RouteEntry {
 pub struct Prefix {
     pub bits: [u8; 16],
     pub len: u8,
+    /// 地址族：true = IPv4。IPv6 短前缀（len ≤ 32）与 IPv4 靠此标志区分
+    pub v4: bool,
 }
 
 impl Prefix {
     pub fn new(bits: [u8; 16], len: u8) -> Self {
-        Self { bits, len }
+        Self {
+            bits,
+            len,
+            v4: len <= 32,
+        }
     }
 
     pub fn from_ip(addr: IpAddr) -> Self {
@@ -51,11 +57,16 @@ impl Prefix {
             IpAddr::V4(v4) => {
                 let mut bits = [0u8; 16];
                 bits[..4].copy_from_slice(&v4.octets());
-                Self { bits, len: 32 }
+                Self {
+                    bits,
+                    len: 32,
+                    v4: true,
+                }
             }
             IpAddr::V6(v6) => Self {
                 bits: v6.octets(),
                 len: 128,
+                v4: false,
             },
         }
     }
@@ -77,7 +88,11 @@ impl Prefix {
         for (b, m) in bits.iter_mut().zip(mask.iter()) {
             *b &= *m;
         }
-        Ok(Self { bits, len })
+        Ok(Self {
+            bits,
+            len,
+            v4: matches!(ip, IpAddr::V4(_)),
+        })
     }
 
     pub fn matches(&self, addr: &IpAddr) -> bool {
@@ -105,7 +120,7 @@ impl Prefix {
     }
 
     pub fn to_cidr(&self) -> String {
-        if self.len <= 32 {
+        if self.v4 {
             let ip =
                 std::net::Ipv4Addr::new(self.bits[0], self.bits[1], self.bits[2], self.bits[3]);
             format!("{}/{}", ip, self.len)
@@ -113,6 +128,31 @@ impl Prefix {
             let ip = std::net::Ipv6Addr::from(self.bits);
             format!("{}/{}", ip, self.len)
         }
+    }
+
+    /// self ⊆ other（self 被 other 覆盖）：self 范围不得超出 other。
+    /// 白名单校验用：公告前缀必须被某条白名单前缀覆盖（CONTROL_PLANE §3.8）。
+    pub fn is_covered_by(&self, other: &Prefix) -> bool {
+        if other.len > self.len {
+            return false;
+        }
+        let bytes = (other.len as usize).div_ceil(8);
+        for i in 0..bytes {
+            if i == bytes - 1 {
+                let rem = other.len as usize % 8;
+                if rem != 0 {
+                    let mask = !(0xffu8 << rem);
+                    if (self.bits[i] ^ other.bits[i]) & mask != 0 {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+            if self.bits[i] != other.bits[i] {
+                return false;
+            }
+        }
+        true
     }
 }
 

@@ -218,9 +218,11 @@ impl Node {
                 eprintln!("[node] handshake rejected by {}: {:?}", peer, reason);
                 None
             }
-            IncomingEvent::Responded { .. }
-            | IncomingEvent::Relayed { .. }
-            | IncomingEvent::Dropped { .. } => None,
+            IncomingEvent::Responded { .. } | IncomingEvent::Relayed { .. } => None,
+            IncomingEvent::Dropped { reason } => {
+                eprintln!("[node] frame dropped: {:?}", reason);
+                None
+            }
         }
     }
 
@@ -407,9 +409,11 @@ impl Node {
                 self.peer_heartbeats.insert(from, 0);
                 None
             }
-            IncomingEvent::Responded { .. }
-            | IncomingEvent::Relayed { .. }
-            | IncomingEvent::Dropped { .. } => None,
+            IncomingEvent::Responded { .. } | IncomingEvent::Relayed { .. } => None,
+            IncomingEvent::Dropped { reason } => {
+                eprintln!("[node] frame dropped: {:?}", reason);
+                None
+            }
         }
     }
 
@@ -470,10 +474,15 @@ impl Node {
                 }
                 self.apply_netmap(&netmap);
                 eprintln!(
-                    "[node] netmap v{}: {} entries, {} routes",
+                    "[node] netmap v{}: {} entries, {} routes, endpoints: {:?}",
                     netmap.version,
                     netmap.entries.len(),
-                    netmap.entries.iter().map(|e| e.routes.len()).sum::<usize>()
+                    netmap.entries.iter().map(|e| e.routes.len()).sum::<usize>(),
+                    netmap
+                        .entries
+                        .iter()
+                        .map(|e| (e.node_id, e.endpoints.clone()))
+                        .collect::<Vec<_>>()
                 );
             }
             ControlEvent::KeyDist {
@@ -605,6 +614,9 @@ mod tests {
             .await
             .coordinator
             .add_auth_key("ak-test", AuthKeyPolicy::Reusable);
+        server.lock().await.coordinator.set_announce_whitelist(vec![
+            landscape_rill_core::route::Prefix::parse("10.0.0.0/8").unwrap(),
+        ]);
         let srv = server.clone();
         tokio::spawn(async move {
             let mut listener = listener;

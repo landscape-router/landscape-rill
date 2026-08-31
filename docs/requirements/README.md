@@ -29,9 +29,6 @@ proposed（提出：日期 + 动机 + 验收草案）
 
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
-| [REQ-036](./REQ-036.md) | 需求 | 📌 proposed | P0 | 08-15 | — |
-| [REQ-038](./REQ-038.md) | 需求 | 📌 proposed | P0 | 08-15 | — |
-| [REQ-042](./REQ-042-lrill-cli.md) | 需求 | 📌 proposed | P0 | 08-30 | — |
 | [REQ-037](./REQ-037.md) | 决策 | 📌 proposed | P1 | 08-15 | — |
 | [REQ-039](./REQ-039.md) | 需求 | 📌 proposed | P1 | 08-15 | — |
 | [REQ-040](./REQ-040.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
@@ -67,10 +64,13 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-029](./REQ-029.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §2.4 |
 | [REQ-030](./REQ-030.md) | 决策 | ✅ merged | — | 08-15 | CONTROL_PLANE §8 / ARCHITECTURE |
 | [REQ-031](./REQ-031.md) | 决策 | ✅ merged | — | 08-15 | e2e/README |
+| [REQ-036](./REQ-036.md) | 需求 | ✅ merged | — | 08-15 | CONTROL_PLANE §3.12/§6 |
+| [REQ-038](./REQ-038.md) | 需求 | ✅ merged | — | 08-15 | CONTROL_PLANE §3.12 |
 | [REQ-032](./REQ-032.md) | 需求 | ✅ merged | — | 08-16 | FRAME_HEADER §2.6/§3.1 |
 | [REQ-033](./REQ-033.md) | 需求 | ✅ merged | — | 08-16 | TS2021_LEG §6 |
 | [REQ-034](./REQ-034.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.11 / FRAME_HEADER §9 |
 | [REQ-035](./REQ-035.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.1/§3.3 / FRAME_HEADER §2.6 |
+| [REQ-042](./REQ-042-lrill-cli.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.12 |
 
 ## 4. 维护规则
 

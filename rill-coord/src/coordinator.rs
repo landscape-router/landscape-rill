@@ -1,6 +1,9 @@
 use crate::signer::Ed25519Signer;
-use landscape_rill_core::control::registry::{AuthKeyPolicy, NodeEntry, RegisterError, Registry};
+use landscape_rill_core::control::registry::{
+    AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, Registry,
+};
 use landscape_rill_core::crypto::{derive_key_dst, KEY_DST_LEN};
+use landscape_rill_core::route::Prefix;
 use std::collections::HashMap;
 
 pub const BROADCAST_KEY_LEN: usize = 32;
@@ -60,6 +63,37 @@ impl Coordinator {
 
     pub fn add_auth_key(&mut self, key: &str, policy: AuthKeyPolicy) {
         self.registry.add_auth_key(key, policy);
+    }
+
+    /// 管理面库 API（REQ-038/REQ-036）：auth key 完整规格（过期/tag）
+    pub fn add_auth_key_spec(&mut self, key: &str, spec: AuthKeySpec) {
+        self.registry.add_auth_key_spec(key, spec);
+    }
+
+    pub fn remove_auth_key(&mut self, key: &str) {
+        self.registry.remove_auth_key(key);
+    }
+
+    pub fn has_auth_key(&self, key: &str) -> bool {
+        self.registry.has_auth_key(key)
+    }
+
+    /// 当前已配置的全部 auth key（apply 增量收敛用）
+    pub fn auth_key_list(&self) -> Vec<String> {
+        self.registry.auth_key_list()
+    }
+
+    /// 管理面库 API（REQ-038）：前缀公告白名单（fail-closed：空 = 拒绝一切公告）
+    pub fn set_announce_whitelist(&mut self, whitelist: Vec<Prefix>) {
+        self.registry.set_announce_whitelist(whitelist);
+    }
+
+    pub fn announce_whitelist(&self) -> Vec<String> {
+        self.registry
+            .announce_whitelist()
+            .iter()
+            .map(|p| p.to_cidr())
+            .collect()
     }
 
     pub fn register(

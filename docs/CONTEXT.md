@@ -16,7 +16,7 @@
 
 ## 2. 需求与决策库
 
-全部已收敛决策（含提出日期与动机）迁移至 [requirements/](./requirements/README.md)（REQ-001~REQ-035 已合并，REQ-036~REQ-041 挂账中）。状态表按提出日期排序，即原决策时间线视图。
+全部已收敛决策（含提出日期与动机）迁移至 [requirements/](./requirements/README.md)（REQ-001~REQ-036、REQ-038、REQ-042 已合并，REQ-037/039/040/041 挂账中）。状态表按提出日期排序，即原决策时间线视图。
 
 ## 3. 目标架构（一图）
 
@@ -117,10 +117,10 @@ docs/README.md（入口：阅读路线 + 三张图）
 
 **挂账（proposed 需求，已给建议默认值）**：
 1. 心跳间隔 / 租约阈值（建议 10s / 60s）——**已落地**（config.rs 常量 DEFAULT_HEARTBEAT_INTERVAL / DEFAULT_LEASE_THRESHOLD，2026-08-15）
-2. auth key 格式与生成规范（格式待定，**REQ-036**）；控制面端口号——**默认 8443 已落地**（config.rs DEFAULT_COORD_PORT，TLS 长连接非特权端口）
+2. auth key 格式与生成规范（格式待定，**REQ-036**）——**已定稿（2026-08-31，REQ-036 merged，CONTROL_PLANE §3.12/§6）**：`lrk-<network>-<secret>` + `lrill authkey` 生成子命令；控制面端口号——**默认 8443 已落地**（config.rs DEFAULT_COORD_PORT，TLS 长连接非特权端口）
 3. protobuf schema 文件与代码生成（文档为语义级）——**已落地（2026-08-15，2026-08-30 重构为独立 rill-proto crate）**：`rill-proto/proto/control.proto`（CONTROL_PLANE §3 消息字段级）+ build.rs 用 **pb-rs** 生成 → OUT_DIR 的 wire 模块（不入库，`landscape-rill-proto` crate 对外暴露；quick-protobuf 运行时）
 4. v1 存储后端（redb / sqlite 候选，**REQ-037**）
-5. **管理面形态**（前缀公告白名单配置方式，**REQ-038**）：配置文件 / CLI / Web API（landscape-webserver 可复用）待定；**无默认凭据 + 配置加载即校验**（已定要求）
+5. **管理面形态**（前缀公告白名单配置方式，**REQ-038**）——**已定稿（2026-08-31，REQ-038 merged，CONTROL_PLANE §3.12）**：配置文件为唯一权威 + `CoordConfig`（加载即校验，fail-closed）+ 库 API 执行面分离（from_config/apply_config，函数调用生效）+ SIGHUP 重载增量应用；Web API 挂 P3（自研 ts2021 服务端/landscape-webserver 同批，REQ-040 边界自然满足）
 6. **运维基线**（P2，**REQ-039**）：cargo audit 进 CI + 依赖最小化（供应链）；日志限速（错误风暴防刷屏）+ **轮转/容量上限 + 级别配置生效性验证**（教训见 lessons/admin-ops/AO-04）
 7. **配置解析要求**：配置中域名解析**缓存 + 指数退避**，禁止无背压循环解析——**已落地**（config.rs DnsCache，教训见 lessons/keys-config/KC-03）
 8. **WebUI 配置边界**（**REQ-040**）：关键配置只存服务端（coordinator 配置文件/DB），WebUI 不持有持久配置（教训见 lessons/admin-ops/AO-02）

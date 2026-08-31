@@ -7,3 +7,6 @@ description = "mesh coordinator: registry, identity binding signer/verifier"
 [dependencies]
 landscape-rill-core = { path = "../rill-core" }
 ed25519-dalek.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -157,7 +157,8 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 节点公告自己背后 LAN/前缀，路由注入路由引擎（ROUTE_ENGINE §3）的机制：
 
 - **机制**：`routes[]` 内嵌 netmap 条目——注册时携带初始公告，变更时经控制面更新；coordinator 校验后并入 netmap 全量推送，条目签名已覆盖
-- **权限（coordinator 白名单）**：管理面配置允许公告的前缀；不匹配的公告**拒绝**（协议层返回拒绝语义）；v1 管理面形态待定（§8）
+- **权限（coordinator 白名单，REQ-038 落地）**：管理面（§3.12）配置允许公告的前缀集合；注册时逐条校验 `routes[]`：**不在白名单 → 整体拒绝**（协议层返回 `RouteNotAllowed`，不部分采纳）；**白名单变更不影响已注册节点**（只拦新注册，v1 无公告变更消息，公告只在注册时携带）
+- **前缀长度边界（v1 实现即校验，§3.8 既有语义落地）**：IPv4 `< /8`、IPv6 `< /32` 拒绝（注册层校验，不依赖管理面配置）
 - **自身地址校验（防自指）**：公告前缀**禁止包含公告者自身地址**（tun0/物理接口地址）——否则发往自身的流量被封装进 mesh 形成循环（教训见 lessons/routing/RT-01）
 - **重复公告**：允许同一前缀多节点公告（多网关冗余），选路由路由引擎处理（ROUTE_ENGINE §2）
 - **边界**：禁止过短前缀（IPv4 < /8、IPv6 < /32），默认出口走 exit 语义（ROUTE_ENGINE §5）
@@ -245,6 +246,41 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 - 数据面 v1 **零改动**：path_id 仅控制面语义，34B 帧头不变
 - 控制面：Path\* 消息在现有 Envelope 消息族新增 MsgType（§8 待定落地）
 - 能力位：不新增；PathService 属 coordinator 侧实现
+
+### 3.12 管理面（v1，REQ-038）
+
+> 管理面 = coordinator 侧的配置权威面（前缀公告白名单 §3.8、auth key 生命周期 §6、策略模型 §3.10 的 v2 载体）。v1 形态定稿：**配置文件为唯一权威 + 库 API 执行面分离**（REQ-038）。
+
+**形态：配置与执行分离**
+
+- **持久权威 = coordinator 本地配置文件**（JSON）；Web API / 管理子命令 v1 不做（无 WebUI 即无配置归属问题，REQ-040 边界自然满足；教训 AO-02 关键配置只存服务端 = 配置文件本身就是服务端）
+- **配置层与执行层分离**：`CoordConfig`（解析 + 校验）是独立模块，不依赖运行时；`CoordinatorServer::from_config / apply_config` 为**库 API（函数调用生效）**——其他项目可引入 rill-coord crate 直接以函数调用应用配置（如未来自研 ts2021 服务端、landscape-webserver 管理面），CLI/未来管理面只是薄调用层
+- 结构：`CoordConfig { network, listen_addr, tls, master_key, signing_seed, auth_keys[], announce_whitelist[] }`
+
+**演进路径（分层决策，2026-08-31）**：v1 = 配置文件（唯一权威）+ 库 API + SIGHUP 重载；配置来源（文件/HTTP/DB）与执行层（apply_config）解耦，HTTP 管理 API + Web 前端 + 存储后端（REQ-037 redb/sqlite）同批落地时，**文件降级为启动引导（bootstrap）**，WebUI 不持有持久配置（REQ-040 边界，教训 AO-02）；无默认管理员凭据 + 授权模型（AO-03）在 HTTP 形态引入时定稿
+
+**fail-closed + 加载即校验**
+
+- 缺失必填字段（master_key/signing_seed/tls）→ 拒绝启动（**无默认凭据**：配置不存在或不全即 fail-closed）
+- 校验项：auth key 格式（§6 规范，含网络归域）、白名单前缀合法（parse + 长度边界 §3.8）、TLS 文件可读
+- 任何一项不合法 → 拒绝启动，不降级运行
+
+**变更生效 = SIGHUP 重载（不重启）**
+
+- systemd 形态 `ExecReload=kill -HUP $MAINPID`；进程收到 SIGHUP → 重新解析配置文件 → `apply_config` **增量应用**（auth key 增删、白名单更新），**不中断在途 TLS 连接与已注册节点**
+- 重载失败（新配置非法）→ **保持旧配置继续运行** + 日志报错（fail-closed 于启动，容错于重载）
+
+**auth key 生命周期管理（§6 落地，REQ-036）**
+
+- 生成：`lrill authkey` 子命令（§1.3 lrill CLI），输出仅 stdout、不落日志（教训 AO-01/AO-02）
+- 增删/吊销：配置文件编辑 + SIGHUP 重载；`apply_config` 增量生效（新 key 可注册、移除的 key 即刻失效）
+- 过期：reusable key 带 `expires_at`，注册时校验，过期即 `InvalidAuthKey`
+
+**lrill CLI（REQ-042）**
+
+- 二进制 `lrill`，子命令：`pubkey <seed>`（Ed25519 公钥工具）/ `run [config]`（前台 daemon，容器/开发形态）/ `authkey`（生成 auth key，§6）/ `up|down|status`（systemd 托管）
+- **daemon 托管 = systemd 优先**：`up` 生成并安装 unit 模板 + `systemctl start`；`down`/`status` 走 systemctl；无 systemd 环境 `up/down/status` 明确报错并提示 `lrill run`
+- 明确否决：v1 不做自守护 + unix socket（SSH session SIGHUP 坑、多线程 fork 时序、容器 PID1 冲突）；等真实需求出现再开 REQ
 
 ## 4. 状态模型（Raft 兼容核心）
 
@@ -347,6 +383,7 @@ coordinator Revoke(node_id)
 ## 6. 安全与信任模型
 
 - **auth key 生命周期**：一次性（单次注册即失效）/ 可复用（带 tag 与过期时间）；吊销联动（Revoke 使相关 auth key 失效）
+- **auth key 格式（REQ-036 定稿）**：`lrk-<network>-<secret>`——`lrk` 固定前缀（类型标识 + 配置校验拒绝非 `lrk` 开头的键）；`<network>` 为配置声明的网络标识（小写字母数字连字符，归域绑定 §1.5）；`<secret>` = 32B CSPRNG → base32（RFC 4648 无填充，52 字符）。格式非法 → 配置加载即拒绝启动；network 段与配置不匹配 → 注册拒绝。**生成不依赖 master_key**（auth key 是注册凭据非 KDF 派生），`lrill authkey new` 纯本地生成，输出仅 stdout（不落日志，教训 AO-01/AO-02）
 - **身份绑定签名**：防成员冒充/中继 MITM 的关键——数据面握手双保险：msg1 携带目标 node_id + 接收方校验（FRAME_HEADER §2.3），握手后双方交叉验证 coordinator 签发的绑定
 - **边界划分**：控制面管"谁有资格"（身份/密钥），数据面管"包是否合法"（route_mac / AEAD 双层认证）
 - **传输安全**：TLS 1.3；coordinator 间 mTLS（P2 Raft 期）
@@ -394,9 +431,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 ### 待定（v1 实现时定）
 
 - 心跳间隔 / 租约阈值（建议 10s / 60s）
-- auth key 格式与生成规范
 - 控制面端口号
-- **管理面形态**（§3.8 前缀公告白名单的配置方式）：v1 候选——coordinator 本地配置文件 / CLI；Web API 为 landscape 系列既有组件（landscape-webserver）可复用，形态待定
 - **管理面安全要求**（已定）：**无默认管理员凭据**（首次启动强制设置，fail-closed）；配置项**加载即校验**（非法配置拒绝启动）
 - protobuf schema 文件与代码生成
 - v1 存储后端（redb / sqlite）
