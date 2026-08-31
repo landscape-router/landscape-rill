@@ -46,7 +46,7 @@ landscape-rill/                  # cargo workspace
 ├── rill-mesh/                   # mesh leg (control TLS + data UDP + framing)
 ├── rill-node/                   # node role glue (config / tun / packet / runtime)
 ├── rilld/                       # lrill binary (CLI entry)
-├── e2e/                         # container verification (docker compose + assertions)
+├── e2e/                         # container verification (mesh/{direct,relay}/ + p0_tailscale/)
 └── docs/                        # requirement → design → tests doc system
 ```
 

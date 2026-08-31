@@ -58,7 +58,7 @@ landscape-rill/                  # cargo workspace（virtual）
 │       ├── packet.rs            # 纯手写 L3 解析
 │       └── runtime.rs           # 单线程编排（pump_control/mesh/lan/timers）
 ├── rilld/                       # 二进制 lrill：CLI 入口（pubkey/run 子命令，REQ-042）
-├── e2e/                         # 容器验证（run_e2e.sh / p0_tailscale/，见 ../e2e/）
+├── e2e/                         # 容器验证（run_e2e.sh + mesh/{direct,relay}/ + p0_tailscale/，见 ../e2e/）
 └── docs/                        # 本文档体系
 ```
 

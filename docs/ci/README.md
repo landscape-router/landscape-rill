@@ -4,12 +4,12 @@
 
 ## 1. CI 结构（workflow 按场景分文件，已落地）
 
-**约定：一个 e2e 场景目录 = 一个 workflow 文件**（与 `e2e/` 目录结构一一对应；后续 ts2021/dn42 接入 e2e 各加一个文件）。单元测试属代码侧校验，归 `check.yml`，不单独建 workflow。
+**约定：一个 e2e 场景目录 = 一个 workflow 文件**（与 `e2e/` 目录结构一一对应；mesh 场景为 `e2e/mesh/{direct,relay}/` 子目录，后续 ts2021/dn42 接入 e2e 各加一个文件）。单元测试属代码侧校验，归 `check.yml`，不单独建 workflow。
 
 | workflow | 内容 | 触发 | required |
 |---|---|---|---|
 | `check.yml` | fmt / clippy(`-D warnings`) / `cargo test --workspace` / `ci/check-docs.sh` | PR + push | 是 |
-| `e2e-mesh.yml` | `e2e/run_e2e.sh`（coord + node-a/b，IPv4+IPv6 ping） | PR + push main + workflow_dispatch | 否 |
+| `e2e-mesh.yml` | `e2e/run_e2e.sh` 双场景：direct（coord + node-a/b，IPv4+IPv6 ping）+ relay（a—b—c 线形经 b 中继，`MESH_E2E_SCENARIO=relay`） | PR + push main + workflow_dispatch | 否 |
 | `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
 
 - 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）

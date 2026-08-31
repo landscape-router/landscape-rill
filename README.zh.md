@@ -42,7 +42,7 @@ landscape-rill/                  # cargo workspace
 ├── rill-mesh/                   # mesh 接入(control TLS + data UDP + framing)
 ├── rill-node/                   # 节点角色胶水(config / tun / packet / runtime)
 ├── rilld/                       # lrill 二进制(CLI 入口)
-├── e2e/                         # 容器验证(docker compose + 断言)
+├── e2e/                         # 容器验证(mesh/{direct,relay}/ + p0_tailscale/)
 └── docs/                        # 需求 → 设计 → 测试 文档体系
 ```
 

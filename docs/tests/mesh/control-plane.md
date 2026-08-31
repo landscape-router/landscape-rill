@@ -121,8 +121,8 @@
 - 关联 REQ：REQ-034
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame.rs、rill-core/src/crypto.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control.rs、e2e/run_e2e.sh
-- 缺口：relay 路径的 docker e2e 场景未建（单测已覆盖 relay 转发与候选构造）；PathProbe 消息族运行时未启用（活性由数据面心跳承担，协议已定义）；v1/v2 节点混跑 e2e 未验证
+- 证据：rill-core/src/frame.rs、rill-core/src/crypto.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control.rs、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
+- 缺口：PathProbe 消息族运行时未启用（活性由数据面心跳承担，协议已定义）
 
 ## 验收断言
 
@@ -141,3 +141,4 @@
 - [x] CTL-13：DH 挑战闭环、时间窗口防重放
 - [ ] CTL-14：未 opt-in 节点 keydist 不带 broadcast_key（待实现）
 - [x] CTL-15：Path* 消息族 + 候选路径（直连 + relay，幂等）/flow hash 选择/主路径 miss 快速切换/key_path 参与者全量签发/吊销联动撤销/path_id=0 回退 key_dst（v2 帧头 42B 纳入 route_mac 与 AAD）
+  - relay docker e2e：a—b—c 线形（b 双网卡，a↔c 无直连可达性），直连候选 miss → 快速切换经 b 中继建立会话 + 数据双向（e2e/mesh/relay/，b 日志 relayed frame 为证据）

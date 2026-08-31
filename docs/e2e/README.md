@@ -21,16 +21,28 @@ node-C 容器 ──┘
 
 - 每容器运行 landscape-rill 实例 + 必要的辅助组件（tun 需要容器特权/设备挂载）
 - NAT 模拟：容器前置 iptables SNAT/MASQUERADE，或独立 NAT 容器作为中间层
+- **mesh 场景（`e2e/mesh/`）**：
+  - `direct`：coord + a + b 同网桥，验证 IPv4 + IPv6 双栈 ping（IPv6 走组播泛洪 ND）
+  - `relay`：线形 a—b—c（b 双网卡 net1={coord,a,b} net2={coord,b,c}），c 与 a 无直连
+    UDP 可达性——compose `ipam` 固定 IP + setup 在 a/c 互加黑洞路由（`/32`）模拟，
+    验证直连候选 miss 后快速切换到 relay 路径（经 b），b 日志 `relayed frame` 为中继证据
+- **e2e 容器网段**（RFC 1918，避开 docker 默认池 172.17-172.30 与 CGNAT）：
+  - `192.168.240.0/23`：mesh e2e 专用（direct 用 `192.168.240.0/24`，relay 的
+    net1/net2 用 `192.168.240.0/24` + `192.168.241.0/24`）
+  - `192.168.242.0/24` 起：预留 headscale/ts2021 集成 e2e
 
 ## 3. 运行入口（仓库内脚本）
 
 | 脚本 | 覆盖 | 前置条件 |
 |---|---|---|
-| `e2e/run_e2e.sh` | mesh 接入全链路（双节点 ping/ping6、IPv6 双栈、泛洪） | docker + compose 构建 |
+| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay`（默认 direct） | docker + compose 构建 |
+| `e2e/setup.sh` | 初始化：base 镜像/CA/密钥/编译/配置/构建启动/路由与黑洞注入；幂等（开头强制 `cleanup.sh`） | 同上 |
+| `e2e/cleanup.sh` | 幂等清理：全部 mesh 场景容器/网络 + `build/`（可重复执行） | 同上 |
 | `e2e/p0_tailscale/run_p0.sh` | P0 过渡验证（headscale + 官方客户端入网 + WG 直连） | docker，GitHub/pkgs 可达 |
 
 - 每次运行前 `run_e2e.sh` 重新拷贝二进制（compose build 会使用 build/ 目录旧产物）
 - 生产形态（v1.1）：mesh 前缀 → tun0 静态路由由脚本注入，自动化注入挂账
+- 无容器运行时依赖的开发机阶段（纯协议逻辑）可先用单进程多实例——但正式验证以容器为准
 
 ## 4. 阶段验证目标
 
