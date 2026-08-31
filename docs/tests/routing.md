@@ -3,13 +3,13 @@
 > 统一 LPM 表、优先级、fallback、MTU、前缀公告边界的验收场景。
 > 设计规范：ROUTE_ENGINE（[../design/routing/route-engine.md](../design/routing/route-engine.md)）。
 
-## RTE-01 四腿路由注入
+## RTE-01 四接入路由注入
 
 - 关联 REQ：REQ-023
 - 测试层：单测 + 集成
 - 状态：`部分覆盖`
 - 证据：rill-core/src/route.rs
-- 缺口：mesh `routes[]` 注入已闭环；dn42 BGP / ts2021 路由 / 本地路由注入未实现（依赖腿实现）
+- 缺口：mesh `routes[]` 注入已闭环；dn42 BGP / ts2021 路由 / 本地路由注入未实现（依赖接入实现）
 
 ## RTE-02 LPM 最长前缀优先
 
@@ -41,7 +41,7 @@
 - 测试层：单测 + e2e
 - 状态：`部分覆盖`
 - 证据：rill-core/src/route.rs
-- 缺口：fallback 链语义已实现（lookup_best + reachable）；dn42 腿实际链路未验证（依赖 DNL-07）
+- 缺口：fallback 链语义已实现（lookup_best + reachable）；dn42 接入实际链路未验证（依赖 DNL-07）
 
 ## RTE-06 exit 语义
 
@@ -49,7 +49,7 @@
 - 测试层：集成 + e2e
 - 状态：`待补充`
 - 证据：—
-- 缺口：mesh exit 透传不 NAT / ts2021 exit 使用与被用作未实现（依赖腿实现）
+- 缺口：mesh exit 透传不 NAT / ts2021 exit 使用与被用作未实现（依赖接入实现）
 
 ## RTE-07 MTU/PTB
 
@@ -69,7 +69,7 @@
 
 ## 验收断言
 
-- [ ] RTE-01：四腿路由统一进 LPM 表（mesh 已闭环，其余待腿实现）
+- [ ] RTE-01：四接入路由统一进 LPM 表（mesh 已闭环，其余待接入实现）
 - [x] RTE-02：具体前缀命中优先于粗粒度前缀
 - [x] RTE-03：等长按来源优先级取路
 - [x] RTE-04：首选停机 → 自动切次选

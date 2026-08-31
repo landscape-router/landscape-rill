@@ -1,4 +1,4 @@
-//! lrill — landscape-rill 边缘节点守护进程与 CLI
+//! lrill — landscape-rill rill ext 节点守护进程与 CLI
 //!
 //! 子命令：
 //! - `lrill pubkey <signing_seed_hex>`：signing_seed → Ed25519 公钥，供节点配置信任锚

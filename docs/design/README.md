@@ -11,8 +11,8 @@
 | mesh | [mesh/frame-header.md](./mesh/frame-header.md) | `FRAME_HEADER` | 34B 帧头、握手/心跳/广播规格、密钥体系 |
 | mesh | [mesh/control-plane.md](./mesh/control-plane.md) | `CONTROL_PLANE` | 控制面协议、状态模型、安全模型、联邦、路径服务 |
 | mesh | [mesh/connectivity.md](./mesh/connectivity.md) | `CONNECTIVITY` | 端点探测、直连验证、三层中继 |
-| legs | [legs/ts2021.md](./legs/ts2021.md) | `TS2021_LEG` | ts2021 兼容腿、headscale 过渡、官方客户端接入 |
-| legs | [legs/dn42.md](./legs/dn42.md) | `DN42_LEG` | dn42 腿、eBGP-lite、import/export policy |
+| legs | [legs/ts2021.md](./legs/ts2021.md) | `TS2021_LEG` | ts2021 兼容接入、headscale 过渡、官方客户端接入 |
+| legs | [legs/dn42.md](./legs/dn42.md) | `DN42_LEG` | dn42 接入、eBGP-lite、import/export policy |
 | routing | [routing/route-engine.md](./routing/route-engine.md) | `ROUTE_ENGINE` | 路由策略引擎、LPM、fallback、MTU、DNS 分类 |
 
 ## 2. 短名注册（代码注释引用契约）
@@ -50,7 +50,7 @@ landscape-rill/                  # cargo workspace（virtual）
 │       ├── route.rs             # LPM 路由表 + fallback（ROUTE_ENGINE）
 │       └── control/             # 注册表/吊销/挑战/会话状态机（CONTROL_PLANE）
 ├── rill-coord/                  # coordinator 角色：coordinator.rs + signer.rs（Ed25519）
-├── rill-mesh/                   # mesh 腿：control.rs（TLS 客户端/服务端）+ data.rs（UDP 转发）+ framing.rs
+├── rill-mesh/                   # mesh 接入：control.rs（TLS 客户端/服务端）+ data.rs（UDP 转发）+ framing.rs
 ├── rill-node/                   # 节点角色胶水（I/O 侧）
 │   └── src/
 │       ├── config.rs            # 配置解析（加载即校验、无默认凭据、DNS 缓存+退避）

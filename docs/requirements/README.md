@@ -38,7 +38,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-003](./REQ-003.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §3.1/§2.1 |
 | [REQ-004](./REQ-004.md) | 决策 | ✅ merged | — | 08-15 | CONTROL_PLANE §1/§3.2/§3.4~§3.7/§4/§5/§7 |
 | [REQ-005](./REQ-005.md) | 决策 | ✅ merged | — | 08-15 | ARCHITECTURE / ROUTE_ENGINE §1/§3/§5 / DN42_LEG |
-| [REQ-006](./REQ-006.md) | 决策 | ✅ merged | — | 08-15 | TS2021_LEG §1/§2/§3.1/§4/§5 / ARCHITECTURE §5 |
+| [REQ-006](./REQ-006.md) | 决策 | ✅ merged | — | 08-15 | TS2021_LEG §1/§2/§3.1/§4/§5 / ARCHITECTURE §6 |
 | [REQ-007](./REQ-007.md) | 决策 | ✅ merged | — | 08-15 | CONNECTIVITY §2/§3/§4/§5 |
 | [REQ-008](./REQ-008.md) | 需求 | ✅ merged | — | 08-15 | CONTROL_PLANE §3.8 / ROUTE_ENGINE §3 |
 | [REQ-009](./REQ-009.md) | 决策 | ✅ merged | — | 08-15 | ROUTE_ENGINE §6 |
@@ -51,7 +51,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-016](./REQ-016.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §2.3/§5 |
 | [REQ-017](./REQ-017.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §2.4/§2.5 / CONTROL_PLANE §6 / CONNECTIVITY §2.2 / ROUTE_ENGINE §7 |
 | [REQ-018](./REQ-018.md) | 决策 | ✅ merged | — | 08-15 | CONTROL_PLANE §2/§3.9 |
-| [REQ-019](./REQ-019.md) | 决策 | ✅ merged | — | 08-15 | ARCHITECTURE §7 / design/README §3.2 |
+| [REQ-019](./REQ-019.md) | 决策 | ✅ merged | — | 08-15 | ARCHITECTURE §8 / design/README §3.2 |
 | [REQ-020](./REQ-020.md) | 决策 | ✅ merged | — | 08-15 | CONTROL_PLANE §3.10 / ROUTE_ENGINE §2/§3 |
 | [REQ-021](./REQ-021.md) | 决策 | ✅ merged | — | 08-15 | TS2021_LEG §3.2/§3.3 / ROUTE_ENGINE §3/§7 |
 | [REQ-022](./REQ-022.md) | 决策 | ✅ merged | — | 08-15 | CONTROL_PLANE §8 |

@@ -1,4 +1,4 @@
-//! 边缘节点运行时编排：控制面（TLS 注册/netmap/keydist/心跳/挑战）↔ 数据面（MeshData）
+//! rill ext 节点运行时编排：控制面（TLS 注册/netmap/keydist/心跳/挑战）↔ 数据面（MeshData）
 //! ↔ 路由引擎 ↔ tun0（LAN 侧）。v1 单线程循环，所有状态收敛在 Node。
 //!
 //! 可测性：pump_* 接口单步驱动（pump_control / pump_mesh / pump_lan_packet / pump_timers），
@@ -53,7 +53,7 @@ impl Default for NodeOptions {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LanOutcome {
-    /// 已加密帧发往 mesh 节点
+    /// 已加密帧发往 rill 节点
     Sent { peer: u32 },
     /// 无会话，已发起懒握手（包丢弃，TCP 重传语义兜底）
     Handshaking { peer: u32 },

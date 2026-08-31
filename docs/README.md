@@ -1,11 +1,11 @@
 # landscape-rill 文档中心
 
-> 多腿边缘节点（单 TUN 用户态路由器）的规格、需求与验收。本文档是入口：先看阅读路线，再按需进各目录。
+> 多接入 rill ext 节点（单 TUN 用户态路由器）的规格、需求与验收。本文档是入口：先看阅读路线，再按需进各目录。
 
 ## 阅读路线（新 session 入口）
 
 1. **[CONTEXT.md](./CONTEXT.md)**——前置知识：项目定位、术语表、信任模型、路线图、文档地图（决策时间线已迁移为 [requirements/](./requirements/README.md)）
-2. **[design/](./design/README.md)**——系统行为权威描述（分域）：架构、mesh 协议、接入腿、路由引擎
+2. **[design/](./design/README.md)**——系统行为权威描述（分域）：架构、mesh 协议、接入、路由引擎
 3. **[requirements/](./requirements/README.md)**——需求/决策库：每条需求何时提出、是否已合并进 design
 4. **[tests/](./tests/README.md)**——验收场景与状态（四档）、验收矩阵、验收断言
 5. **[e2e/](./e2e/README.md)**——全链路容器验证环境与脚本说明

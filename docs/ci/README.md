@@ -4,7 +4,7 @@
 
 ## 1. CI 结构（workflow 按场景分文件，已落地）
 
-**约定：一个 e2e 场景目录 = 一个 workflow 文件**（与 `e2e/` 目录结构一一对应；后续 ts2021/dn42 腿 e2e 各加一个文件）。单元测试属代码侧校验，归 `check.yml`，不单独建 workflow。
+**约定：一个 e2e 场景目录 = 一个 workflow 文件**（与 `e2e/` 目录结构一一对应；后续 ts2021/dn42 接入 e2e 各加一个文件）。单元测试属代码侧校验，归 `check.yml`，不单独建 workflow。
 
 | workflow | 内容 | 触发 | required |
 |---|---|---|---|

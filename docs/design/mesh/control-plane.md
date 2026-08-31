@@ -5,7 +5,7 @@
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
 > 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038
 
-**版本：v0.5（2026-08-30 修订）**
+**版本：v0.6（2026-08-31 修订：术语统一——节点类型 / "接入"叫法）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -28,16 +28,16 @@
 
 ### 1.3 coordinator 部署
 
-- coordinator 作为 mesh 节点的**角色**运行（节点携带 `coordinator` 能力位）；也可独立部署，协议不变
+- coordinator 作为 rill 节点的**角色**运行（节点携带 `coordinator` 能力位）；也可独立部署，协议不变
 - 控制面流量走独立 TLS 通道（TCP），**不走 mesh 帧**（`type=控制` 在数据面仅为预留，见 FRAME_HEADER §2.1）
 - 控制面中断不影响数据面：密钥均在节点本地（§4.3）
 
-### 1.4 与三条腿的关系
+### 1.4 与三条接入的关系
 
-- 本协议只管 mesh 腿
-- dn42 路由**仅边缘持有**，不进 netmap；内部节点将 dn42 空间指向最近边缘出口
-- tailscale 腿独立于本协议（自研 ts2021 客户端，见 TS2021_LEG.md）
-- **与 ts2021 服务端（headscale 兼容）的关系**：浅结合——同进程、协议独立、可共享存储；边缘节点以 ts2021 客户端身份同时挂入自建 tailnet（双身份）；官方客户端（手机）经 ts2021 服务端接入，数据面走 WireGuard 与边缘节点互联（ARCHITECTURE §5）
+- 本协议只管 mesh 接入
+- dn42 路由**仅 rill ext 持有**，不进 netmap；内部节点将 dn42 空间指向最近 rill ext 出口
+- tailscale 接入独立于本协议（自研 ts2021 客户端，见 TS2021_LEG.md）
+- **与 ts2021 服务端（headscale 兼容）的关系**：浅结合——同进程、协议独立、可共享存储；rill ext 节点以 ts2021 客户端身份同时挂入自建 tailnet（双身份）；官方客户端（手机）经 ts2021 服务端接入，数据面走 WireGuard 与 rill ext 节点互联（ARCHITECTURE §6）
 
 ### 1.5 多网络隔离（协议无感租户）
 
@@ -119,7 +119,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
   - `static_pubkey`（32B）
   - `endpoints[]`：UDP 端点（**上报机制**：节点经 coordinator UDP 回显探测，周期 30s + 网络变更触发，见 CONNECTIVITY §2；联邦边界：远端端点只下发到桥节点，不扩散）
   - `capabilities`（含 `relay` 自愿位：节点声明愿当中继，opt-in）
-  - `routes[]`：**前缀公告**（节点背后 LAN/前缀，见 §3.8 前缀公告流程）——注册时携带初始公告 + 变更时更新；`routes` 汇总 = 边缘节点 subnet router 广播进自建 tailnet 的数据源（TS2021_LEG §3.3）
+  - `routes[]`：**前缀公告**（节点背后 LAN/前缀，见 §3.8 前缀公告流程）——注册时携带初始公告 + 变更时更新；`routes` 汇总 = rill ext 节点 subnet router 广播进自建 tailnet 的数据源（TS2021_LEG §3.3）
   - 条目签名：本地条目由本 coordinator 签名；联邦条目经过滤后用本 coordinator 私钥**重签**（§7）
 - `relay_list`：候选中继列表（DERP map 等价物）——coordinator 兜底 + 自愿节点（可达性验证 + RTT 测量后纳入），随 netmap 下发，见 CONNECTIVITY §5
 - 下发时机：注册后全量、拓扑变更后全量、断线重连后补偿全量

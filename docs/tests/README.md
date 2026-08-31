@@ -37,14 +37,14 @@
 | mesh 帧头/握手/广播 | [mesh/frame.md](./mesh/frame.md) | `FRM-01` ~ `FRM-11` |
 | mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-15` |
 | mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-09` |
-| ts2021 腿 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-10` |
-| dn42 腿 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
+| ts2021 接入 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-10` |
+| dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
 | 路由引擎 | [routing.md](./routing.md) | `RTE-01` ~ `RTE-08` |
 | 帧层对抗 | [security/frame-attacks.md](./security/frame-attacks.md) | `SEC-01` ~ `SEC-11` |
 | 控制面对抗 | [security/control-plane-attacks.md](./security/control-plane-attacks.md) | `SEC-12` ~ `SEC-20` |
 | 租户边界 | [security/tenancy.md](./security/tenancy.md) | `SEC-21` ~ `SEC-28` |
 | 管理面与配置 | [admin.md](./admin.md) | `ADM-01` ~ `ADM-06` |
-| 跨腿联动 | [integration.md](./integration.md) | `E2E-01` ~ `E2E-08` |
+| 跨接入联动 | [integration.md](./integration.md) | `E2E-01` ~ `E2E-08` |
 
 ## 4. 验收矩阵（REQ ↔ 场景 ↔ 状态 ↔ 证据）
 

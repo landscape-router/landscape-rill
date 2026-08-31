@@ -2,17 +2,17 @@
 
 > **新 session 入口文档**：先读本文档恢复设计上下文，再按 §5 文档地图选择后续阅读。
 > 本文档记录已收敛的术语、信任模型、外部参考与挂账项，不承载具体协议细节（细节在各设计文档）。
-> 版本：v0.1（2026-08-30 重构：决策时间线迁出至 requirements/）
+> 版本：v0.2（2026-08-31 修订：节点类型命名定稿——rill 节点 / rill ext 节点 / coord 节点，"腿"中文叫法改为"接入"）
 
 ## 1. 项目定位
 
 **landscape-rill** 是 landscape 系列工作区中的 cargo workspace（rill-core / rill-coord / rill-mesh / rill-node / rilld 五 crate，产物二进制 `lrill`），形态是**单 TUN 的用户态路由器/网关节点**：
 
-- 一个边缘节点同时接入多条"腿"（leg）：自建 mesh 网络、dn42、tailscale（自建兼容面 + 官方 tailnet）
+- 一个 rill ext 节点同时接入多条"接入"（leg）：自建 mesh 网络、dn42、tailscale（自建兼容面 + 官方 tailnet）
 - **不做**多 TUN 网卡模型（明确否决内核 WireGuard 多网卡方案）
 - 转发决策在**用户态路由策略引擎**中完成；tun0 作为 LAN 侧接口，目标不属于管理 LAN 的流量出 WAN 网卡，WAN 侧 NAT 兜底（mesh exit 因此可透传不 NAT）
 
-**当前阶段：mesh 腿实现闭环**（核心模块 121+ 单测、docker e2e、IPv6 双栈、P0 官方客户端实证，见 requirements/ REQ-022~REQ-033）；文档为需求-设计-验收三层演进体系（[README.md](./README.md)）。
+**当前阶段：mesh 接入实现闭环**（核心模块 121+ 单测、docker e2e、IPv6 双栈、P0 官方客户端实证，见 requirements/ REQ-022~REQ-033）；文档为需求-设计-验收三层演进体系（[README.md](./README.md)）。
 
 ## 2. 需求与决策库
 
@@ -21,13 +21,13 @@
 ## 3. 目标架构（一图）
 
 ```
-┌──────────────────── landscape-rill 边缘节点 ────────────────────┐
-│  ts2021 客户端腿（自研，URL 可配：自建服务 / 官方 tailnet）          │
+┌──────────────────── landscape-rill rill ext 节点 ──────────────┐
+│  ts2021 客户端接入（自研，URL 可配：自建服务 / 官方 tailnet）        │
 │    ├─► 自建控制服务器（headscale 过渡 → 自研服务端）◄── 手机官方 app  │
 │    ├─► 官方 tailnet（备份出口）                                    │
 │    └─ WireGuard (boringtun) ⇄ 官方客户端节点；subnet router 广播     │
-│  mesh 腿（自研控制面 + 34B 帧数据面）⇄ mesh 节点                     │
-│  dn42 腿（boringtun + Rust eBGP-lite）⇄ dn42 peers                  │
+│  mesh 接入（自研控制面 + 34B 帧数据面）⇄ rill 节点                   │
+│  dn42 接入（boringtun + Rust eBGP-lite）⇄ dn42 peers                 │
 │  路由策略引擎（LPM + 优先级 + fallback）                            │
 │  tun0 = LAN 侧；WAN NAT 兜底                                        │
 └───────────────────────────────────────────────────────────────────┘
@@ -37,9 +37,13 @@
 
 | 术语 | 含义 |
 |---|---|
-| leg（腿） | 一种 overlay 接入通道：mesh / dn42 / ts2021 |
+| leg（接入） | 一种 overlay 接入方式：mesh / dn42 / ts2021 |
 | mesh 模式 | 自建网络：自研控制面（coordinator）+ 自研数据面（34B 帧头） |
 | coordinator | mesh 控制面服务器：节点注册、身份绑定签名、key_dst 派生、netmap 权威 |
+| rill 节点 | 自研 mesh 协议节点（34B 帧 + 自研控制面），所有节点必具的协议身份 |
+| rill ext 节点 | 带外部接入的 rill 节点（dn42 接入 / ts2021 接入为属性标注），即原"边缘节点" |
+| coord 节点 | 兼任 coordinator 角色的 rill 节点（能力位 `coordinator`，Raft 期可多个）；独立部署的 coordinator 服务不算节点 |
+| 内部节点 | 无外部接入的 rill 节点（形态轴，相对 rill ext 节点） |
 | netmap | coordinator 下发的全网拓扑（node_id/公钥/端点/能力，带版本号） |
 | key_dst | 转发密钥 `KDF(主密钥, to_node_id)`，route_mac 计算用，按目的派生 |
 | broadcast 能力位 | 0x20，L2 广播/组播泛洪 opt-in：keydist 仅向该位节点下发 broadcast_key，泛洪只发该位端点（FRAME_HEADER §2.6 v0.9，CONTROL_PLANE §3.1） |
@@ -51,7 +55,7 @@
 | 桥节点（bridge） | 联邦边界节点：持双方网络密钥，跨界重签 route_mac |
 | 联邦（federation） | v2 特性：coordinator 对等互联 + 条目交换/过滤/重签；v1 留三钩子 |
 | identity_binding | coordinator 签名 `node_id ⇔ Noise 静态公钥`，防中继 MITM |
-| 仅边缘持有 | dn42/tailnet 路由只存在于连接该网络的边缘节点，不进 mesh netmap |
+| 仅 rill ext 持有 | dn42/tailnet 路由只存在于连接该网络的 rill ext 节点，不进 mesh netmap |
 | ts2021 | tailscale 控制协议（Noise + HTTP/2 + tailcfg protobuf） |
 | controlbase | ts2021 的 Noise IK 帧层 |
 | DERP | tailscale 中继服务器（转发密文，不可解密） |
@@ -105,7 +109,7 @@ docs/README.md（入口：阅读路线 + 三张图）
 | macOS | `tailscale login --login-server <URL>` 或 GUI Debug 菜单 |
 | tvOS | 系统设置 → Apps → Tailscale → `ALTERNATE COORDINATION SERVER URL` |
 
-推论：官方客户端数据面是**标准 WireGuard**，不认识 34B 帧头——手机永远只能作为"叶子客户端"经边缘节点接入（WG ⇄ 边缘节点），这是"双数据面"架构的成因。
+推论：官方客户端数据面是**标准 WireGuard**，不认识 34B 帧头——手机永远只能作为"叶子客户端"经 rill ext 节点接入（WG ⇄ rill ext 节点），这是"双数据面"架构的成因。
 
 ## 8. 信任模型要点
 
@@ -128,27 +132,27 @@ docs/README.md（入口：阅读路线 + 三张图）
 **远期特性（proposed 需求）**：
 - **路径服务（v1.5 控制面 / v2 数据面，REQ-034，设计已合并 CONTROL_PLANE §3.11）**：PathMap 与 netmap 分离；PathRequest/PathResponse/PathUpdate/PathWithdraw/PathProbe 消息族；每目标 2~4 候选路径 + flow hash + 快速切换 + 路径生命周期；**v2 帧头固定 8B path_id**（34B→42B，纳入 route_mac/AAD），route_mac 改用 `key_path = KDF(主密钥, path_id, path_epoch)` 按路径签发（`path_id=0` 回退 key_dst，v1 数据面零改动）；**路径集合 = 路径级 ACL**（与 ACL v2 衔接）
 - **ACL v2（零信任式逐请求授权，REQ-020，v1 已预留全套钩子）**：coordinator 下发策略（subject=node_id/网络、object=前缀/端口、action），随 netmap 原子下发（version 一版本两用，CONTROL_PLANE §3.2）；裁决点 = 路由引擎 LPM 命中后（ROUTE_ENGINE §2，v1 恒放行）；**源身份约束：只做目标节点侧裁决**（ROUTE_ENGINE §3）；`acl` 能力位已划归（v1 恒 false）；Policy 消息族组空间已预留（§3.10）；管理面形态定稿时纳入策略模型（REQ-038）；验证场景挂账（tests/security/tenancy SEC-28）；**v2 升级路径 = 路径级授权（§3.11.6：签发路径即策略，relay 侧可执法）**；组级隔离开放时 probe/打洞信令需同样门控（否则组间可借直连/打洞绕过 ACL）
-- **Web 纯终端（v3 候选，REQ-041）**：浏览器临时设备接入（网吧/他人电脑访问 mesh 资源）——形态 = 轻量代理通道（TLS/WSS/WebTransport）连边缘节点"Web 接入网关"，非 mesh 节点协议；实现手段（Rust→wasm32 vs 纯 JS）届时评估；核心模块 I/O 无关约定使其零重构可行
+- **Web 纯终端（v3 候选，REQ-041）**：浏览器临时设备接入（网吧/他人电脑访问 mesh 资源）——形态 = 轻量代理通道（TLS/WSS/WebTransport）连 rill ext 节点"Web 接入网关"，非 rill 节点协议；实现手段（Rust→wasm32 vs 纯 JS）届时评估；核心模块 I/O 无关约定使其零重构可行
 
 （帧分片已闭环：REQ-009——不做分片，ROUTE_ENGINE §6）
 
 **未决项已全部收敛（REQ-021，2026-08-15）**：
-1. **ts2021 腿认证 = 仅 auth key**（自研客户端仅边缘节点形态、无人值守；官方 app 交互登录 = 服务端职责，P0 实证）——TS2021_LEG §3.2
-2. **ts2021 数据面 v1 = DERP-only**（手机↔边缘流量量小；disco 自研成本高风险大，挂 v2）——TS2021_LEG §3.3
-3. **路由冲突消解 = 固定来源优先级 `LAN > mesh > dn42 > tailnet`**（各腿空间天然不重叠；metric 挂 v2）——ROUTE_ENGINE §3
+1. **ts2021 接入认证 = 仅 auth key**（自研客户端仅 rill ext 节点形态、无人值守；官方 app 交互登录 = 服务端职责，P0 实证）——TS2021_LEG §3.2
+2. **ts2021 数据面 v1 = DERP-only**（手机↔rill ext 流量量小；disco 自研成本高风险大，挂 v2）——TS2021_LEG §3.3
+3. **路由冲突消解 = 固定来源优先级 `LAN > mesh > dn42 > tailnet`**（各接入空间天然不重叠；metric 挂 v2）——ROUTE_ENGINE §3
 4. **DNS 分类语义 = 分域解析代理**（单点 53 代理按后缀分发：`.mesh` → 控制面名称表、`.dn42` → 172.20.0.53、tailnet → headscale DNS 配置、其余 → 上游；LAN 侧分发机制实现时定）——ROUTE_ENGINE §7
 
-（tailnet 路由传播已定稿：边缘节点公告 tailnet 前缀进 mesh，见 ROUTE_ENGINE §3 回程）
+（tailnet 路由传播已定稿：rill ext 节点公告 tailnet 前缀进 mesh，见 ROUTE_ENGINE §3 回程）
 
 ## 10. 路线图
 
 | 阶段 | 内容 |
 |---|---|
 | P0 | 过渡验证：部署 headscale + derper，官方 app 入网端到端（证明"手机直连"可行）——**已完成（REQ-033）** |
-| P1 | mesh 骨架：crate 落地（tun + 用户态转发骨架）+ mesh 腿（单 coordinator + 34B 帧）——**大部完成（REQ-022~REQ-032）** |
+| P1 | mesh 骨架：crate 落地（tun + 用户态转发骨架）+ mesh 接入（单 coordinator + 34B 帧）——**大部完成（REQ-022~REQ-032）** |
 | v1.5 | 路径服务（控制面）：Path\* 消息族 + 每目标 2~4 候选路径/快速切换 + 路径生命周期 + flow hash（CONTROL_PLANE §3.11，REQ-034）；数据面 34B 帧不变 |
-| P2 | 接入腿：ts2021 客户端腿（连 headscale + subnet router 广播）+ dn42 腿（boringtun + eBGP-lite） |
+| P2 | 接入：ts2021 客户端接入（连 headscale + subnet router 广播）+ dn42 接入（boringtun + eBGP-lite） |
 | P3 | 融合与自研：路由策略引擎完善 + exit 双向语义 + 自研 ts2021 服务端替换 headscale + Raft |
 | P4 | 性能与联邦：XDP 快速路径 + DNS 统一 + 联邦 v2 + 帧头 path_id 数据面（v2，§3.11） |
 
-**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环），P2 接入腿推进中。**
+**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环），P2 接入推进中。**

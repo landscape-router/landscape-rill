@@ -259,7 +259,7 @@ impl RouteEngine {
             .find(|entry| reachable(entry))
     }
 
-    /// 移除某 mesh 节点的全部路由（吊销/netmap 消失）
+    /// 移除某 rill 节点的全部路由（吊销/netmap 消失）
     pub fn remove_mesh_node(&mut self, node_id: u32) {
         self.table
             .remove_where(|e| e.source == RouteSource::Mesh && e.via == RouteVia::Mesh(node_id));
