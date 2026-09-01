@@ -36,6 +36,8 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-045](./REQ-045-acl-policy.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
 | [REQ-048](./REQ-048-batch-revoke-rotation.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
 | [REQ-050](./REQ-050-reproducible-build.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
+| [REQ-051](./REQ-051-coord-status-http.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
+| [REQ-052](./REQ-052-node-telemetry.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
 | [REQ-049](./REQ-049-coordinator-transparency.md) | 需求 | 📌 proposed | P3 | 09-01 | — |
 | [REQ-001](./REQ-001.md) | 决策 | ✅ merged | — | 08-13 | FRAME_HEADER §2 |
 | [REQ-002](./REQ-002.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §2.1/§3.1 |
