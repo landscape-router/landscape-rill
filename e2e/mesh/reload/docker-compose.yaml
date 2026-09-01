@@ -1,0 +1,97 @@
+# mesh e2e reload 场景：coordinator 配置 SIGHUP 重载（REQ-038，CONTROL_PLANE §3.12，ADM-03）
+# coord + node-a/b（基线，直连拓扑）+ node-c/d（profile late 门控，随场景阶段拉起）
+# 场景：coord.json 追加 K_C → SIGHUP → node-c 注册成功（新 key 生效）
+#       → coord.json 写坏 → SIGHUP → 重载失败保持旧配置 + 数据面不受影响
+#       → coord.json 移除 K_C → SIGHUP → node-d（复用 K_C）注册被拒（移除即刻失效）
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+  node-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-c.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.31
+    profiles: [late]
+
+  node-d:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-d
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-d.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.32
+    profiles: [late]
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24

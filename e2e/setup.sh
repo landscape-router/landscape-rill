@@ -16,13 +16,16 @@ hex() { openssl rand -hex 32; }
 "$E2E_DIR/cleanup.sh"
 
 # 场景选择：relay 用线形拓扑（b 双网卡）；persist 用四节点拓扑（coord 持久化，REQ-037）；
-# log 用日志验收拓扑（同 direct，节点日志启动参数不同，LOGGING §2/§4）
+# log 用日志验收拓扑（同 direct，节点日志启动参数不同，LOGGING §2/§4）；
+# reload 用 SIGHUP 重载拓扑（同 direct，node-c/d profile late 门控，REQ-038）
 if [ "$SCENARIO" = "relay" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/relay/docker-compose.yaml"
 elif [ "$SCENARIO" = "persist" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/persist/docker-compose.yaml"
 elif [ "$SCENARIO" = "log" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/log/docker-compose.yaml"
+elif [ "$SCENARIO" = "reload" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/reload/docker-compose.yaml"
 fi
 
 echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"
@@ -135,6 +138,31 @@ EOF
   gen_node_config node-d.json "$NODE_D_KEY" "10.45.0.1/24" "fd00:5::1/64" '["10.45.0.0/24", "fd00:5::/64"]' "$NODE_C_AUTHKEY"
 fi
 
+if [ "$SCENARIO" = "reload" ]; then
+  # reload 场景（REQ-038）：初始只配置 node-a/b 的 auth key；node-c/d 复用 K_C（生成但不入配置），
+  # 场景内按阶段修改 coord.json + SIGHUP 断言增量生效/失败保旧
+  cat > "$BUILD_DIR/coord.json" <<EOF
+{
+  "coord": {
+    "network": "lab",
+    "listen_addr": "0.0.0.0:8443",
+    "master_key": "$MASTER_KEY",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "auth_keys": [
+      { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+      { "key": "$NODE_B_AUTHKEY", "policy": "reusable" }
+    ],
+    "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
+  }
+}
+EOF
+  gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY"
+  gen_node_config node-d.json "$NODE_D_KEY" "10.45.0.1/24" "fd00:5::1/64" '["10.45.0.0/24", "fd00:5::/64"]' "$NODE_C_AUTHKEY"
+  echo "$NODE_C_AUTHKEY" > "$BUILD_DIR/.reload_kx"
+fi
+
 if [ "$SCENARIO" = "relay" ]; then
   # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，
   # 否则 docker 网桥自身路由会命中；ip route get 命中默认路由不可用）
@@ -146,10 +174,10 @@ fi
 
 echo "==> 5/6 构建并启动"
 $COMPOSE build -q
-if [ "$SCENARIO" = "persist" ]; then
-  # compose build 默认跳过 profile 门控服务（persist 的 node-d）——须显式带 profile 构建，
-  # 否则 stage-4 的 up 会复用旧镜像（证书/二进制陈旧导致 BadSignature）
-  $COMPOSE --profile late build -q node-d
+if [ "$SCENARIO" = "persist" ] || [ "$SCENARIO" = "reload" ]; then
+  # compose build 默认跳过 profile 门控服务（persist 的 node-d、reload 的 node-c/d）——
+  # 须显式带 profile 构建，否则后续 up 会复用旧镜像（证书/二进制陈旧导致 BadSignature）
+  $COMPOSE --profile late build -q
 fi
 $COMPOSE up -d --force-recreate
 
