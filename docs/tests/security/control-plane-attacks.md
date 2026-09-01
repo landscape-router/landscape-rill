@@ -9,7 +9,7 @@
 - 测试层：docker e2e
 - 状态：`待补充`
 - 证据：—
-- 缺口：容器级复验（TLS 信任锚校验逻辑已实现：自签 CA 预置/公网 PKI，见 rill-mesh/src/control.rs）
+- 缺口：容器级复验（TLS 信任锚校验逻辑已实现：自签 CA 预置/公网 PKI，见 rill-mesh/src/control/）
 - 说明：无有效证书/未预置 CA → TLS 验证失败拒绝连接；auth key 不泄露
 
 ## SEC-13 auth key 复用/过期

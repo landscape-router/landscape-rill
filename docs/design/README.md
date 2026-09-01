@@ -55,8 +55,11 @@ landscape-rill/                  # cargo workspace（virtual）
 │       ├── handshake.rs         # Noise_XX 握手状态机与会话（FRAME_HEADER §2.4）
 │       ├── route.rs             # LPM 路由表 + fallback（ROUTE_ENGINE）
 │       └── control/             # 注册表/吊销/挑战/会话状态机（CONTROL_PLANE）
-├── rill-coord/                  # coordinator 角色：coordinator.rs + signer.rs（Ed25519）
-├── rill-mesh/                   # mesh 接入：control.rs（TLS 客户端/服务端）+ data.rs（UDP 转发）+ framing.rs
+├── rill-coord/                  # coordinator 角色：coordinator.rs（跨域编排门面）+ authkey.rs
+│   │                            # （lrk 格式）+ directory.rs（目录）+ liveness.rs（活性）+
+│   │                            # keys.rs（密钥域）+ path_service.rs + signer.rs（Ed25519）+ store.rs
+├── rill-mesh/                   # mesh 接入：control/（TLS 客户端/服务端/编解码）+ data.rs（UDP 转发）+ framing.rs
+│   └── src/control/             # 控制面：client.rs + server.rs + codec.rs + tls.rs（PROTOCOL_VERSION 等共享项在 mod.rs）
 ├── rill-node/                   # 节点角色胶水（I/O 侧）
 │   └── src/
 │       ├── config.rs            # 配置解析（加载即校验、无默认凭据、DNS 缓存+退避）

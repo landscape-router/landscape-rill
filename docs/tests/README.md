@@ -54,7 +54,7 @@
 | REQ-001 | FRM-01 / FRM-04 | 已覆盖 | rill-core/src/frame.rs、rill-core/src/handshake.rs |
 | REQ-002 | FRM-02 | 已覆盖 | rill-core/src/crypto.rs、rill-mesh/src/data.rs |
 | REQ-003 | FRM-02 | 已覆盖 | rill-mesh/src/data.rs |
-| REQ-004 | CTL-01 | 已覆盖 | rill-mesh/src/control.rs、e2e/run_e2e.sh |
+| REQ-004 | CTL-01 | 已覆盖 | rill-mesh/src/control/、e2e/run_e2e.sh |
 | REQ-005 | E2E-05 | 待补充 | — |
 | REQ-006 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
 | REQ-007 | CON-01 ~ CON-06 | 待补充 | — |
@@ -77,7 +77,7 @@
 | REQ-024 | CTL-01 / CTL-08 | 已覆盖 | rill-coord/src/ |
 | REQ-025 | — | — | rill-node/src/config.rs |
 | REQ-026 | — | — | rill-node/src/ |
-| REQ-027 | CTL-01 | 已覆盖 | rill-mesh/src/control.rs |
+| REQ-027 | CTL-01 | 已覆盖 | rill-mesh/src/control/ |
 | REQ-028 | FRM-09 | 已覆盖 | rill-mesh/src/data.rs |
 | REQ-029 | FRM-04 / FRM-06 / SEC-05 ~ SEC-10 | 已覆盖 | rill-core/src/handshake.rs |
 | REQ-030 | FRM-11 | 已覆盖 | rill-node/src/runtime.rs |

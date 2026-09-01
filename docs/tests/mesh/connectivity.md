@@ -16,7 +16,7 @@
 - 关联 REQ：REQ-007
 - 测试层：单测 + e2e
 - 状态：`部分覆盖`
-- 证据：rill-mesh/src/control.rs、rill-coord/src/coordinator.rs
+- 证据：rill-mesh/src/control/、rill-coord/src/coordinator.rs
 - 缺口：EndpointReport 消息与端点上报入 netmap 已实现；探测触发（周期 30s + 网络变更）链路未验证
 
 ## CON-03 直连互探（公网/锥形 NAT）

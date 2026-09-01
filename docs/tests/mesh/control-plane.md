@@ -8,7 +8,7 @@
 - 关联 REQ：REQ-004 / REQ-024 / REQ-027
 - 测试层：单测 + 集成 + e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/control/registry.rs、rill-mesh/src/control.rs、e2e/run_e2e.sh
+- 证据：rill-core/src/control/registry.rs、rill-mesh/src/control/、e2e/run_e2e.sh
 - 说明：注册返回 node_id + 身份绑定签名；重复注册幂等（同 auth key + 同公钥返回相同结果）
 
 ## CTL-02 auth key 一次性/可复用语义
@@ -121,7 +121,7 @@
 - 关联 REQ：REQ-034
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame.rs、rill-core/src/crypto.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control.rs、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
+- 证据：rill-core/src/frame.rs、rill-core/src/crypto.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control/、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
 - 缺口：PathProbe 消息族运行时未启用（活性由数据面心跳承担，协议已定义）
 
 ## CTL-16 coordinator 持久化（REQ-037）
