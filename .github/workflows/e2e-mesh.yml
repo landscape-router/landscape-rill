@@ -20,7 +20,11 @@ jobs:
       - name: rustc version
         id: rustc
         run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
-      # 编译 cache 内容键（失效时机确定，无回退）：Cargo.lock 变更或 rustc 版本变更 → 失效；
+      - name: iso week
+        id: week
+        run: echo "iso=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+      # 编译 cache 内容键（失效时机确定，无回退）：Cargo.lock 变更、rustc 版本变更或周旋转（%G-%V，
+      # 缓存寿命严格 ≤7 天，即使持续访问；旧条目由 GitHub 内置 7 天未访问规则回收）→ 失效；
       # 源码变更不失效（cargo 指纹保证增量重编正确性）；同键已存在时 save 为 no-op
       - name: Restore cargo cache
         id: cargo-cache
@@ -29,7 +33,7 @@ jobs:
           path: |
             ~/.cargo
             target
-          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ steps.week.outputs.iso }}-${{ hashFiles('**/Cargo.lock') }}
       - name: release build
         run: cargo build --release
       # GitHub cache 不可覆盖：内容键命中时跳过 save（条目已存在，内容有效）；
@@ -41,7 +45,7 @@ jobs:
           path: |
             ~/.cargo
             target
-          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ steps.week.outputs.iso }}-${{ hashFiles('**/Cargo.lock') }}
       - uses: actions/upload-artifact@v4
         with:
           name: lrill

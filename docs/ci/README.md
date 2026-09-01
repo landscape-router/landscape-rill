@@ -9,12 +9,12 @@
 | workflow | 内容 | 触发 | required |
 |---|---|---|---|
 | `check.yml` | fmt / clippy(`-D warnings`) / `cargo test --workspace` / cargo audit / `ci/check-docs.sh` | PR + push | 是 |
-| `e2e-mesh.yml` | `build` job 编译一次：编译 cache（`~/.cargo` + `target`，内容键 `cargo-<os>-<rustc 版本>-<Cargo.lock hash>`，失效时机确定）加速增量编译 → release 二进制进 artifact → `mesh` job 五场景 matrix 并行（`needs: build` 下载 artifact，`E2E_SKIP_BUILD=1` 不再编译；每场景一 job，`fail-fast=false`）：direct（coord + node-a/b，IPv4+IPv6 ping）、relay（a—b—c 线形经 b 中继）、persist（REQ-037）、log（REQ-039）、reload（REQ-038 SIGHUP 重载），`MESH_E2E_SCENARIO` 取矩阵值 | PR + push main + workflow_dispatch | 否 |
+| `e2e-mesh.yml` | `build` job 编译一次：编译 cache（`~/.cargo` + `target`，内容键 `cargo-<os>-<rustc 版本>-<ISO 周>-<Cargo.lock hash>`，失效时机确定）加速增量编译 → release 二进制进 artifact → `mesh` job 五场景 matrix 并行（`needs: build` 下载 artifact，`E2E_SKIP_BUILD=1` 不再编译；每场景一 job，`fail-fast=false`）：direct（coord + node-a/b，IPv4+IPv6 ping）、relay（a—b—c 线形经 b 中继）、persist（REQ-037）、log（REQ-039）、reload（REQ-038 SIGHUP 重载），`MESH_E2E_SCENARIO` 取矩阵值 | PR + push main + workflow_dispatch | 否 |
 | `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
 
 - 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）
 - **含 cargo audit**（REQ-044 供应链审计部分落地；依赖最小化与可复现构建随 REQ-044 剩余部分推迟至 release 阶段）
-- **e2e-mesh 编译 cache 失效时机（确定性，无回退）**：内容键 `cargo-<os>-<rustc 版本>-<Cargo.lock hash>`——`Cargo.lock` 变更或 rustc stable 升级 → 键变 → 旧 cache 永久失效（全量重编一次，时机可预期）；源码变更不失效（cargo 指纹保证增量重编正确性）；同键条目已存在时 save 为 no-op
+- **e2e-mesh 编译 cache 失效时机（确定性，无回退）**：内容键 `cargo-<os>-<rustc 版本>-<ISO 周 %G-%V>-<Cargo.lock hash>`——`Cargo.lock` 变更、rustc stable 升级或**周旋转**（键内 ISO 周变化，缓存寿命严格 ≤7 天，即使持续访问）→ 键变 → 旧 cache 永久失效（全量重编一次，时机可预期）；源码变更不失效（cargo 指纹保证增量重编正确性）；同键条目已存在时 save 为 no-op；旋转产生的旧条目由 GitHub 内置规则回收（7 天未访问淘汰 + 仓库总量 10GB 超限 LRU）
 - e2e 不设 required（成本高，低频/手动路径）
 
 ## 2. check-docs.sh 检查规则
