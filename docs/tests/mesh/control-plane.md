@@ -23,7 +23,7 @@
 - 关联 REQ：REQ-004
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs
+- 证据：rill-coord/src/coordinator/
 - 说明：新节点加入后 version++，所有节点收敛到同一版本；幂等重注册不 bump
 
 ## CTL-04 断线重连补偿
@@ -31,7 +31,7 @@
 - 关联 REQ：REQ-004 / REQ-030
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-node/src/runtime.rs
+- 证据：rill-node/src/runtime/
 - 说明：重连传上次 node_id 走幂等注册或挑战；netmap/keydist 全量补偿
 
 ## CTL-05 心跳/租约离线判定
@@ -39,7 +39,7 @@
 - 关联 REQ：REQ-004
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs、rill-node/src/runtime.rs
+- 证据：rill-coord/src/coordinator/、rill-node/src/runtime/
 - 说明：超租约标记离线（条目保留），复活恢复在线；随心跳周期重推 netmap/keydist
 
 ## CTL-06 key_dst 分发
@@ -47,7 +47,7 @@
 - 关联 REQ：REQ-004
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs
+- 证据：rill-coord/src/coordinator/
 - 说明：按 to_node_id 下发；节点不可推导主密钥（改包尝试失败）
 
 ## CTL-07 key_dst 轮换（宽限期）
@@ -55,7 +55,7 @@
 - 关联 REQ：REQ-004
 - 测试层：单测
 - 状态：`部分覆盖`
-- 证据：rill-coord/src/coordinator.rs
+- 证据：rill-coord/src/coordinator/
 - 缺口：**节点侧新旧密钥宽限期并存语义待传输层落地**（全网轮换 = 主密钥更换 + key_version++ 已实现）
 
 ## CTL-08 吊销 + 全网轮换
@@ -63,7 +63,7 @@
 - 关联 REQ：REQ-024
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs、rill-core/src/control/revoke.rs
+- 证据：rill-coord/src/coordinator/、rill-core/src/control/revoke.rs
 - 说明：条目移除 + netmap_version++ + key_version++；被吊销节点无法再通信（含旧会话密钥）
 
 ## CTL-09 租户隔离（多网络）
@@ -71,7 +71,7 @@
 - 关联 REQ：REQ-010
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs、rill-coord/src/domain.rs、e2e/run_e2e.sh
+- 证据：rill-coord/src/coordinator/、rill-coord/src/domain.rs、e2e/run_e2e.sh
 - 说明：单 coordinator 多网络（CONTROL_PLANE §1.5）——每网络独立 registry/主密钥/auth key 空间/白名单/路径域；netmap 按网络过滤；跨网 key 伪造、auth key 归域、绑定越权、白名单越权对抗断言见 SEC-21~25（docs/tests/security/tenancy.md）
 
 ## CTL-10 前缀公告白名单
@@ -79,7 +79,7 @@
 - 关联 REQ：REQ-008
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator.rs、rill-node/src/runtime.rs
+- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator/、rill-node/src/runtime/
 - 说明：白名单内公告并入 netmap（coordinator 层断言）；白名单外/过短前缀 → RouteNotAllowed（整批拒绝，不部分采纳）；空白名单 fail-closed；routes[] 内嵌 netmap 与多网关冗余语义已闭环
 
 ## CTL-11 离线自动撤销公告
@@ -127,7 +127,7 @@
 - 关联 REQ：REQ-037
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/store/、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/persist/docker-compose.yaml
+- 证据：rill-coord/src/store/、rill-coord/src/coordinator/、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/persist/docker-compose.yaml
 - 说明：redb 快照整写；损坏/不一致 fail-closed；一次性 key 消费 tombstone 跨重启存活
 
 ## CTL-17 auth key 内嵌过期时间（REQ-043）
@@ -135,7 +135,7 @@
 - 关联 REQ：REQ-043
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-coord/src/config/、rill-coord/src/coordinator.rs、rilld/src/main.rs
+- 证据：rill-coord/src/config/、rill-coord/src/coordinator/、rilld/src/main.rs
 - 说明：过期时间嵌入 key 自身（advisory），admission 时 coordinator 校验；节点侧仅告警不阻断（挑战恢复路径不受影响）
 
 ## 验收断言

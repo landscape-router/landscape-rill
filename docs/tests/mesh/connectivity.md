@@ -16,7 +16,7 @@
 - 关联 REQ：REQ-007
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/control/、rill-coord/src/coordinator.rs、e2e/run_e2e.sh
+- 证据：rill-mesh/src/control/、rill-coord/src/coordinator/、e2e/run_e2e.sh
 - 说明：EndpointReport 消息与端点上报入 netmap 已实现；探测触发链路（echo 结果变化 → 重报）随 CON-01 覆盖（probe 场景 endpoint report 含 seen 地址）；周期 30s（PROBE_PERIOD）
 
 ## CON-03 直连互探（公网/锥形 NAT）
@@ -32,7 +32,7 @@
 - 关联 REQ：REQ-007
 - 测试层：docker e2e
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、e2e/mesh/probe/、e2e/mesh/relay/、rill-node/src/runtime.rs
+- 证据：e2e/run_e2e.sh、e2e/mesh/probe/、e2e/mesh/relay/、rill-node/src/runtime/
 - 说明：直连失败自动切中继：v2 帧走路径候选（PathService relay 路径 + 挂靠确认），v1 帧端点表追加确认中继端点（直连 miss 轮转回落，`apply_relay_endpoints`）；probe 场景 c→a 经 b 中继 + relay 场景回归
 
 ## CON-05 三层中继模型
@@ -40,7 +40,7 @@
 - 关联 REQ：REQ-007
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rilld/src/main.rs、rill-coord/src/coordinator.rs
+- 证据：e2e/run_e2e.sh、rilld/src/main.rs、rill-coord/src/coordinator/
 - 说明：relay 列表构建（coordinator 周期向各网 relay 能力节点端点发 PING 测 RTT → 排序写入 relay_list 随 netmap 下发 + PathService relay 顺序 = 挂靠优先级）；自愿节点 opt-in（能力位 relay=0x01）纳入；coordinator 兼任 echo/RTT 探测方（e2e `relay rtt` 日志 + 节点 `relay candidates`）；独立 relay 部署（层③）协议零改动，挂账
 
 ## CON-06 中继故障切换
@@ -56,7 +56,7 @@
 - 关联 REQ：REQ-014
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/data/、rill-node/src/runtime.rs
+- 证据：rill-mesh/src/data/、rill-node/src/runtime/
 - 说明：心跳 3 次 miss 拆会话已闭环；**回退中继路径**（事件驱动切换）未验证
 
 ## CON-08 端口分派

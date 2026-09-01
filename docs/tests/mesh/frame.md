@@ -89,7 +89,7 @@
 - 关联 REQ：REQ-030
 - 测试层：单测（pump 驱动）
 - 状态：`已覆盖`
-- 证据：rill-node/src/runtime.rs
+- 证据：rill-node/src/runtime/
 - 说明：TLS 注册→netmap→keydist→端点上报→心跳收敛→懒握手→加密帧双向；数据面心跳 3 次 miss 拆会话
 
 ## 验收断言

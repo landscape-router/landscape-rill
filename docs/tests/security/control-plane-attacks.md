@@ -41,7 +41,7 @@
 - 关联 REQ：REQ-022 / REQ-024
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/control/revoke.rs、rill-coord/src/coordinator.rs
+- 证据：rill-core/src/control/revoke.rs、rill-coord/src/coordinator/
 - 说明：重连挑战验签失败（注册表已移除）；既有会话触发 Noise rekey 作废；netmap 条目移除
 
 ## SEC-17 版本不兼容

@@ -64,7 +64,7 @@
 - 关联 REQ：REQ-008 / REQ-014
 - 测试层：单测 + e2e
 - 状态：`部分覆盖`
-- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator.rs
+- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator/
 - 缺口：过短前缀不进前缀公告已闭环（CTL-10）；"过短前缀走 exit 语义"依赖 exit（P3，RTE-06）
 
 ## 验收断言

@@ -8,7 +8,7 @@
 - 关联 REQ：REQ-010
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rill-coord/src/coordinator.rs
+- 证据：e2e/run_e2e.sh、rill-coord/src/coordinator/
 - 说明：网络 A 节点收不到 B 的 netmap 条目；`network_id` 恒为本网络（netmap_snapshot 按网络过滤，server 推送按注册节点网络取值）；断言测试 `netmap_isolated_per_network`
 
 ## SEC-22 key_dst 隔离
@@ -16,7 +16,7 @@
 - 关联 REQ：REQ-010
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/mesh/tenancy/forge.py、e2e/run_e2e.sh、rill-coord/src/coordinator.rs
+- 证据：e2e/mesh/tenancy/forge.py、e2e/run_e2e.sh、rill-coord/src/coordinator/
 - 说明：A 节点用 B 网络 key 伪造 route_mac → 转发节点校验失败（BadRouteMac 丢弃；正对照证明 drop 因密钥不匹配）；主密钥按网络独立（KDF 分域）；断言测试 `key_dst_isolated_per_network`
 
 ## SEC-23 auth key 越权
@@ -24,7 +24,7 @@
 - 关联 REQ：REQ-010
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rill-coord/src/coordinator.rs、rill-coord/src/config/
+- 证据：e2e/run_e2e.sh、rill-coord/src/coordinator/、rill-coord/src/config/
 - 说明：归域在协议上结构性阻断——auth key 内嵌网络（REQ-043），注册即归域（key 的网络必须存在且只进该网络 registry）；配置层 key 放错网络段拒绝启动；未知网络 key 注册被拒；断言测试 `auth_key_scoped_to_network`/`config_rejects_network_mismatch`
 
 ## SEC-24 身份绑定越权
@@ -32,7 +32,7 @@
 - 关联 REQ：REQ-010
 - 测试层：单测（集成）
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs、rill-core/src/handshake/、rill-mesh/src/data/
+- 证据：rill-coord/src/coordinator/、rill-core/src/handshake/、rill-mesh/src/data/
 - 说明：**覆盖层调整（2026-09-01）**：e2e 容器内无法注入携带外网绑定的 Noise 握手（需实现完整恶意客户端，且 netmap 隔离已结构性阻断攻击面——A 拿不到 B 的端点）；改为直接验证生产验签路径 `verify_binding`（外网绑定/篡改节点号/公钥任一字段 → 失败）+ 跨网握手 prologue 拒绝（线级）
 
 ## SEC-25 前缀公告越权
@@ -40,7 +40,7 @@
 - 关联 REQ：REQ-010
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs
+- 证据：rill-coord/src/coordinator/
 - 说明：白名单按网络分域——A 网白名单不影响 B 网；A 网节点公告 B 网白名单前缀被拒（RouteNotAllowed）；断言测试 `whitelist_isolated_per_network`
 
 ## SEC-26 反射放大（coordinator 回显）
@@ -64,7 +64,7 @@
 - 关联 REQ：REQ-020
 - 测试层：单测（断言）
 - 状态：`已覆盖`
-- 证据：rill-core/src/route/、rill-coord/src/coordinator.rs
+- 证据：rill-core/src/route/、rill-coord/src/coordinator/
 - 说明：策略检查点存在且恒放行（route.rs policy_checkpoint_allow_all_v1）；`acl` 能力位（0x40）v1 恒 false——coordinator 不解释、不占用，netmap 原样透传（coordinator.rs capability_acl_bit_reserved_v1）；v1 行为 = 全端口可达语义不变
 
 ## 验收断言
