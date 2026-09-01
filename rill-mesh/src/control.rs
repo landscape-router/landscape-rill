@@ -18,6 +18,9 @@ use tracing::error;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const CHALLENGE_NONCE_LEN: usize = 16;
 
+/// 边界 I/O 结果别名（ERROR_ID §2.2）：统一 `Box<dyn Error + Send + Sync>`
+pub(crate) type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
 /// hops → bytes（每 node_id 4B 大端；avoid quick-protobuf packed fixed32 对齐缺陷）
 pub fn hops_bytes(hops: &[u32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(hops.len() * 4);
@@ -211,7 +214,7 @@ pub async fn client_tls_stream(
     host: &str,
     port: u16,
     ca_cert_pem: &[u8],
-) -> Result<TlsStream<TcpStream>, Box<dyn std::error::Error>> {
+) -> BoxResult<TlsStream<TcpStream>> {
     let mut roots = rustls::RootCertStore::empty();
     let certs: Vec<_> = CertificateDer::pem_slice_iter(ca_cert_pem).collect::<Result<_, _>>()?;
     for cert in certs {
@@ -231,7 +234,7 @@ pub async fn server_tls_stream(
     listener: &mut tokio::net::TcpListener,
     cert_pem: &[u8],
     key_pem: &[u8],
-) -> Result<tokio_rustls::server::TlsStream<TcpStream>, Box<dyn std::error::Error>> {
+) -> BoxResult<tokio_rustls::server::TlsStream<TcpStream>> {
     let certs: Vec<_> = CertificateDer::pem_slice_iter(cert_pem).collect::<Result<_, _>>()?;
     let key = PrivateKeyDer::pem_slice_iter(key_pem)
         .next()
@@ -321,9 +324,7 @@ impl CoordinatorServer {
 
     /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（auth keys + 白名单）；
     /// 配置 storage_path 时打开持久化存储（REQ-037），损坏/不一致 → Err（fail-closed）
-    pub fn from_config(
-        cfg: &CoordConfig,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_config(cfg: &CoordConfig) -> BoxResult<Self> {
         let coordinator = match &cfg.storage_path {
             Some(path) => {
                 Coordinator::open(std::path::Path::new(path), cfg.master_key, cfg.signing_seed)?
@@ -344,10 +345,7 @@ impl CoordinatorServer {
     }
 
     /// 注册成功/挑战通过后：全量 netmap + 逐节点 key_dst + 广播密钥（v1 全量互连）
-    async fn push_snapshot<W: AsyncWriteExt + Unpin>(
-        &self,
-        stream: &mut W,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn push_snapshot<W: AsyncWriteExt + Unpin>(&self, stream: &mut W) -> BoxResult<()> {
         let push = netmap_push_message(&self.coordinator);
         write_msg(stream, MsgType::NETMAP_PUSH, &envelope_body(&push)).await?;
         let node_ids: Vec<u32> = self
@@ -370,7 +368,7 @@ impl CoordinatorServer {
     pub async fn handle_connection(
         &mut self,
         stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> BoxResult<()> {
         let mut state = ConnectionState::default();
         loop {
             let (msg_type, body) = read_envelope(stream).await?;
@@ -387,7 +385,7 @@ impl CoordinatorServer {
         stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
         msg_type: MsgType,
         body: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> BoxResult<()> {
         match msg_type {
             MsgType::REGISTER => {
                 let mut reader = BytesReader::from_bytes(body);
@@ -565,7 +563,7 @@ impl CoordinatorServer {
         &mut self,
         stream: &mut W,
         source: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> BoxResult<()> {
         let events = self.coordinator.take_path_events(source);
         for event in events {
             match event {
@@ -703,7 +701,7 @@ impl ControlSession {
         ca_cert_pem: &[u8],
         config: &MeshLegConfig,
         previous_node_id: Option<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> BoxResult<Self> {
         let stream = client_tls_stream(host, port, ca_cert_pem).await?;
         let client = match previous_node_id {
             Some(node_id) => MeshClient::with_node_id(config.static_key, node_id),

@@ -1,3 +1,4 @@
+use crate::BoxResult;
 use futures_util::StreamExt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,7 +35,7 @@ pub struct TunDevice {
 }
 
 impl TunDevice {
-    pub async fn open(config: &TunConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn open(config: &TunConfig) -> BoxResult<Self> {
         let mut cfg = tun::configure();
         cfg.tun_name(&config.name).mtu(config.mtu).up();
         if let Some((addr, prefix)) = config.address4 {
@@ -95,11 +96,7 @@ impl TunDevice {
 }
 
 /// rtnetlink 为已创建接口添加 IPv6 地址（tun crate 的 ioctl 路径不支持 IPv6）
-pub async fn set_ipv6_address(
-    name: &str,
-    addr: Ipv6Addr,
-    prefix: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn set_ipv6_address(name: &str, addr: Ipv6Addr, prefix: u8) -> BoxResult<()> {
     let (connection, handle, _) = rtnetlink::new_connection()?;
     tokio::spawn(connection);
     let mut links = handle.link().get().match_name(name.to_string()).execute();

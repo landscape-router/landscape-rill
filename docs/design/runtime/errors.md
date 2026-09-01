@@ -1,7 +1,7 @@
 # 错误处理设计（ERROR_ID）
 
 > 错误类型定义、稳定错误 ID 与序列化信封——统一错误处理契约（thiserror + ErrorId + ErrorEnvelope）。
-> 版本：v1.1（2026-09-01 修订：§5 移除权威清单——代码即真相，文档不维护逐条 ID）｜ 相关需求：无（实现级约定，随 REQ-044 运维基线方向对齐）
+> 版本：v1.2（2026-09-01 修订：§2.2 边界 `BoxResult` 别名、§2.3 错误链展开；§5 移除权威清单）｜ 相关需求：无（实现级约定，随 REQ-044 运维基线方向对齐）
 
 ## 1. 范围与边界
 
@@ -28,7 +28,13 @@
 ### 2.2 边界转换
 
 - I/O 接口统一 `std::io::Error`：`io::Error::new(kind, e)` 直接携带错误对象（错误已实现 `Error + Send + Sync`），不做 `format!("{:?}")` 字符串化
-- 高层扇入 `Box<dyn Error + Send + Sync>` 不变（不引入 anyhow）
+- 高层扇入统一 `BoxResult<T>` 别名（`Box<dyn Error + Send + Sync>`）：`rill-node` lib.rs 与 `rill-mesh` control.rs 为 `pub`/`pub(crate)` 导出，`rilld` 为二进制内私有；不允许混用裸 `Box<dyn Error>`（不含 Send+Sync）
+
+### 2.3 错误链展开
+
+- 日志打印错误时 `{e}` 只显示顶层 Display，`#[source]` 链路丢失
+- 统一用 `landscape_rill_core::error::format_chain(&e)` 展开为单行 `outer: inner: ...`（daemon fatal/reload/persist 等诊断点）
+- 传输层仍用 `io::Error` 携带源错误（`io::Error::source()` 保留链），仅展示层展开
 
 ## 3. ErrorId 契约
 
@@ -82,5 +88,6 @@ derive 宏要求每个非透明变体带 `#[error_id("...")]`，缺失编译报�
 ## 6. 决策记录
 
 - 2026-09-01（本版）：引入 thiserror（16 个错误类型全量转换，Display 全部英文）；错误 ID 机制照搬 landscape 项目 `LdApiError` 模式（derive 宏 + 变体 `#[error_id("...")]`，新 crate `landscape-rill-macro`）；args 用 serde_json::Value；`to_envelope()` 设计契约先行（当前无序列化出口）；`StoreError::Redb` 改 `#[from] redb::Error` 保留 source 链；不引入 anyhow（高层 `Box<dyn Error>` 不变）
-- 2026-09-01（§5 修订）：否决文档维护逐条 ID 清单（双重维护，代码扫描即得）——只保留命名规范，代码 `#[error_id("...")]` 为权威
+- 2026-09-01（§5 修订）：否决文档维护逐条 ID 清单（双重维护，代码扫描即得）——只保留命名规范，代码 `#[error_id("...")]` 为权威；check-docs.sh 规则 7 强制 ID 全局唯一
+- 2026-09-01（§2 修订）：边界签名统一 `BoxResult<T>`（`Box<dyn Error + Send + Sync>`，mesh/node/rilld 三处别名，杜绝混用裸 Box）；新增 `format_chain` 错误链展开（daemon 诊断点）
 - 实现级决定：trait/信封在 rill-core（I/O 无关，`rill-core/src/error.rs`）；宏 crate 仅构建期依赖；消费方错误 crate 不依赖 serde_json（args 经 `ErrorArgs` 别名 + `args()` 助手生成）；`AeadError`（unit struct）/ `coord ConfigError`（tuple struct）为手写 impl（宏仅支持枚举）

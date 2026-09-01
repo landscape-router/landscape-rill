@@ -49,6 +49,18 @@ pub trait ErrorId {
     }
 }
 
+/// 展开错误 source 链为单行可读文本（日志用，ERROR_ID §2.3；`{e}` 只打顶层 Display）
+pub fn format_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        cur = s.source();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +103,23 @@ mod tests {
         let env = e.to_envelope();
         assert_eq!(env.id, "test.invalid_route");
         assert_eq!(env.args["0"], "10.0.0.0/8");
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum ChainInner {
+        #[error("inner failed")]
+        Inner,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum ChainOuter {
+        #[error("outer failed")]
+        Outer(#[from] ChainInner),
+    }
+
+    #[test]
+    fn format_chain_expands_sources() {
+        let e = ChainOuter::from(ChainInner::Inner);
+        assert_eq!(format_chain(&e), "outer failed: inner failed");
     }
 }

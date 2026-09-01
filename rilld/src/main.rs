@@ -22,6 +22,7 @@ use landscape_rill_coord::config::{
     generate_auth_key, is_expired, parse_auth_key, parse_duration, validate_network, CoordConfig,
     AUTH_KEY_DEFAULT_TTL_SECS,
 };
+use landscape_rill_core::error::format_chain;
 use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_mesh::control::{
     read_envelope, server_tls_stream, ConnectionState, CoordinatorServer,
@@ -37,6 +38,9 @@ use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+
+/// 边界 I/O 结果别名（ERROR_ID §2.2）：统一 `Box<dyn Error + Send + Sync>`
+type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 mod logging;
 
@@ -216,7 +220,7 @@ mod hex32_opt {
 // ============================================================================
 
 /// 从 overlay.json 取出嵌套的 coord 配置（coord 角色字段），加载即校验（fail-closed）
-fn load_coord(path: &Path) -> Result<CoordConfig, Box<dyn std::error::Error + Send + Sync>> {
+fn load_coord(path: &Path) -> BoxResult<CoordConfig> {
     let text = std::fs::read_to_string(path)?;
     let file: FileConfig = serde_json::from_str(&text)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -232,7 +236,7 @@ fn load_coord(path: &Path) -> Result<CoordConfig, Box<dyn std::error::Error + Se
     Ok(coord)
 }
 
-async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_coord(config_path: &Path) -> BoxResult<()> {
     let config = load_coord(config_path)?;
     let cert = std::fs::read(&config.tls_cert_path)?;
     let key = std::fs::read(&config.tls_key_path)?;
@@ -257,7 +261,9 @@ async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error +
                         server.lock().await.apply_config(&new_cfg);
                         info!("[coord] config reloaded (SIGHUP)");
                     }
-                    Err(e) => error!("[coord] reload failed, keeping old config: {e}"),
+                    Err(e) => {
+                        error!("[coord] reload failed, keeping old config: {}", format_chain(&*e))
+                    }
                 }
             }
             _ = summary.tick() => {
@@ -310,10 +316,7 @@ async fn accept_next(
     listener: &mut TcpListener,
     cert: &[u8],
     key: &[u8],
-) -> Result<
-    tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> BoxResult<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
     server_tls_stream(listener, cert, key).await.map_err(|e| {
         Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(e.to_string()))
     })
@@ -405,7 +408,7 @@ fn cmd_status() -> Result<(), String> {
 // main
 // ============================================================================
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() -> BoxResult<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     match cli.command {
@@ -454,7 +457,7 @@ fn run_daemon(
     path: &Path,
     log_file: Option<PathBuf>,
     log_level: Option<tracing_subscriber::filter::LevelFilter>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> BoxResult<()> {
     // 仅 daemon 初始化日志框架（LOGGING §1）；CLI 子命令直接 stdout/stderr
     logging::init_logging(log_level, log_file)?;
     let text = std::fs::read_to_string(path)
@@ -471,7 +474,7 @@ fn run_daemon(
             let path = config_path.clone();
             tokio::spawn(async move {
                 if let Err(e) = run_coord(&path).await {
-                    error!("[coord] fatal: {}", e);
+                    error!("[coord] fatal: {}", format_chain(&*e));
                 }
             });
         }
@@ -543,7 +546,7 @@ fn run_daemon(
         );
         let node = Node::new(config, opts)
             .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            .map_err(std::io::Error::other)?;
         node.run().await;
         Ok(())
     })

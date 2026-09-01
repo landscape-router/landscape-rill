@@ -5,6 +5,7 @@ use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, Registry,
 };
 use landscape_rill_core::crypto::{derive_key_dst, derive_key_path, KEY_DST_LEN};
+use landscape_rill_core::error::format_chain;
 use landscape_rill_core::route::Prefix;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -178,7 +179,10 @@ impl Coordinator {
             return;
         };
         if let Err(e) = store.save(&self.snapshot()) {
-            error!("[coord] persist failed (state not durable): {e}");
+            error!(
+                "[coord] persist failed (state not durable): {}",
+                format_chain(&e)
+            );
         }
     }
 

@@ -7,6 +7,7 @@
 use crate::config::{Config, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_SESSION_REKEY_HOURS};
 use crate::packet::{parse_packet, PacketInfo, TransportProto};
 use crate::tun::{TunConfig, TunDevice};
+use crate::BoxResult;
 use ed25519_dalek::VerifyingKey;
 use futures_util::StreamExt;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
@@ -143,7 +144,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(cfg: Config, opts: NodeOptions) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(cfg: Config, opts: NodeOptions) -> BoxResult<Self> {
         cfg.validate()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let mesh = MeshData::bind("0.0.0.0:0".parse()?, 0).await?;
@@ -198,7 +199,7 @@ impl Node {
         self.mesh.local_addr()
     }
 
-    fn parse_url(url: &str) -> Result<(String, u16), Box<dyn std::error::Error>> {
+    fn parse_url(url: &str) -> BoxResult<(String, u16)> {
         let rest = url
             .strip_prefix("https://")
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad url"))?;
@@ -221,7 +222,7 @@ impl Node {
     }
 
     /// 控制面连接（含初始注册）。重连传上次 node_id（幂等注册/挑战路径）。
-    pub async fn connect_control(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn connect_control(&mut self) -> BoxResult<()> {
         let (host, port) = Self::parse_url(&self.cfg.coordinator_url)?;
         let ca = std::fs::read(&self.cfg.ca_cert_path)
             .map_err(|e| std::io::Error::new(e.kind(), format!("ca: {}", e)))?;
@@ -246,7 +247,7 @@ impl Node {
     }
 
     /// 处理一个控制面事件（阻塞读；Err = 断线，调用方清 control 并重连）
-    pub async fn pump_control(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn pump_control(&mut self) -> BoxResult<()> {
         let Some(control) = self.control.as_mut() else {
             return Ok(());
         };
@@ -560,10 +561,7 @@ impl Node {
         }
     }
 
-    async fn handle_control_event(
-        &mut self,
-        ev: ControlEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_control_event(&mut self, ev: ControlEvent) -> BoxResult<()> {
         match ev {
             ControlEvent::Registered {
                 node_id,
