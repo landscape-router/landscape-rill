@@ -5,9 +5,12 @@ set -uo pipefail
 
 E2E_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# 全部 mesh 场景 compose（direct + relay）；down 不存在的 compose 无副作用
+# 全部 mesh 场景 compose（direct + relay + persist）；down 不存在的 compose 无副作用。
+# 注意：compose down 默认不清理 profile 门控服务（persist 的 node-d），须带 --profile 再下
 for f in "$E2E_DIR"/mesh/*/docker-compose.yaml; do
-  [ -f "$f" ] && docker compose -f "$f" down -v --remove-orphans >/dev/null 2>&1 || true
+  [ -f "$f" ] || continue
+  docker compose -f "$f" down -v --remove-orphans >/dev/null 2>&1 || true
+  docker compose -f "$f" --profile late down -v --remove-orphans >/dev/null 2>&1 || true
 done
 
 # 构建产物（CA/密钥/证书/二进制拷贝）随配置一起清，保证 setup 幂等重建

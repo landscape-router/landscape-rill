@@ -26,6 +26,10 @@ node-C 容器 ──┘
   - `relay`：线形 a—b—c（b 双网卡 net1={coord,a,b} net2={coord,b,c}），c 与 a 无直连
     UDP 可达性——compose `ipam` 固定 IP + setup 在 a/c 互加黑洞路由（`/32`）模拟，
     验证直连候选 miss 后快速切换到 relay 路径（经 b），b 日志 `relayed frame` 为中继证据
+  - `persist`：coord 持久化（storage_path，REQ-037，CONTROL_PLANE §4.1）——node-c 用
+    一次性 auth key 注册（消费落盘）→ `docker restart mesh-coord`（存储文件随容器保留）
+    → a↔b 自动恢复 + node-c 走挑战流程重连（无新注册）；node-d 复用同一一次性 key
+    必须被拒（compose profile `late` 门控，重启断言阶段再拉起）
 - **e2e 容器网段**（RFC 1918，避开 docker 默认池 172.17-172.30 与 CGNAT）：
   - `192.168.240.0/23`：mesh e2e 专用（direct 用 `192.168.240.0/24`，relay 的
     net1/net2 用 `192.168.240.0/24` + `192.168.241.0/24`）
@@ -35,7 +39,7 @@ node-C 容器 ──┘
 
 | 脚本 | 覆盖 | 前置条件 |
 |---|---|---|
-| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay`（默认 direct） | docker + compose 构建 |
+| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist`（默认 direct） | docker + compose 构建 |
 | `e2e/setup.sh` | 初始化：base 镜像/CA/密钥/编译/配置/构建启动/路由与黑洞注入；幂等（开头强制 `cleanup.sh`） | 同上 |
 | `e2e/cleanup.sh` | 幂等清理：全部 mesh 场景容器/网络 + `build/`（可重复执行） | 同上 |
 | `e2e/p0_tailscale/run_p0.sh` | P0 过渡验证（headscale + 官方客户端入网 + WG 直连） | docker，GitHub/pkgs 可达 |

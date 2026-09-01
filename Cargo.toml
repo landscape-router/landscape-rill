@@ -64,3 +64,4 @@ rcgen = "0.14.8"
 # --- Build tools ---
 pb-rs = "0.10.0"
 walkdir = "2.5.0"
+redb = "4.2.0"

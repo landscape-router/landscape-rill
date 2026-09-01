@@ -35,7 +35,7 @@
 | 域 | 文件 | 场景 ID |
 |---|---|---|
 | mesh 帧头/握手/广播 | [mesh/frame.md](./mesh/frame.md) | `FRM-01` ~ `FRM-11` |
-| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-15` |
+| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-16` |
 | mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-09` |
 | ts2021 接入 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-10` |
 | dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
@@ -86,7 +86,7 @@
 | REQ-034 | CTL-15 | 已覆盖 | rill-core/src/frame.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、e2e/run_e2e.sh、e2e/mesh/relay/ |
 | REQ-035 | FRM-08 / CTL-14 | 待补充 | — |
 | REQ-036 | ADM-04 / ADM-05 | 已覆盖 | rill-coord/src/config.rs、rill-core/src/control/registry.rs |
-| REQ-037 | — | 📌 proposed（无验收场景） | — |
+| REQ-037 | CTL-16 | 已覆盖 | rill-coord/src/store.rs、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/mesh/persist/ |
 | REQ-038 | ADM-01 / ADM-02 | 已覆盖 | rill-coord/src/config.rs、rill-core/src/control/registry.rs、e2e/run_e2e.sh |
 | REQ-038 | ADM-03 | 部分覆盖 | rilld/src/main.rs（SIGHUP 重载手动验证，未自动化） |
 | REQ-039 | — | 📌 proposed（无验收场景） | — |

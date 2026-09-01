@@ -288,9 +288,19 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 
 | 类别 | 状态 | 存放 | 主切换后的行为 |
 |---|---|---|---|
-| **持久** | 节点注册表、身份绑定、网络主密钥、吊销列表、netmap 权威版本、**路径表 PathMap（v1.5，§3.11）** | Raft 日志（v1 单机持久化存储，redb/sqlite） | 直接可用，零重建 |
+| **持久** | 节点注册表、身份绑定、网络主密钥、吊销列表、netmap 权威版本、**路径表 PathMap（v1.5，§3.11）** | Raft 日志（v1 单机：redb 快照整写，REQ-037） | 直接可用，零重建 |
 | **软状态** | 心跳 `last_seen`、活跃 TLS 会话、**路径健康状态（v1.5）** | 主 coordinator 内存 | 丢失；节点心跳/重连/PathProbe 自动重建 |
 | **派生** | `key_dst`、广播密钥、**`key_path`（v2，按 path_id 派生）** | 计算（确定性 KDF） | 新主无需任何写入即可重新下发 |
+
+**v1 单机持久化实现落档（2026-08-31，REQ-037）**：
+
+- **后端 = redb（Rust 原生、单文件、无 C 依赖）**；持久状态整快照原子写（单键，redb 事务）。数据形态全为主键点查，无关系查询需求——sqlite 的关系能力零收益（否决 sqlite）
+- **持久范围**：节点注册表（含身份绑定）、**一次性 auth key 消费 tombstone**、`next_node_id`/`netmap_version`/`key_version`、端点表、PathMap + `path_id` 分配器。一次性 key 消费落盘 = 重启/重载（SIGHUP）不复活（消费过的 key 在 `add_auth_key_spec` 恒被拒）
+- **auth key 与公告白名单不落盘**（配置为唯一权威，§3.12，重启后由 apply_config 重新注入）
+- **写入路径**：全部经 Coordinator 方法写穿透（register / set_endpoints / request_paths / revoke / rotate_master_key，单一写入路径，§4.2 幂等）；写入失败不中断数据面（§4.3），eprintln 留 durability 缺口
+- **损坏处理（fail-closed）**：文件损坏 / schema 不兼容 / 语义不一致（next_node_id 冲突、重复 node_id/公钥）→ 拒绝启动，不猜测重建
+- **存储文件权限 0600**（含身份绑定与 key 消费状态，教训 KC-02）
+- **配置**：`CoordConfig.storage_path`（None = 纯内存）；仅启动时读取，SIGHUP 重载不更换存储文件
 
 ### 4.2 幂等性要求（客户端操作全部可重试）
 
@@ -434,7 +444,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 - 控制面端口号
 - **管理面安全要求**（已定）：**无默认管理员凭据**（首次启动强制设置，fail-closed）；配置项**加载即校验**（非法配置拒绝启动）
 - protobuf schema 文件与代码生成
-- v1 存储后端（redb / sqlite）
+- **v1 存储后端已定（2026-08-31，REQ-037，§4.1）：redb 快照整写，storage_path 启动读取**
 - **Path\* 消息族落地（v1.5，§3.11）**：Envelope MsgType 扩展 + PathMap 存储形态（与 netmap 同存储后端）；v1 数据面零改动
 
 ### 实现级决定（2026-08-15，core/control 落档，对照 §2/§3.9/§5）

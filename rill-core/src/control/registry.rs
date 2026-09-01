@@ -1,4 +1,5 @@
 use crate::route::Prefix;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const NODE_ID_LEN: usize = 4;
@@ -29,7 +30,8 @@ impl AuthKeySpec {
     }
 }
 
-#[derive(Debug, Clone)]
+/// 注册条目（持久化状态，REQ-037；CONTROL_PLANE §4.1）
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeEntry {
     pub node_id: u32,
     pub network_id: u32,
@@ -59,6 +61,8 @@ pub struct Registry {
     entries: HashMap<u32, NodeEntry>,
     pubkeys: HashMap<[u8; STATIC_PUBKEY_LEN], u32>,
     auth_keys: HashMap<String, AuthKeySpec>,
+    /// 一次性 auth key 消费记录（持久化 tombstone：重启/重载不复活，REQ-037）
+    consumed_one_time: Vec<String>,
     announce_whitelist: Vec<Prefix>,
     network_id: u32,
     next_node_id: u32,
@@ -86,6 +90,7 @@ impl Registry {
             entries: HashMap::new(),
             pubkeys: HashMap::new(),
             auth_keys: HashMap::new(),
+            consumed_one_time: Vec::new(),
             announce_whitelist: Vec::new(),
             network_id,
             next_node_id: 1,
@@ -97,6 +102,10 @@ impl Registry {
     }
 
     pub fn add_auth_key_spec(&mut self, key: &str, spec: AuthKeySpec) {
+        // 已消费的一次性 key 保持吊销（重启/SIGHUP 重载均不复活，REQ-037）
+        if self.consumed_one_time.iter().any(|k| k == key) {
+            return;
+        }
         self.auth_keys.insert(key.to_string(), spec);
     }
 
@@ -180,6 +189,7 @@ impl Registry {
         self.pubkeys.insert(*static_pubkey, node_id);
         if spec.policy == AuthKeyPolicy::OneTime {
             self.auth_keys.remove(auth_key);
+            self.consumed_one_time.push(auth_key.to_string());
         }
         Ok(RegisterOutcome::NewNode(node_id))
     }
@@ -200,6 +210,28 @@ impl Registry {
 
     pub fn node_id_by_pubkey(&self, static_pubkey: &[u8; 32]) -> Option<u32> {
         self.pubkeys.get(static_pubkey).copied()
+    }
+
+    /// 下一节点号（持久化；重启不重用，防 node_id 复用）
+    pub fn next_node_id(&self) -> u32 {
+        self.next_node_id
+    }
+
+    /// 已消费的一次性 auth key（持久化 tombstone）
+    pub fn consumed_one_time_keys(&self) -> &[String] {
+        &self.consumed_one_time
+    }
+
+    /// 恢复持久化状态（REQ-037）：一致性校验由调用方 fail-closed 完成
+    pub fn restore(&mut self, entries: Vec<NodeEntry>, next_node_id: u32, consumed: Vec<String>) {
+        self.entries.clear();
+        self.pubkeys.clear();
+        for e in entries {
+            self.pubkeys.insert(e.static_pubkey, e.node_id);
+            self.entries.insert(e.node_id, e);
+        }
+        self.next_node_id = next_node_id;
+        self.consumed_one_time = consumed;
     }
 }
 

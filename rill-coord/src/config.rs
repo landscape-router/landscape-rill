@@ -148,6 +148,10 @@ pub struct CoordConfig {
     /// 允许公告的前缀集合；空 = 拒绝一切公告（fail-closed）
     #[serde(default)]
     pub announce_whitelist: Vec<String>,
+    /// 持久化存储文件（REQ-037，CONTROL_PLANE §4.1）；None = 纯内存（重启丢失注册）。
+    /// 仅启动时读取，SIGHUP 重载不更换存储文件。
+    #[serde(default)]
+    pub storage_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -219,6 +223,11 @@ impl CoordConfig {
         }
         for w in &self.announce_whitelist {
             Prefix::parse(w).map_err(|_| ConfigError(format!("白名单前缀非法: {w}")))?;
+        }
+        if let Some(p) = &self.storage_path {
+            if p.trim().is_empty() {
+                return Err(ConfigError("storage_path 为空".into()));
+            }
         }
         Ok(())
     }

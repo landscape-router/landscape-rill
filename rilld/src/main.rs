@@ -179,7 +179,7 @@ async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error +
     let cert = std::fs::read(&config.tls_cert_path)?;
     let key = std::fs::read(&config.tls_key_path)?;
     let mut listener = TcpListener::bind(config.listen_addr.parse::<SocketAddr>()?).await?;
-    let server = Arc::new(Mutex::new(CoordinatorServer::from_config(&config)));
+    let server = Arc::new(Mutex::new(CoordinatorServer::from_config(&config)?));
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     eprintln!(
         "[coord] listening on {} (network={}, reload=SIGHUP)",

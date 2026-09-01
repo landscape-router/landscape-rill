@@ -1,11 +1,13 @@
 use crate::path_service::{PathCandidate, PathEvent, PathService};
 use crate::signer::Ed25519Signer;
+use crate::store::{CoordState, CoordStore, StoreError, STATE_SCHEMA};
 use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, Registry,
 };
 use landscape_rill_core::crypto::{derive_key_dst, derive_key_path, KEY_DST_LEN};
 use landscape_rill_core::route::Prefix;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 pub const BROADCAST_KEY_LEN: usize = 32;
 /// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
@@ -60,6 +62,8 @@ pub struct Coordinator {
     paths: PathService,
     /// 节点协议版本（v2 路径能力协商，netmap 带出）
     protocol_versions: HashMap<u32, u32>,
+    /// 持久化存储（REQ-037）；None = 纯内存（重启丢失注册）
+    store: Option<CoordStore>,
 }
 
 impl Coordinator {
@@ -76,9 +80,105 @@ impl Coordinator {
             offline: Vec::new(),
             paths: PathService::new(),
             protocol_versions: HashMap::new(),
+            store: None,
         };
         coord.sync_relays();
         coord
+    }
+
+    /// 打开（或创建）持久化存储并恢复状态；损坏/不一致 → Err（fail-closed，REQ-037）
+    pub fn open(
+        path: &Path,
+        master_key: [u8; 32],
+        signing_seed: [u8; 32],
+    ) -> Result<Self, StoreError> {
+        let store = CoordStore::open(path)?;
+        let mut coord = Self::new(master_key, signing_seed);
+        if let Some(state) = store.load()? {
+            coord.restore_state(&state)?;
+        }
+        coord.store = Some(store);
+        coord.sync_relays();
+        Ok(coord)
+    }
+
+    /// 恢复持久状态（语义校验 fail-closed：不猜测重建）
+    fn restore_state(&mut self, state: &CoordState) -> Result<(), StoreError> {
+        let max_node = state.nodes.iter().map(|n| n.node_id).max().unwrap_or(0);
+        if state.next_node_id == 0 || state.next_node_id <= max_node {
+            return Err(StoreError::Inconsistent(format!(
+                "next_node_id={} 与节点表最大 id={} 不一致",
+                state.next_node_id, max_node
+            )));
+        }
+        let mut seen_ids = HashSet::new();
+        let mut seen_pubkeys = HashSet::new();
+        for n in &state.nodes {
+            if !seen_ids.insert(n.node_id) {
+                return Err(StoreError::Inconsistent(format!(
+                    "节点表含重复 node_id={}",
+                    n.node_id
+                )));
+            }
+            if !seen_pubkeys.insert(n.static_pubkey) {
+                return Err(StoreError::Inconsistent(format!(
+                    "节点表含重复公钥 node_id={}",
+                    n.node_id
+                )));
+            }
+        }
+        let mut path_map = HashMap::new();
+        for (s, d, set) in &state.path_map {
+            if path_map.insert((*s, *d), set.clone()).is_some() {
+                return Err(StoreError::Inconsistent(format!(
+                    "路径表含重复 (source={s}, dest={d})"
+                )));
+            }
+        }
+        self.registry.restore(
+            state.nodes.clone(),
+            state.next_node_id,
+            state.consumed_one_time_keys.clone(),
+        );
+        self.netmap_version = state.netmap_version;
+        self.key_version = state.key_version;
+        self.endpoints = state.endpoints.iter().cloned().collect();
+        self.paths.restore(path_map, state.path_seq);
+        Ok(())
+    }
+
+    /// 持久状态快照（确定性排序）
+    fn snapshot(&self) -> CoordState {
+        let mut nodes: Vec<NodeEntry> = self.registry.entries().cloned().collect();
+        nodes.sort_by_key(|n| n.node_id);
+        let mut endpoints: Vec<(u32, Vec<String>)> = self
+            .endpoints
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        endpoints.sort_by_key(|(k, _)| *k);
+        let (path_map, path_seq) = self.paths.persistent();
+        CoordState {
+            schema: STATE_SCHEMA,
+            next_node_id: self.registry.next_node_id(),
+            nodes,
+            consumed_one_time_keys: self.registry.consumed_one_time_keys().to_vec(),
+            netmap_version: self.netmap_version,
+            key_version: self.key_version,
+            endpoints,
+            path_map,
+            path_seq,
+        }
+    }
+
+    /// 写穿透持久化（仅在配置存储时生效）；写入失败不中断数据面，留日志缺口
+    fn persist(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Err(e) = store.save(&self.snapshot()) {
+            eprintln!("[coord] persist failed (state not durable): {e}");
+        }
     }
 
     /// relay 节点集合 = 能力位含 relay 的节点（voluntary opt-in，CONNECTIVITY §5）
@@ -154,6 +254,7 @@ impl Coordinator {
             landscape_rill_core::control::registry::RegisterOutcome::Existing(id) => id,
         };
         let entry = self.registry.entry(node_id).unwrap();
+        self.persist();
         Ok(RegisterData {
             node_id: entry.node_id,
             network_id: entry.network_id,
@@ -173,6 +274,7 @@ impl Coordinator {
     pub fn set_endpoints(&mut self, node_id: u32, endpoints: Vec<String>) {
         self.endpoints.insert(node_id, endpoints);
         self.netmap_version += 1;
+        self.persist();
     }
 
     // ==================== 路径服务（v1.5，CONTROL_PLANE §3.11） ====================
@@ -185,14 +287,18 @@ impl Coordinator {
         max: u32,
     ) -> Vec<(PathCandidate, [u8; KEY_DST_LEN])> {
         let now = unix_seconds();
-        self.paths
+        let out = self
+            .paths
             .request(source, dest, max, now)
             .iter()
             .map(|c| {
                 let key_path = derive_key_path(&self.master_key, c.path_id, c.path_epoch);
                 (c.clone(), key_path)
             })
-            .collect()
+            .collect();
+        // path_id 分配器与 PathMap 变更需落盘（重启不重用 path_id）
+        self.persist();
+        out
     }
 
     /// 心跳推送：取走该节点（source 身份）的未推送路径事件
@@ -263,12 +369,14 @@ impl Coordinator {
             self.key_version += 1;
             self.netmap_version += 1;
             self.sync_relays();
+            self.persist();
         }
     }
 
     pub fn rotate_master_key(&mut self, new_master_key: [u8; 32]) {
         self.master_key = new_master_key;
         self.key_version += 1;
+        self.persist();
     }
 
     pub fn key_version(&self) -> u32 {
@@ -421,5 +529,156 @@ mod tests {
         c.set_endpoints(id, vec!["203.0.113.1:41641".into()]);
         let snap = c.netmap_snapshot();
         assert_eq!(snap[0].endpoints, vec!["203.0.113.1:41641"]);
+    }
+
+    // ==================== 持久化（REQ-037） ====================
+
+    fn tmp_db(name: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "lrill-{name}-{}-{}.redb",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn persist_roundtrip_restores_full_state() {
+        let path = tmp_db("roundtrip");
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
+        let a = c
+            .register("ak-1", &pubkey(1), 0x01, vec![])
+            .unwrap()
+            .node_id;
+        c.set_endpoints(a, vec!["203.0.113.1:41641".into()]);
+        let b = c
+            .register("ak-1", &pubkey(2), 0x00, vec![])
+            .unwrap()
+            .node_id;
+        c.request_paths(a, b, 4);
+        drop(c);
+
+        let c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        assert_eq!(c.netmap_version(), 3); // 注册 a + 端点 + 注册 b
+        assert_eq!(c.key_version(), 1);
+        assert_eq!(c.netmap_snapshot().len(), 2);
+        let mut snap = c.netmap_snapshot();
+        snap.sort_by_key(|n| n.node_id);
+        assert_eq!(snap[0].node_id, 1);
+        assert_eq!(snap[0].static_pubkey, pubkey(1));
+        assert_eq!(snap[1].node_id, 2);
+        assert_eq!(snap[0].endpoints, vec!["203.0.113.1:41641"]);
+        // 身份绑定恢复（签名确定性，可直接比对）
+        assert!(c.key_dist(a).is_some());
+        assert!(c.node_id_by_pubkey(&pubkey(1)) == Some(a));
+        drop(c);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn one_time_consumption_survives_restart() {
+        let path = tmp_db("onetime");
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        c.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
+        c.register("ak-1", &pubkey(1), 0x00, vec![]).unwrap();
+        assert!(!c.has_auth_key("ak-1"));
+        drop(c);
+
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        assert!(!c.has_auth_key("ak-1"), "一次性 key 消费必须持久化");
+        // 同 key 二次注册被拒（未知公钥 + 无有效 key）
+        let err = c.register("ak-1", &pubkey(2), 0x00, vec![]);
+        assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
+        drop(c);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn consumed_key_not_revived_by_reload() {
+        // SIGHUP 重载（config 重新 apply）不复活已消费的一次性 key
+        let path = tmp_db("reload");
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        c.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
+        c.register("ak-1", &pubkey(1), 0x00, vec![]).unwrap();
+        drop(c);
+
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        c.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
+        assert!(!c.has_auth_key("ak-1"), "重载不得复活已消费 key");
+        drop(c);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn node_and_path_ids_monotonic_across_restart() {
+        let path = tmp_db("ids");
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
+        let a = c
+            .register("ak-1", &pubkey(1), 0x00, vec![])
+            .unwrap()
+            .node_id;
+        let b = c
+            .register("ak-1", &pubkey(2), 0x00, vec![])
+            .unwrap()
+            .node_id;
+        let paths = c.request_paths(a, b, 4);
+        drop(c);
+
+        // 重启后新节点不重用 node_id；新路径不重用 path_id
+        // （auth key 为配置权威，重启后须重新 apply——模拟 from_config 的 apply_to）
+        let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
+        let d = c
+            .register("ak-1", &pubkey(3), 0x00, vec![])
+            .unwrap()
+            .node_id;
+        assert_eq!(d, 3);
+        let paths2 = c.request_paths(a, d, 4);
+        for (p, _) in &paths2 {
+            assert!(!paths.iter().any(|(q, _)| q.path_id == p.path_id));
+        }
+        // 幂等命中保留原 path_id（参与者间不分叉）
+        let paths3 = c.request_paths(a, b, 4);
+        assert_eq!(paths3.len(), paths.len());
+        assert!(paths3
+            .iter()
+            .zip(&paths)
+            .all(|(p, q)| p.0.path_id == q.0.path_id));
+        drop(c);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_store_fails_closed() {
+        let path = tmp_db("corrupt");
+        {
+            let c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+            drop(c);
+        }
+        std::fs::write(&path, b"not a redb file at all").unwrap();
+        assert!(Coordinator::open(&path, [0x77; 32], [0x5a; 32]).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn inconsistent_state_fails_closed() {
+        // next_node_id 与节点表不一致 → 拒绝启动（不猜测重建）
+        let path = tmp_db("inconsistent");
+        {
+            let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
+            c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
+            c.register("ak-1", &pubkey(1), 0x00, vec![]).unwrap();
+            drop(c);
+        }
+        // 篡改快照：把 next_node_id 改回 1（与已注册 node 1 冲突）
+        let store = crate::store::CoordStore::open(&path).unwrap();
+        let mut state = store.load().unwrap().unwrap();
+        state.next_node_id = 1;
+        store.save(&state).unwrap();
+        assert!(Coordinator::open(&path, [0x77; 32], [0x5a; 32]).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }

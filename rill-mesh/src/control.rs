@@ -318,11 +318,20 @@ impl CoordinatorServer {
         }
     }
 
-    /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（auth keys + 白名单）
-    pub fn from_config(cfg: &CoordConfig) -> Self {
-        let mut server = Self::new(cfg.master_key, cfg.signing_seed);
+    /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（auth keys + 白名单）；
+    /// 配置 storage_path 时打开持久化存储（REQ-037），损坏/不一致 → Err（fail-closed）
+    pub fn from_config(
+        cfg: &CoordConfig,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let coordinator = match &cfg.storage_path {
+            Some(path) => {
+                Coordinator::open(std::path::Path::new(path), cfg.master_key, cfg.signing_seed)?
+            }
+            None => Coordinator::new(cfg.master_key, cfg.signing_seed),
+        };
+        let mut server = Self { coordinator };
         cfg.apply_to(&mut server.coordinator);
-        server
+        Ok(server)
     }
 
     /// 管理面库 API（REQ-038）：配置重载（SIGHUP）入口，增量收敛、不中断在途连接

@@ -15,9 +15,11 @@ hex() { openssl rand -hex 32; }
 # 幂等前提：启动前必清理
 "$E2E_DIR/cleanup.sh"
 
-# 场景选择：relay 用线形拓扑（b 双网卡），其余用直连拓扑
+# 场景选择：relay 用线形拓扑（b 双网卡）；persist 用四节点拓扑（coord 持久化，REQ-037）
 if [ "$SCENARIO" = "relay" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/relay/docker-compose.yaml"
+elif [ "$SCENARIO" = "persist" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/persist/docker-compose.yaml"
 fi
 
 echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"
@@ -54,6 +56,7 @@ SIGNING_SEED=$(hex)
 NODE_A_KEY=$(hex)
 NODE_B_KEY=$(hex)
 NODE_C_KEY=$(hex)
+NODE_D_KEY=$(hex)
 
 echo "==> 3/6 编译二进制"
 "$ROOT_DIR/scripts/build.sh"
@@ -102,6 +105,32 @@ cat > "$BUILD_DIR/coord.json" <<EOF
   }
 }
 EOF
+
+if [ "$SCENARIO" = "persist" ]; then
+  # 持久化场景（REQ-037）：coord 落盘存储 + node-c 一次性 key（消费状态须跨重启存活）；
+  # node-d 复用同一 key → 重启后注册必须被拒
+  cat > "$BUILD_DIR/coord.json" <<EOF
+{
+  "coord": {
+    "network": "lab",
+    "listen_addr": "0.0.0.0:8443",
+    "master_key": "$MASTER_KEY",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "storage_path": "/root/coord.redb",
+    "auth_keys": [
+      { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+      { "key": "$NODE_B_AUTHKEY", "policy": "reusable" },
+      { "key": "$NODE_C_AUTHKEY", "policy": "onetime" }
+    ],
+    "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
+  }
+}
+EOF
+  gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY"
+  gen_node_config node-d.json "$NODE_D_KEY" "10.45.0.1/24" "fd00:5::1/64" '["10.45.0.0/24", "fd00:5::/64"]' "$NODE_C_AUTHKEY"
+fi
 
 if [ "$SCENARIO" = "relay" ]; then
   # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，

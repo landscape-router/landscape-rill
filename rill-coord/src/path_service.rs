@@ -5,12 +5,13 @@
 //! - key_path = KDF(主密钥, path_id, path_epoch) 按路径签发，只发路径参与者
 //! - 生命周期：节点吊销 → 撤销涉及路径；路径集变更 → PathUpdate/PathWithdraw 推送
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// 路径活性租约时长（unix 秒）；过期后节点侧从候选剔除（重新请求刷新）
 pub const PATH_DEFAULT_TTL: u64 = 3600;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathCandidate {
     pub path_id: u64,
     pub path_epoch: u32,
@@ -20,7 +21,7 @@ pub struct PathCandidate {
     pub expires_at: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathSet {
     pub version: u64,
     pub candidates: Vec<PathCandidate>,
@@ -217,6 +218,23 @@ impl PathService {
     /// 取走该 source 的未推送路径事件（心跳推送）
     pub fn take_events(&mut self, source: u32) -> Vec<PathEvent> {
         self.pending.remove(&source).unwrap_or_default()
+    }
+
+    /// 持久化快照（REQ-037）：PathMap 条目 + path_id 分配器（重启不重用）
+    pub fn persistent(&self) -> (Vec<(u32, u32, PathSet)>, u64) {
+        let mut map: Vec<(u32, u32, PathSet)> = self
+            .map
+            .iter()
+            .map(|((s, d), set)| (*s, *d, set.clone()))
+            .collect();
+        map.sort_by_key(|(s, d, _)| (*s, *d));
+        (map, self.seq)
+    }
+
+    /// 恢复持久化快照（软状态 pending 不落盘，节点重新请求即重建）
+    pub fn restore(&mut self, map: HashMap<(u32, u32), PathSet>, seq: u64) {
+        self.map = map;
+        self.seq = seq;
     }
 
     fn alloc_path_id(&mut self) -> u64 {

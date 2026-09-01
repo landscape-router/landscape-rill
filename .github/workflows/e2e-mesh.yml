@@ -1,4 +1,5 @@
 # mesh docker e2e：direct（coord + node-a/node-b，IPv4 + IPv6 ping）+ relay（a—b—c 线形，经 b 中继）
+# + persist（coord 持久化重启恢复，REQ-037）
 # PR 也触发但不设 required（低频成本换 mesh 改动提前断裂发现）；场景目录约定见 docs/ci/README.md §1
 name: e2e-mesh
 
@@ -24,4 +25,9 @@ jobs:
         env:
           MESH_E2E_DNS: 1.1.1.1
           MESH_E2E_SCENARIO: relay
+        run: ./e2e/run_e2e.sh
+      - name: mesh e2e (persist)
+        env:
+          MESH_E2E_DNS: 1.1.1.1
+          MESH_E2E_SCENARIO: persist
         run: ./e2e/run_e2e.sh

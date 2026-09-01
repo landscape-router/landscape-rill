@@ -664,7 +664,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -969,6 +969,7 @@ dependencies = [
  "ed25519-dalek",
  "landscape-rill-core",
  "rand",
+ "redb",
  "serde",
  "serde_json",
 ]
@@ -980,6 +981,7 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "hkdf",
  "hmac",
+ "serde",
  "sha2 0.11.0",
  "snow",
  "x25519-dalek",
@@ -1408,6 +1410,15 @@ dependencies = [
  "time",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
