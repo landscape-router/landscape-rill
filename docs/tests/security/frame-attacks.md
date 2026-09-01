@@ -40,7 +40,7 @@
 - 关联 REQ：REQ-029
 - 测试层：单测（主机已闭环）
 - 状态：`已覆盖`
-- 证据：rill-core/src/handshake/、rill-mesh/src/data.rs
+- 证据：rill-core/src/handshake/、rill-mesh/src/data/
 - 说明：session_roundtrip_and_replay_rejected / rekey_dual_window_semantics / replayed_data_frame_dropped
 
 ## SEC-06 rekey 交叠
@@ -56,7 +56,7 @@
 - 关联 REQ：REQ-014 / REQ-017
 - 测试层：单测 + 集成
 - 状态：`部分覆盖`
-- 证据：rill-mesh/src/framing/、rill-mesh/src/data.rs
+- 证据：rill-mesh/src/framing/、rill-mesh/src/data/
 - 缺口：端口分派不匹配丢弃已覆盖；probe magic 分派未实现（依赖 CON-08）
 
 ## SEC-08 解析鲁棒性（fail-closed）
@@ -64,7 +64,7 @@
 - 关联 REQ：REQ-017
 - 测试层：单测（fuzz 待补）
 - 状态：`部分覆盖`
-- 证据：rill-core/src/frame/、rill-mesh/src/data.rs
+- 证据：rill-core/src/frame/、rill-mesh/src/data/
 - 缺口：截断/越界拒绝已闭环；随机字节洪泛 fuzz 与容器级复验待补
 
 ## SEC-09 握手重定向
@@ -72,7 +72,7 @@
 - 关联 REQ：REQ-016 / REQ-029
 - 测试层：单测（主机已闭环）
 - 状态：`已覆盖`
-- 证据：rill-core/src/handshake/、rill-mesh/src/data.rs
+- 证据：rill-core/src/handshake/、rill-mesh/src/data/
 - 说明：msg1_wrong_target_rejected / handshake_redirect_rejected
 
 ## SEC-10 握手冒充（身份绑定）
@@ -80,7 +80,7 @@
 - 关联 REQ：REQ-016 / REQ-029
 - 测试层：单测（主机已闭环）
 - 状态：`已覆盖`
-- 证据：rill-core/src/handshake/、rill-mesh/src/data.rs
+- 证据：rill-core/src/handshake/、rill-mesh/src/data/
 - 说明：bad_binding_rejected / binding_static_must_match_noise_static / bad_binding_rejected_over_wire；跨网络/跨版本混淆 prologue_mismatch_rejected
 
 ## SEC-11 垃圾 AEAD 洪泛

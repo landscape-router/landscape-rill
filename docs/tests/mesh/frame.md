@@ -16,7 +16,7 @@
 - 关联 REQ：REQ-002 / REQ-003
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-core/src/crypto/、rill-mesh/src/data.rs
+- 证据：rill-core/src/crypto/、rill-mesh/src/data/
 - 说明：双 siphash-2-4 官方向量交叉验证；篡改任一认证字段拒绝；ttl 递减后转发仍可校验
 
 ## FRM-03 AEAD 载荷认证
@@ -56,7 +56,7 @@
 - 关联 REQ：REQ-014 / REQ-017
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/data.rs
+- 证据：rill-mesh/src/data/
 - 说明：AEAD 空载荷、仅已建会话对、3 次 miss 拆会话
 
 ## FRM-08 广播泛洪（opt-in/去重/限速）
@@ -64,7 +64,7 @@
 - 关联 REQ：REQ-032 / REQ-035
 - 测试层：单测 + e2e
 - 状态：`部分覆盖`
-- 证据：rill-mesh/src/data.rs、e2e/run_e2e.sh
+- 证据：rill-mesh/src/data/、e2e/run_e2e.sh
 - 缺口：**广播 opt-in（REQ-035）实现待落地**——keydist 按需下发 broadcast_key、泛洪目标收窄未实现；当前仅为 v0.7 全量下发语义
 - 说明：去重 30s、ttl 不向源回泛、令牌桶 64/16/s、组播指纹防再泛洪已闭环
 
@@ -73,7 +73,7 @@
 - 关联 REQ：REQ-028
 - 测试层：单测 + 回环集成
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/data.rs
+- 证据：rill-mesh/src/data/
 - 说明：A→relay→B 转发、ttl 递减不重签、丢弃原因 fail-closed（BadVersion/BadRouteMac/TtlExpired/NoEndpoint/NoKeyDst/Short）
 
 ## FRM-10 IPv6 双栈 mesh e2e

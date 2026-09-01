@@ -61,7 +61,7 @@
 - 关联 REQ：REQ-039
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-core/src/rate.rs、rill-mesh/src/data.rs
+- 证据：rill-core/src/rate.rs、rill-mesh/src/data/
 - 说明：RateCounter tick/poll 周期语义（rate.rs 单测）；丢帧收口计数 per-peer/全局桶归因、伪造 node_id 不落 per-peer（data.rs drop_stats_attribution_and_summary_filter）；摘要输出 ≤1 条/s、0 不输出
 
 ## LOG-03 文件轮转与容量上限

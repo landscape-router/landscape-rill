@@ -52,8 +52,8 @@
 | REQ | 场景 | 状态 | 证据/CI |
 |---|---|---|---|
 | REQ-001 | FRM-01 / FRM-04 | 已覆盖 | rill-core/src/frame/、rill-core/src/handshake/ |
-| REQ-002 | FRM-02 | 已覆盖 | rill-core/src/crypto/、rill-mesh/src/data.rs |
-| REQ-003 | FRM-02 | 已覆盖 | rill-mesh/src/data.rs |
+| REQ-002 | FRM-02 | 已覆盖 | rill-core/src/crypto/、rill-mesh/src/data/ |
+| REQ-003 | FRM-02 | 已覆盖 | rill-mesh/src/data/ |
 | REQ-004 | CTL-01 | 已覆盖 | rill-mesh/src/control/、e2e/run_e2e.sh |
 | REQ-005 | E2E-05 | 待补充 | — |
 | REQ-006 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
@@ -64,7 +64,7 @@
 | REQ-011 | FRM-06 | 已覆盖 | rill-core/src/handshake/ |
 | REQ-012 | E2E-01 ~ E2E-08 | 待补充 | — |
 | REQ-013 | CTL-13 | 已覆盖 | rill-core/src/control/ |
-| REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | rill-mesh/src/data.rs、rill-core/src/probe.rs（CON-08 已闭环；RTE-08 exit 语义待 P3） |
+| REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | rill-mesh/src/data/、rill-core/src/probe.rs（CON-08 已闭环；RTE-08 exit 语义待 P3） |
 | REQ-015 | DNL-01 ~ DNL-07 | 待补充 | — |
 | REQ-016 | SEC-03 / SEC-04 / SEC-09 / SEC-10 | 部分覆盖 | — |
 | REQ-017 | SEC-01 / SEC-02 / FRM-07 | 部分覆盖 | — |
@@ -78,19 +78,19 @@
 | REQ-025 | — | — | rill-node/src/config/ |
 | REQ-026 | — | — | rill-node/src/ |
 | REQ-027 | CTL-01 | 已覆盖 | rill-mesh/src/control/ |
-| REQ-028 | FRM-09 | 已覆盖 | rill-mesh/src/data.rs |
+| REQ-028 | FRM-09 | 已覆盖 | rill-mesh/src/data/ |
 | REQ-029 | FRM-04 / FRM-06 / SEC-05 ~ SEC-10 | 已覆盖 | rill-core/src/handshake/ |
 | REQ-030 | FRM-11 | 已覆盖 | rill-node/src/runtime.rs |
 | REQ-031 | E2E-01 / FRM-10 | 已覆盖 | e2e/run_e2e.sh |
 | REQ-032 | FRM-08 / FRM-10 | 部分覆盖 | e2e/run_e2e.sh |
 | REQ-033 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
-| REQ-034 | CTL-15 | 已覆盖 | rill-core/src/frame/、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、e2e/run_e2e.sh、e2e/mesh/relay/ |
+| REQ-034 | CTL-15 | 已覆盖 | rill-core/src/frame/、rill-coord/src/path_service.rs、rill-mesh/src/data/、e2e/run_e2e.sh、e2e/mesh/relay/ |
 | REQ-035 | FRM-08 / CTL-14 | 待补充 | — |
 | REQ-036 | ADM-04 / ADM-05 | 已覆盖 | rill-coord/src/config/、rill-core/src/control/registry.rs |
 | REQ-037 | CTL-16 | 已覆盖 | rill-coord/src/store/、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/mesh/persist/ |
 | REQ-038 | ADM-01 / ADM-02 | 已覆盖 | rill-coord/src/config/、rill-core/src/control/registry.rs、e2e/run_e2e.sh |
 | REQ-038 | ADM-03 | 已覆盖 | rilld/src/main.rs、e2e/run_e2e.sh、e2e/mesh/reload/ |
-| REQ-039 | LOG-01 / LOG-02 / LOG-03 | 已覆盖 | rilld/src/logging.rs、rill-core/src/rate.rs、rill-mesh/src/data.rs、e2e/mesh/log/ |
+| REQ-039 | LOG-01 / LOG-02 / LOG-03 | 已覆盖 | rilld/src/logging.rs、rill-core/src/rate.rs、rill-mesh/src/data/、e2e/mesh/log/ |
 | REQ-040 | — | 📌 proposed（无验收场景） | — |
 | REQ-041 | — | 📌 proposed（无验收场景） | — |
 | REQ-042 | ADM-06 | 部分覆盖 | e2e/Dockerfile、e2e/run_e2e.sh、rilld/src/main.rs |

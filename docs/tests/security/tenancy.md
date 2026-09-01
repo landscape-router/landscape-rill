@@ -32,7 +32,7 @@
 - 关联 REQ：REQ-010
 - 测试层：单测（集成）
 - 状态：`已覆盖`
-- 证据：rill-coord/src/coordinator.rs、rill-core/src/handshake/、rill-mesh/src/data.rs
+- 证据：rill-coord/src/coordinator.rs、rill-core/src/handshake/、rill-mesh/src/data/
 - 说明：**覆盖层调整（2026-09-01）**：e2e 容器内无法注入携带外网绑定的 Noise 握手（需实现完整恶意客户端，且 netmap 隔离已结构性阻断攻击面——A 拿不到 B 的端点）；改为直接验证生产验签路径 `verify_binding`（外网绑定/篡改节点号/公钥任一字段 → 失败）+ 跨网握手 prologue 拒绝（线级）
 
 ## SEC-25 前缀公告越权

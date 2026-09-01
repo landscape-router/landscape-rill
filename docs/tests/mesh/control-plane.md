@@ -119,7 +119,7 @@
 - 关联 REQ：REQ-034
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame/、rill-core/src/crypto/、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control/、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
+- 证据：rill-core/src/frame/、rill-core/src/crypto/、rill-coord/src/path_service.rs、rill-mesh/src/data/、rill-mesh/src/control/、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
 - 缺口：PathProbe 消息族运行时未启用（活性由数据面心跳承担，协议已定义）
 
 ## CTL-16 coordinator 持久化（REQ-037）

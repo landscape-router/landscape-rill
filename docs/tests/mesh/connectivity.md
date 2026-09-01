@@ -24,7 +24,7 @@
 - 关联 REQ：REQ-007
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rill-core/src/probe.rs、rill-mesh/src/data.rs
+- 证据：e2e/run_e2e.sh、rill-core/src/probe.rs、rill-mesh/src/data/
 - 说明：probe 小包（magic 4B + type 1B + from/to node_id + nonce 4B，独立于 34B 帧）互探；双方对全部候选端点发 PING，PONG nonce 匹配确认 → 端点活性恢复（e2e `probe confirmed direct via`）；单测 `probe_ping_replies_pong_and_matches`
 
 ## CON-04 中继兜底（对称 NAT）
@@ -48,7 +48,7 @@
 - 关联 REQ：REQ-007
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rill-mesh/src/data.rs
+- 证据：e2e/run_e2e.sh、rill-mesh/src/data/
 - 说明：挂靠中继失联 → 切换下一候选：心跳 miss 落到**实际选用路径**（`last_sent_path`，非仅主路径——在用中继死亡不再卡死）+ 全候选 miss 耗尽时按 miss 升序选（最不坏优先，收包恢复闭环）；e2e `docker stop node-b` → c→a 经 node-d 恢复；单测 `path_miss_peer_misses_used_path_not_only_main`
 
 ## CON-07 数据面 keepalive 回退
@@ -56,7 +56,7 @@
 - 关联 REQ：REQ-014
 - 测试层：单测 + e2e
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/data.rs、rill-node/src/runtime.rs
+- 证据：rill-mesh/src/data/、rill-node/src/runtime.rs
 - 说明：心跳 3 次 miss 拆会话已闭环；**回退中继路径**（事件驱动切换）未验证
 
 ## CON-08 端口分派
@@ -64,7 +64,7 @@
 - 关联 REQ：REQ-014
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/data.rs、rill-core/src/probe.rs
+- 证据：rill-mesh/src/data/、rill-core/src/probe.rs
 - 说明：数据面 UDP 端口按首字节分派：`0x01..=0x0F` → 34B 帧（version 值域）；probe magic（LPRB）→ probe；都不匹配 → 丢弃（fail-closed，CN-02）；单测 `unknown_protocol_dropped`
 
 ## CON-09 联邦边界（v2）
