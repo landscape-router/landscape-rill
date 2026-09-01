@@ -57,14 +57,14 @@
 | REQ-004 | CTL-01 | 已覆盖 | rill-mesh/src/control/、e2e/run_e2e.sh |
 | REQ-005 | E2E-05 | 待补充 | — |
 | REQ-006 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
-| REQ-007 | CON-01 ~ CON-06 | 待补充 | — |
+| REQ-007 | CON-01 ~ CON-06 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/probe/、rill-core/src/probe.rs、rill-coord/src/echo.rs、rilld/src/main.rs |
 | REQ-008 | CTL-10 / CTL-11 | 部分覆盖 | CTL-10：rill-core/src/control/registry.rs、rill-coord/src/coordinator.rs（CTL-11 待实现） |
 | REQ-009 | RTE-07 | 待补充 | — |
-| REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 待补充 | — |
+| REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/tenancy/、rill-coord/src/domain.rs、rill-coord/src/coordinator.rs |
 | REQ-011 | FRM-06 | 已覆盖 | rill-core/src/handshake.rs |
 | REQ-012 | E2E-01 ~ E2E-08 | 待补充 | — |
 | REQ-013 | CTL-13 | 已覆盖 | rill-core/src/control/ |
-| REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | — |
+| REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | rill-mesh/src/data.rs、rill-core/src/probe.rs（CON-08 已闭环；RTE-08 exit 语义待 P3） |
 | REQ-015 | DNL-01 ~ DNL-07 | 待补充 | — |
 | REQ-016 | SEC-03 / SEC-04 / SEC-09 / SEC-10 | 部分覆盖 | — |
 | REQ-017 | SEC-01 / SEC-02 / FRM-07 | 部分覆盖 | — |
