@@ -85,7 +85,7 @@ impl MeshData {
         };
         let mut out = frame.to_vec();
         decrement_ttl(&mut out);
-        match self.socket.send_to(&out, endpoint).await {
+        match self.wan_send(&out, endpoint).await {
             Ok(_) => RelayOutcome::Forwarded {
                 to: header.to_node_id,
             },

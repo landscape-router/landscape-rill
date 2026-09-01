@@ -66,7 +66,10 @@ impl MeshData {
             };
         }
         match open_frame(frame, &bkey, &bkey, 0) {
-            Ok((_, payload)) => IncomingEvent::Broadcast { from, payload },
+            Ok((_, payload)) => IncomingEvent::Broadcast {
+                from,
+                payload: Bytes::from(payload),
+            },
             Err(landscape_rill_core::frame::OpenError::RouteMac) => IncomingEvent::Dropped {
                 reason: DropReason::BadRouteMac,
             },
@@ -131,7 +134,7 @@ impl MeshData {
                 }
                 let mut ok = false;
                 for ep in addrs {
-                    if self.socket.send_to(&out, *ep).await.is_ok() {
+                    if self.wan_send(&out, *ep).await.is_ok() {
                         ok = true;
                         break;
                     }

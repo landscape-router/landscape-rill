@@ -10,6 +10,7 @@ landscape-rill-coord = { path = "../rill-coord" }
 landscape-rill-proto = { path = "../rill-proto" }
 quick-protobuf.workspace = true
 tokio.workspace = true
+bytes.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true

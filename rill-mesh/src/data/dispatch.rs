@@ -42,7 +42,7 @@ impl MeshData {
             crate::probe::probe_type::PING => {
                 if probe.to_node_id == self.self_node_id {
                     let reply = crate::probe::ProbePacket::pong(&probe, Vec::new());
-                    let _ = self.socket.send_to(&reply.encode(), from_addr).await;
+                    let _ = self.wan_send(&reply.encode(), from_addr).await;
                 }
                 Ok(IncomingEvent::ProbePing {
                     from: probe.from_node_id,
@@ -86,7 +86,7 @@ impl MeshData {
         let nonce = rand::random::<u32>();
         self.probe_pending.insert(nonce, (to, endpoint));
         let packet = crate::probe::ProbePacket::ping(from, to, nonce);
-        match self.socket.send_to(&packet.encode(), endpoint).await {
+        match self.wan_send(&packet.encode(), endpoint).await {
             Ok(_) => Some(nonce),
             Err(_) => {
                 self.probe_pending.remove(&nonce);

@@ -32,6 +32,8 @@ impl Default for TunConfig {
 pub struct TunDevice {
     device: AsyncDevice,
     mtu: u16,
+    /// 读缓冲（REQ-053）：跨包复用，read_buf 直写 spare 容量免零初始化
+    read_buf: bytes::BytesMut,
 }
 
 impl TunDevice {
@@ -50,6 +52,9 @@ impl TunDevice {
         Ok(Self {
             device,
             mtu: config.mtu,
+            read_buf: bytes::BytesMut::with_capacity(
+                config.mtu as usize + PACKET_INFORMATION_LENGTH,
+            ),
         })
     }
 
@@ -61,20 +66,23 @@ impl TunDevice {
         self.mtu
     }
 
-    pub async fn read_packet(&mut self) -> Result<Vec<u8>, std::io::Error> {
-        let mut buf = vec![0u8; self.mtu as usize + PACKET_INFORMATION_LENGTH];
-        let n = self.device.read(&mut buf).await?;
-        buf.truncate(n);
+    pub async fn read_packet(&mut self) -> Result<bytes::Bytes, std::io::Error> {
+        self.read_buf
+            .reserve(self.mtu as usize + PACKET_INFORMATION_LENGTH);
+        let n = self.device.read_buf(&mut self.read_buf).await?;
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+        let mut packet = self.read_buf.split_to(n);
         #[cfg(target_os = "windows")]
-        if buf.len() < PACKET_INFORMATION_LENGTH {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "short tun read",
-            ));
+        {
+            if packet.len() < PACKET_INFORMATION_LENGTH {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "short tun read",
+                ));
+            }
+            packet.split_to(PACKET_INFORMATION_LENGTH);
         }
-        #[cfg(target_os = "windows")]
-        buf.drain(..PACKET_INFORMATION_LENGTH);
-        Ok(buf)
+        Ok(packet.freeze())
     }
 
     pub async fn write_packet(&mut self, packet: &[u8]) -> Result<(), std::io::Error> {

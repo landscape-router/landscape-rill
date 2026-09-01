@@ -1,6 +1,8 @@
+use bytes::{Bytes, BytesMut};
 use landscape_rill_core::frame::{
     build_frame, build_handshake_frame, decrement_ttl, frame_payload, open_frame, packet_type,
-    MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, VERSION, VERSION2,
+    MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, HEADER_LEN_V2, TAG_LEN, VERSION,
+    VERSION2,
 };
 use landscape_rill_core::handshake::{
     HandshakeContext, HandshakeError, HandshakeInitiator, HandshakeResponder, Session,
@@ -22,6 +24,15 @@ pub const FLOOD_SEEN_TTL: Duration = Duration::from_secs(30);
 pub const PATH_HEALTH_MISS_LIMIT: u32 = 3;
 /// 丢帧摘要周期（LOGGING §5）：事件只计数不逐条输出，每周期最多 1 条摘要
 pub const DROP_STATS_PERIOD: Duration = landscape_rill_core::rate::RATE_SUMMARY_PERIOD;
+/// 数据面接收缓冲上限（REQ-053）：MTU(1420) + v2 帧头(42) + TAG(16) + 余量。
+/// 超长报文被内核截断 → 显式丢弃计数（原为 65535 全收后解析失败丢弃，净效果相同）；
+/// 缓冲跨包复用后尺寸只影响常驻内存，不影响每包开销。
+pub const MAX_FRAME: usize = 2048;
+// 编译期确保上限覆盖最大合法帧（MTU 数据帧与全部握手帧）
+const _: () = assert!(MAX_FRAME >= HEADER_LEN_V2 + TAG_LEN + 1420);
+const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG1_PAYLOAD_LEN);
+const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG2_PAYLOAD_LEN);
+const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG3_PAYLOAD_LEN);
 
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -52,6 +63,8 @@ impl PathEntry {
 
 pub struct MeshData {
     socket: UdpSocket,
+    /// WAN 接收缓冲（REQ-053）：跨包复用，recv_buf_from 直写 spare 容量免零初始化
+    recv_buf: BytesMut,
     key_dst_table: HashMap<u32, [u8; 32]>,
     /// 端点表：node_id → 候选端点列表（多宿主通告全部；发送按可达性逐个尝试）
     endpoint_table: HashMap<u32, Vec<SocketAddr>>,
@@ -123,7 +136,7 @@ pub enum IncomingEvent {
     /// 已建会话的解密数据载荷（AEAD 解密收尾出口）
     Data {
         from: u32,
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     /// 心跳帧（AEAD 空载荷，仅已建会话对）
     Heartbeat {
@@ -149,7 +162,7 @@ pub enum IncomingEvent {
     /// 广播帧解密载荷（广播密钥，FRAME_HEADER §2.6）
     Broadcast {
         from: u32,
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     /// probe PING 到达（CONNECTIVITY §4）：对本节点的 PING 已自动回 PONG
     ProbePing {
@@ -181,6 +194,7 @@ impl MeshData {
         let socket = UdpSocket::bind(bind).await?;
         Ok(Self {
             socket,
+            recv_buf: BytesMut::with_capacity(MAX_FRAME),
             key_dst_table: HashMap::new(),
             endpoint_table: HashMap::new(),
             self_node_id,
@@ -319,11 +333,27 @@ impl MeshData {
             .and_then(|p| p.hops.first().copied())
     }
 
-    pub async fn recv_frame(&self) -> std::io::Result<(SocketAddr, Vec<u8>)> {
-        let mut buf = vec![0u8; 65535];
-        let (n, from) = self.socket.recv_from(&mut buf).await?;
-        buf.truncate(n);
-        Ok((from, buf))
+    /// WAN 接收原语（REQ-053）：BytesMut 跨包复用，freeze 出 Bytes 零拷贝移交下游。
+    /// 超长报文（≥ MAX_FRAME）被内核截断 → 丢弃并计全局桶。
+    pub async fn recv_frame(&mut self) -> std::io::Result<(SocketAddr, Bytes)> {
+        self.recv_buf.reserve(MAX_FRAME);
+        let (n, from) = self.socket.recv_buf_from(&mut self.recv_buf).await?;
+        if n >= MAX_FRAME {
+            self.recv_buf.clear();
+            self.drop_stats_global.tick();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frame exceeds MAX_FRAME",
+            ));
+        }
+        let frame = self.recv_buf.split_to(n).freeze();
+        Ok((from, frame))
+    }
+
+    /// WAN 发送原语（REQ-053 函数级接缝）：数据面全部 socket 发送收口于此，
+    /// P4 XDP 快速路径在此抽取。
+    pub(super) async fn wan_send(&self, frame: &[u8], addr: SocketAddr) -> std::io::Result<usize> {
+        self.socket.send_to(frame, addr).await
     }
 
     pub fn is_handshake(frame: &[u8]) -> bool {

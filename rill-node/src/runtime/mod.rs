@@ -281,7 +281,7 @@ impl Node {
     }
 
     /// 处理一个数据面事件（阻塞读）；返回需要写入 LAN 侧的解密载荷
-    pub async fn pump_mesh(&mut self) -> Option<Vec<u8>> {
+    pub async fn pump_mesh(&mut self) -> Option<bytes::Bytes> {
         let ev = match self.mesh.handle_incoming().await {
             Ok(ev) => ev,
             Err(_) => return None,
@@ -468,7 +468,7 @@ impl Node {
         }
     }
 
-    async fn handle_mesh_event(&mut self, ev: IncomingEvent) -> Option<Vec<u8>> {
+    async fn handle_mesh_event(&mut self, ev: IncomingEvent) -> Option<bytes::Bytes> {
         match ev {
             IncomingEvent::Established { peer } => {
                 info!("[node] session established with {}", peer);

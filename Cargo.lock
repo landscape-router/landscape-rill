@@ -958,6 +958,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "landscape-rill"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap 4.6.6",
  "ed25519-dalek",
  "landscape-rill-coord",
@@ -1020,6 +1021,7 @@ dependencies = [
 name = "landscape-rill-mesh"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ed25519-dalek",
  "landscape-rill-coord",
  "landscape-rill-core",
@@ -1041,6 +1043,7 @@ dependencies = [
 name = "landscape-rill-node"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ed25519-dalek",
  "futures-util",
  "landscape-rill-coord",

@@ -89,7 +89,7 @@ async fn full_handshake_and_data_roundtrip() {
         b.handle_incoming().await.unwrap(),
         IncomingEvent::Data {
             from: 1,
-            payload: b"hello mesh".to_vec()
+            payload: b"hello mesh".to_vec().into()
         }
     );
 
@@ -99,7 +99,7 @@ async fn full_handshake_and_data_roundtrip() {
         a.handle_incoming().await.unwrap(),
         IncomingEvent::Data {
             from: 2,
-            payload: b"reply".to_vec()
+            payload: b"reply".to_vec().into()
         }
     );
 }
@@ -311,7 +311,7 @@ async fn replayed_data_frame_dropped() {
         b.handle_incoming().await.unwrap(),
         IncomingEvent::Data {
             from: 1,
-            payload: b"payload".to_vec()
+            payload: b"payload".to_vec().into()
         }
     );
     a.send_to_node(2, &frame).await.unwrap();
@@ -594,7 +594,7 @@ async fn v2_data_frame_roundtrip_via_direct_path() {
     match b.handle_incoming().await.unwrap() {
         IncomingEvent::Data { from, payload } => {
             assert_eq!(from, 1);
-            assert_eq!(payload, b"hello path");
+            assert_eq!(payload.as_ref(), b"hello path");
         }
         other => panic!("expected data, got {:?}", other),
     }
@@ -701,7 +701,7 @@ async fn v2_frame_forwarded_through_relay_path() {
     match b.handle_incoming().await.unwrap() {
         IncomingEvent::Data { from, payload } => {
             assert_eq!(from, 1);
-            assert_eq!(payload, b"via relay");
+            assert_eq!(payload.as_ref(), b"via relay");
         }
         other => panic!("expected data, got {:?}", other),
     }
@@ -1058,7 +1058,7 @@ async fn broadcast_roundtrip_delivered() {
         nodes[1].handle_incoming().await.unwrap(),
         IncomingEvent::Broadcast {
             from: 1,
-            payload: payload.to_vec()
+            payload: payload.to_vec().into()
         }
     );
 }
@@ -1110,7 +1110,7 @@ async fn broadcast_relay_floods_to_all_except_source() {
         nodes[2].handle_incoming().await.unwrap(),
         IncomingEvent::Broadcast {
             from: 1,
-            payload: b"hello all".to_vec()
+            payload: b"hello all".to_vec().into()
         }
     );
 }
@@ -1232,7 +1232,7 @@ async fn flood_sends_to_all_peers() {
     assert_eq!(sent, 2);
     assert!(matches!(
         nodes[1].handle_incoming().await.unwrap(),
-        IncomingEvent::Broadcast { from: 1, payload: ref p } if p == b"multicast frame"
+        IncomingEvent::Broadcast { from: 1, payload: ref p } if p.as_ref() == b"multicast frame"
     ));
     assert!(matches!(
         nodes[2].handle_incoming().await.unwrap(),
@@ -1294,4 +1294,21 @@ async fn drop_stats_attribution_and_summary_filter() {
     assert!(m.poll_drop_stats().is_none());
     // 过期清零后旧 per-peer 桶从表内剔除（has_pending 为 false → retain 清理）
     assert!(m.drop_stats.is_empty());
+}
+
+#[tokio::test]
+async fn oversize_datagram_dropped_then_normal_ok() {
+    let (mut a, mut b) = setup_pair().await;
+    let b_addr = b.local_addr().unwrap();
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // 超长（≥ MAX_FRAME）→ 内核截断 → 显式丢弃（REQ-053），不影响后续帧
+    sender.send_to(&[0x01u8; 4096], b_addr).await.unwrap();
+    assert!(b.recv_frame().await.is_err());
+    // 正常帧照常处理
+    let msg1 = a.initiate_handshake(2).unwrap().unwrap();
+    a.send_to_node(2, &msg1).await.unwrap();
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Responded { peer: 1 }
+    );
 }

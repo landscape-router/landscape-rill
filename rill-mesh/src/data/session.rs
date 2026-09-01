@@ -134,7 +134,7 @@ impl MeshData {
         match self.endpoint_table.get(&to_node_id) {
             Some(addrs) => {
                 for addr in addrs {
-                    if self.socket.send_to(frame, addr).await.is_ok() {
+                    if self.wan_send(frame, *addr).await.is_ok() {
                         return Ok(true);
                     }
                 }
@@ -161,7 +161,7 @@ impl MeshData {
                 let mut last_tried = None;
                 for addr in ordered {
                     last_tried = Some(addr);
-                    match self.socket.send_to(frame, addr).await {
+                    match self.wan_send(frame, addr).await {
                         Ok(_) => {
                             self.last_sent_endpoint.insert(to_node_id, addr);
                             return Ok(true);
@@ -371,7 +371,10 @@ impl MeshData {
                 if heartbeat {
                     IncomingEvent::Heartbeat { from }
                 } else {
-                    IncomingEvent::Data { from, payload }
+                    IncomingEvent::Data {
+                        from,
+                        payload: Bytes::from(payload),
+                    }
                 }
             }
             Err(landscape_rill_core::handshake::OpenError::Replay) => IncomingEvent::Dropped {

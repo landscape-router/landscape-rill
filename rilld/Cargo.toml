@@ -17,6 +17,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+bytes.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 ed25519-dalek.workspace = true

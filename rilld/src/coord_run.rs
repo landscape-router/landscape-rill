@@ -152,15 +152,16 @@ async fn run_coord_udp(
     let mut collecting = false;
     let mut collect_deadline = std::time::Instant::now();
     let mut next_rtt = std::time::Instant::now() + RELAY_RTT_PERIOD;
-    let mut buf = vec![0u8; 65535];
+    let mut buf = bytes::BytesMut::with_capacity(2048);
     loop {
+        buf.clear();
         let until = if collecting {
             tokio::time::Instant::from_std(collect_deadline)
         } else {
             tokio::time::Instant::from_std(next_rtt)
         };
         tokio::select! {
-            r = udp.recv_from(&mut buf) => {
+            r = udp.recv_buf_from(&mut buf) => {
                 let Ok((n, from)) = r else { continue };
                 let Some(p) = ProbePacket::decode(&buf[..n]) else { continue };
                 match p.packet_type {

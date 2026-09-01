@@ -9,6 +9,7 @@ landscape-rill-core = { path = "../rill-core" }
 landscape-rill-coord = { path = "../rill-coord" }
 landscape-rill-mesh = { path = "../rill-mesh" }
 tokio.workspace = true
+bytes.workspace = true
 tun.workspace = true
 rtnetlink.workspace = true
 netlink-packet-route.workspace = true
