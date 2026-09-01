@@ -14,6 +14,7 @@
 | legs | [legs/ts2021.md](./legs/ts2021.md) | `TS2021_LEG` | ts2021 兼容接入、headscale 过渡、官方客户端接入 |
 | legs | [legs/dn42.md](./legs/dn42.md) | `DN42_LEG` | dn42 接入、eBGP-lite、import/export policy |
 | routing | [routing/route-engine.md](./routing/route-engine.md) | `ROUTE_ENGINE` | 路由策略引擎、LPM、fallback、MTU、DNS 分类 |
+| runtime | [runtime/logging.md](./runtime/logging.md) | `LOGGING` | daemon 日志：框架、级别、格式、存储、限速、红线 |
 
 ## 2. 短名注册（代码注释引用契约）
 
@@ -28,6 +29,7 @@
 | `TS2021_LEG` | [legs/ts2021.md](./legs/ts2021.md) |
 | `DN42_LEG` | [legs/dn42.md](./legs/dn42.md) |
 | `ROUTE_ENGINE` | [routing/route-engine.md](./routing/route-engine.md) |
+| `LOGGING` | [runtime/logging.md](./runtime/logging.md) |
 
 引用规范：
 - 只在**协议/安全契约绑定处**引用（常量、线格式、加密语义、安全边界），纯实现逻辑不引
