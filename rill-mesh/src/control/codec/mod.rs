@@ -24,12 +24,8 @@ pub fn envelope_bytes<T: MessageWrite>(msg_type: MsgType, msg: &T) -> Vec<u8> {
     out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
-pub enum EnvelopeError {
-    #[error("envelope decode failed")]
-    #[error_id("mesh.envelope.decode")]
-    Decode,
-}
+pub mod error;
+pub use error::EnvelopeError;
 
 pub fn parse_envelope(body: &[u8]) -> Result<(MsgType, Vec<u8>), EnvelopeError> {
     let owned = EnvelopeOwned::try_from(body.to_vec()).map_err(|_| EnvelopeError::Decode)?;

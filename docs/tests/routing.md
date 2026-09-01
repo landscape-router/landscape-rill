@@ -8,7 +8,7 @@
 - 关联 REQ：REQ-023
 - 测试层：单测 + 集成
 - 状态：`部分覆盖`
-- 证据：rill-core/src/route.rs
+- 证据：rill-core/src/route/
 - 缺口：mesh `routes[]` 注入已闭环；dn42 BGP / ts2021 路由 / 本地路由注入未实现（依赖接入实现）
 
 ## RTE-02 LPM 最长前缀优先
@@ -16,7 +16,7 @@
 - 关联 REQ：REQ-023
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/route.rs
+- 证据：rill-core/src/route/
 - 说明：len 降序查找、Prefix 归一化存储
 
 ## RTE-03 等长冲突消解
@@ -24,7 +24,7 @@
 - 关联 REQ：REQ-023
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/route.rs
+- 证据：rill-core/src/route/
 - 说明：source 优先级升序（LAN > mesh > dn42 > tailnet）
 
 ## RTE-04 多网关冗余
@@ -32,7 +32,7 @@
 - 关联 REQ：REQ-023
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/route.rs
+- 证据：rill-core/src/route/
 - 说明：同前缀同源多 via 全返回；故障切换（reachable 谓词）单测闭环
 
 ## RTE-05 dn42 fallback 链
@@ -40,7 +40,7 @@
 - 关联 REQ：REQ-023
 - 测试层：单测 + e2e
 - 状态：`部分覆盖`
-- 证据：rill-core/src/route.rs
+- 证据：rill-core/src/route/
 - 缺口：fallback 链语义已实现（lookup_best + reachable）；dn42 接入实际链路未验证（依赖 DNL-07）
 
 ## RTE-06 exit 语义

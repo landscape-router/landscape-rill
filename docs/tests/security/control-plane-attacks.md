@@ -49,7 +49,7 @@
 - 关联 REQ：REQ-013
 - 测试层：单测 + 集成
 - 状态：`部分覆盖`
-- 证据：rill-core/src/handshake.rs
+- 证据：rill-core/src/handshake/
 - 缺口：握手层 prologue 版本不匹配拒绝已闭环（跨网络/跨版本互不相认）；**控制面首消息版本协商未实现**
 - 说明：明确报错（非静默失败）、不进入半工作状态
 
@@ -66,7 +66,7 @@
 - 关联 REQ：REQ-017
 - 测试层：单测
 - 状态：`部分覆盖`
-- 证据：rill-mesh/src/framing.rs
+- 证据：rill-mesh/src/framing/
 - 缺口：帧长上限 1MB/truncated/oversize 拒绝已闭环；随机洪泛 fuzz 待补
 - 说明：解析失败断开该连接、coordinator 进程不 panic、其他连接不受影响
 

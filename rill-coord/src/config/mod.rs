@@ -11,10 +11,12 @@ use crate::authkey::{parse_auth_key, validate_network};
 use crate::coordinator::Coordinator;
 use crate::domain::network_id_for;
 use landscape_rill_core::control::registry::{AuthKeyPolicy, AuthKeySpec};
-use landscape_rill_core::error::ErrorId;
 use landscape_rill_core::route::Prefix;
 use serde::Deserialize;
 use std::net::SocketAddr;
+
+pub mod error;
+pub use error::ConfigError;
 
 // ============================================================================
 // CoordConfig（解析 + 校验 + 应用）
@@ -66,25 +68,6 @@ pub struct AuthKeyConfig {
 
 fn default_policy() -> String {
     "reusable".into()
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct ConfigError(String);
-
-impl ErrorId for ConfigError {
-    fn error_id(&self) -> &'static str {
-        "coord.config"
-    }
-    fn error_args(&self) -> landscape_rill_core::error::ErrorArgs {
-        landscape_rill_core::error::args(&[])
-    }
-}
-
-impl From<serde_json::Error> for ConfigError {
-    fn from(e: serde_json::Error) -> Self {
-        ConfigError(format!("json parse failed: {e}"))
-    }
 }
 
 impl CoordConfig {

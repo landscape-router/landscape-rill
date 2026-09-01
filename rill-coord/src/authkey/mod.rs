@@ -4,6 +4,9 @@
 //! 解析即知过期（admission 时 coordinator 校验，嵌入时间仅 advisory）。
 //! network 段规范：小写字母/数字，非空，**不含连字符**（段分隔符冲突）。
 
+pub mod error;
+pub use error::AuthKeyError;
+
 pub const AUTH_KEY_PREFIX: &str = "lrk-";
 pub const AUTH_KEY_SECRET_LEN: usize = 32;
 /// 32B → base32 无填充 = 52 字符（256 bits / 5 = 51.2 → 进位 52）
@@ -49,28 +52,6 @@ fn base32_decode(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(out)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
-pub enum AuthKeyError {
-    #[error("auth key must start with lrk-")]
-    #[error_id("coord.auth_key.bad_prefix")]
-    BadPrefix,
-    #[error("auth key format must be lrk-<network>-<expiry>-<secret>")]
-    #[error_id("coord.auth_key.bad_format")]
-    BadFormat,
-    #[error("invalid network segment (lowercase alphanumeric, no dashes)")]
-    #[error_id("coord.auth_key.bad_network")]
-    BadNetwork,
-    #[error("invalid expiry segment (decimal unix seconds, 0 = never expires)")]
-    #[error_id("coord.auth_key.bad_expiry")]
-    BadExpiry,
-    #[error("invalid auth key secret length")]
-    #[error_id("coord.auth_key.bad_secret_len")]
-    BadSecretLen,
-    #[error("invalid auth key secret characters")]
-    #[error_id("coord.auth_key.bad_secret")]
-    BadSecret,
 }
 
 /// network 段规范：小写字母/数字，非空，**不含连字符**（段分隔符为 `-`，

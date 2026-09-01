@@ -8,7 +8,7 @@
 - 关联 REQ：REQ-038
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-coord/src/config.rs
+- 证据：rill-coord/src/config/
 
 ## ADM-02 前缀公告白名单
 
@@ -31,14 +31,14 @@
 - 关联 REQ：REQ-036
 - 测试层：单测 + CLI
 - 状态：`已覆盖`
-- 证据：rill-coord/src/config.rs、rilld/src/main.rs
+- 证据：rill-coord/src/config/、rilld/src/main.rs
 
 ## ADM-05 auth key 生命周期（过期/吊销闭环）
 
 - 关联 REQ：REQ-036
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-core/src/control/registry.rs、rill-coord/src/config.rs
+- 证据：rill-core/src/control/registry.rs、rill-coord/src/config/
 
 ## ADM-06 lrill CLI 与 daemon 托管
 

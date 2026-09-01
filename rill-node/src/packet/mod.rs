@@ -17,15 +17,8 @@ pub struct PacketInfo {
     pub total_len: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
-pub enum PacketError {
-    #[error("not an IP packet")]
-    #[error_id("node.packet.not_ip")]
-    NotIp,
-    #[error("truncated IP packet")]
-    #[error_id("node.packet.truncated")]
-    Truncated,
-}
+pub mod error;
+pub use error::PacketError;
 
 pub fn parse_packet(buf: &[u8]) -> Result<PacketInfo, PacketError> {
     if buf.is_empty() {

@@ -1,3 +1,6 @@
+pub mod error;
+pub use error::{DecodeError, OpenError};
+
 use crate::crypto::{self, AeadError};
 
 pub const HEADER_LEN: usize = 34;
@@ -230,34 +233,6 @@ pub fn open_frame(
     )
     .map_err(OpenError::Aead)?;
     Ok((header, payload))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
-#[error_id(crate_path = "crate")]
-pub enum DecodeError {
-    #[error("truncated frame")]
-    #[error_id("frame.decode.truncated")]
-    Truncated,
-}
-
-#[derive(Debug, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
-#[error_id(crate_path = "crate")]
-pub enum OpenError {
-    #[error("frame decode error: {0}")]
-    #[error_id("frame.open.decode")]
-    Decode(DecodeError),
-    #[error("unsupported frame version")]
-    #[error_id("frame.open.version")]
-    Version,
-    #[error("route mac mismatch")]
-    #[error_id("frame.open.route_mac")]
-    RouteMac,
-    #[error("truncated payload")]
-    #[error_id("frame.open.truncated_payload")]
-    TruncatedPayload,
-    #[error("aead error")]
-    #[error_id("frame.open.aead")]
-    Aead(AeadError),
 }
 
 pub struct ReplayWindow {

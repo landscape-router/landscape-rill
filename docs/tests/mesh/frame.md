@@ -8,7 +8,7 @@
 - 关联 REQ：REQ-001 / REQ-002
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame.rs
+- 证据：rill-core/src/frame/
 - 说明：帧头 roundtrip、固定 34B、多字节字段大端、XDP 固定偏移
 
 ## FRM-02 route_mac 认证（篡改拒绝/ttl 置零）
@@ -16,7 +16,7 @@
 - 关联 REQ：REQ-002 / REQ-003
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-core/src/crypto.rs、rill-mesh/src/data.rs
+- 证据：rill-core/src/crypto/、rill-mesh/src/data.rs
 - 说明：双 siphash-2-4 官方向量交叉验证；篡改任一认证字段拒绝；ttl 递减后转发仍可校验
 
 ## FRM-03 AEAD 载荷认证
@@ -24,7 +24,7 @@
 - 关联 REQ：REQ-001 / REQ-017
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame.rs、rill-core/src/handshake.rs
+- 证据：rill-core/src/frame/、rill-core/src/handshake/
 - 说明：AAD/密钥/盐错误拒绝、fail-closed 截断拒绝
 
 ## FRM-04 握手流程（Noise_XX 全规格）
@@ -32,7 +32,7 @@
 - 关联 REQ：REQ-001 / REQ-029
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
-- 证据：rill-core/src/handshake.rs
+- 证据：rill-core/src/handshake/
 - 说明：msg1 目标校验/msg3 身份绑定交叉验证/prologue 混淆拒绝/密钥对称/无发起方 msg2 拒绝
 
 ## FRM-05 重放窗口与会话计数
@@ -40,7 +40,7 @@
 - 关联 REQ：REQ-002
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame.rs、rill-core/src/handshake.rs
+- 证据：rill-core/src/frame/、rill-core/src/handshake/
 - 说明：seq 重放拦截、方向计数器不重用
 
 ## FRM-06 rekey 双窗口交叠
@@ -48,7 +48,7 @@
 - 关联 REQ：REQ-011 / REQ-029
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-core/src/handshake.rs
+- 证据：rill-core/src/handshake/
 - 说明：新钥立即生效/旧钥 5s 残留内可解/过期销毁/双窗口各自滑动
 
 ## FRM-07 心跳帧（数据面 keepalive）

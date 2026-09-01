@@ -119,7 +119,7 @@
 - 关联 REQ：REQ-034
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-core/src/frame.rs、rill-core/src/crypto.rs、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control/、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
+- 证据：rill-core/src/frame/、rill-core/src/crypto/、rill-coord/src/path_service.rs、rill-mesh/src/data.rs、rill-mesh/src/control/、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/relay/docker-compose.yaml
 - 缺口：PathProbe 消息族运行时未启用（活性由数据面心跳承担，协议已定义）
 
 ## CTL-16 coordinator 持久化（REQ-037）
@@ -127,7 +127,7 @@
 - 关联 REQ：REQ-037
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/store.rs、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/persist/docker-compose.yaml
+- 证据：rill-coord/src/store/、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/persist/docker-compose.yaml
 - 说明：redb 快照整写；损坏/不一致 fail-closed；一次性 key 消费 tombstone 跨重启存活
 
 ## CTL-17 auth key 内嵌过期时间（REQ-043）
@@ -135,7 +135,7 @@
 - 关联 REQ：REQ-043
 - 测试层：单测
 - 状态：`已覆盖`
-- 证据：rill-coord/src/config.rs、rill-coord/src/coordinator.rs、rilld/src/main.rs
+- 证据：rill-coord/src/config/、rill-coord/src/coordinator.rs、rilld/src/main.rs
 - 说明：过期时间嵌入 key 自身（advisory），admission 时 coordinator 校验；节点侧仅告警不阻断（挑战恢复路径不受影响）
 
 ## 验收断言
