@@ -63,9 +63,9 @@
 
 - 关联 REQ：REQ-008 / REQ-014
 - 测试层：单测 + e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：/0 及过短前缀不进前缀公告（coordinator 白名单拒绝）未实现（依赖 CTL-10）
+- 状态：`部分覆盖`
+- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator.rs
+- 缺口：过短前缀不进前缀公告已闭环（CTL-10）；"过短前缀走 exit 语义"依赖 exit（P3，RTE-06）
 
 ## 验收断言
 
@@ -76,4 +76,4 @@
 - [ ] RTE-05：dn42 直连断 → mesh 出口 → 丢弃（fallback 链核心已实现，链路待验证）
 - [ ] RTE-06：exit 透传/使用/被用作语义（待实现）
 - [ ] RTE-07：大包不黑洞、MSS clamping 生效、PTB 透传（待验证）
-- [ ] RTE-08：过短前缀走 exit 语义、不混入公告（待实现）
+- [ ] RTE-08：过短前缀不混入公告（已闭环，CTL-10）；走 exit 语义待实现（P3）

@@ -79,10 +79,9 @@
 
 - 关联 REQ：REQ-008
 - 测试层：单测 + e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：coordinator 白名单校验（管理面形态见 REQ-038）未实现；目前为注册携带公告
-- 说明：routes[] 内嵌 netmap 与多网关冗余语义已落地（e2e 前缀公告）；白名单/过短前缀拒绝待补
+- 状态：`已覆盖`
+- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator.rs、rill-node/src/runtime.rs
+- 说明：白名单内公告并入 netmap（coordinator 层断言）；白名单外/过短前缀 → RouteNotAllowed（整批拒绝，不部分采纳）；空白名单 fail-closed；routes[] 内嵌 netmap 与多网关冗余语义已闭环
 
 ## CTL-11 离线自动撤销公告
 
@@ -90,7 +89,7 @@
 - 测试层：单测
 - 状态：`待补充`
 - 证据：—
-- 缺口：离线撤销语义未验证
+- 缺口：离线撤销语义未实现——netmap 不带 offline 标志、节点侧路由表不随离线撤销（待实现）
 
 ## CTL-12 Raft 主切换（P2）
 
@@ -151,7 +150,7 @@
 - [ ] CTL-07：新旧密钥宽限期并存、旧版本过期作废（节点侧待落地）
 - [x] CTL-08：吊销后条目移除、全网轮换、旧会话作废
 - [ ] CTL-09：同 coordinator 两网络互不可见、key_dst 互不通用、auth key 归域（待实现）
-- [ ] CTL-10：白名单内公告并入 netmap、白名单外拒绝、过短前缀拒绝（待实现）
+- [x] CTL-10：白名单内公告并入 netmap、白名单外拒绝、过短前缀拒绝、空白名单 fail-closed
 - [ ] CTL-11：离线后 routes[] 随可达性撤销（待实现）
 - [ ] CTL-12：主切换幂等重注册、软状态重建（P2）
 - [x] CTL-13：DH 挑战闭环、时间窗口防重放

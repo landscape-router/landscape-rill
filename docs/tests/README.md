@@ -58,7 +58,7 @@
 | REQ-005 | E2E-05 | 待补充 | — |
 | REQ-006 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
 | REQ-007 | CON-01 ~ CON-06 | 待补充 | — |
-| REQ-008 | CTL-10 / CTL-11 | 待补充 | — |
+| REQ-008 | CTL-10 / CTL-11 | 部分覆盖 | CTL-10：rill-core/src/control/registry.rs、rill-coord/src/coordinator.rs（CTL-11 待实现） |
 | REQ-009 | RTE-07 | 待补充 | — |
 | REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 待补充 | — |
 | REQ-011 | FRM-06 | 已覆盖 | rill-core/src/handshake.rs |
@@ -70,7 +70,7 @@
 | REQ-017 | SEC-01 / SEC-02 / FRM-07 | 部分覆盖 | — |
 | REQ-018 | CTL-13 | 已覆盖 | rill-core/src/control/challenge.rs |
 | REQ-019 | — | — | — |
-| REQ-020 | SEC-28 | 待补充 | — |
+| REQ-020 | SEC-28 | 已覆盖 | rill-core/src/route.rs、rill-coord/src/coordinator.rs |
 | REQ-021 | TSL-01 ~ TSL-10 | 部分覆盖 | — |
 | REQ-022 | CTL-13 / SEC-16 | 已覆盖 | rill-core/src/control/ |
 | REQ-023 | RTE-01 ~ RTE-04 | 已覆盖 | rill-core/src/route.rs |
@@ -89,8 +89,8 @@
 | REQ-036 | ADM-04 / ADM-05 | 已覆盖 | rill-coord/src/config.rs、rill-core/src/control/registry.rs |
 | REQ-037 | CTL-16 | 已覆盖 | rill-coord/src/store.rs、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/mesh/persist/ |
 | REQ-038 | ADM-01 / ADM-02 | 已覆盖 | rill-coord/src/config.rs、rill-core/src/control/registry.rs、e2e/run_e2e.sh |
-| REQ-038 | ADM-03 | 部分覆盖 | rilld/src/main.rs（SIGHUP 重载手动验证，未自动化） |
-| REQ-039 | LOG-01 / LOG-02 / LOG-03 | 待补充 | — |
+| REQ-038 | ADM-03 | 已覆盖 | rilld/src/main.rs、e2e/run_e2e.sh、e2e/mesh/reload/ |
+| REQ-039 | LOG-01 / LOG-02 / LOG-03 | 已覆盖 | rilld/src/logging.rs、rill-core/src/rate.rs、rill-mesh/src/data.rs、e2e/mesh/log/ |
 | REQ-040 | — | 📌 proposed（无验收场景） | — |
 | REQ-041 | — | 📌 proposed（无验收场景） | — |
 | REQ-042 | ADM-06 | 部分覆盖 | e2e/Dockerfile、e2e/run_e2e.sh、rilld/src/main.rs |

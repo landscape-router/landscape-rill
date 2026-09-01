@@ -69,10 +69,9 @@
 
 - 关联 REQ：REQ-020
 - 测试层：单测（断言）
-- 状态：`待补充`
-- 证据：—
-- 缺口：`acl` 能力位恒 false、转发链策略检查点恒放行、netmap version 保留策略版本语义——需实现期代码断言（ROUTE_ENGINE §2）
-- 说明：v1 行为 = 全端口可达语义不变
+- 状态：`已覆盖`
+- 证据：rill-core/src/route.rs、rill-coord/src/coordinator.rs
+- 说明：策略检查点存在且恒放行（route.rs policy_checkpoint_allow_all_v1）；`acl` 能力位（0x40）v1 恒 false——coordinator 不解释、不占用，netmap 原样透传（coordinator.rs capability_acl_bit_reserved_v1）；v1 行为 = 全端口可达语义不变
 
 ## 验收断言
 
@@ -83,4 +82,4 @@
 - [ ] SEC-25：跨网络白名单公告被拒（待实现）
 - [ ] SEC-26：反射放大被限速收敛（待实现）
 - [ ] SEC-27：普通节点不持有远端端点（v2）
-- [ ] SEC-28：v1 断言——`acl` 位恒 false、策略检查点存在且恒放行
+- [x] SEC-28：v1 断言——`acl` 位（0x40）恒 false（coordinator 不解释不占用）、策略检查点恒放行（route.rs）

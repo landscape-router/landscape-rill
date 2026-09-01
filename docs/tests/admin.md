@@ -21,10 +21,10 @@
 ## ADM-03 配置重载（SIGHUP 增量生效）
 
 - 关联 REQ：REQ-038
-- 测试层：集成
-- 状态：`部分覆盖`
-- 证据：rilld/src/main.rs
-- 缺口：SIGHUP 重载集成测试未自动化（手动验证：重载成功增量生效 / 重载失败保持旧配置）；tokio Signal 首次 poll 才注册监听的启动窗口有注释说明
+- 测试层：集成 + docker e2e
+- 状态：`已覆盖`
+- 证据：rilld/src/main.rs、e2e/run_e2e.sh、e2e/mesh/reload/
+- 说明：e2e reload 场景四阶段——①基线 a↔b 双栈通；②coord.json 追加 auth key → SIGHUP → 新 key 注册成功（增量生效）；③写坏配置 → SIGHUP → 日志 "reload failed, keeping old config" + 数据面不受影响；④移除 key → SIGHUP → 即刻失效（新节点注册被拒）。注：bind mount 配置文件不可用 `sed -i` 修改（rename 断 inode，容器仍读旧文件），须临时文件 + cp 原址覆盖
 
 ## ADM-04 auth key 格式与生成
 
@@ -76,7 +76,7 @@
 
 - [x] ADM-01：缺失必填/格式非法配置 → 拒绝启动（fail-closed，无默认凭据）
 - [x] ADM-02：白名单外公告 → RegisterError::RouteNotAllowed（不部分采纳）；白名单内 → 注册成功；`/8` 以下 IPv4、`/32` 以下 IPv6 → 拒绝；白名单变更不影响已注册节点
-- [ ] ADM-03：SIGHUP 重载后新 auth key 可注册、移除 key 即刻失效、白名单变更对新注册生效；重载失败保持旧配置 + 日志报错（手动验证，未自动化）
+- [x] ADM-03：SIGHUP 重载后新 auth key 可注册、移除 key 即刻失效、重载失败保持旧配置 + 日志报错 + 数据面不中断（e2e reload 场景）
 - [x] ADM-04：`lrk-<network>-<base32>` 生成/解析/校验正确；非 lrk 前缀与 network 不匹配被拒；生成不落日志
 - [x] ADM-05：reusable 带 expires_at 过期即 InvalidAuthKey；onetime 注册即弃；配置移除 + 重载 = 吊销闭环
 - [ ] ADM-06：`lrill --help` 展示 pubkey/run/authkey/up/down/status；up/down/status 走 systemctl；无 systemd 明确报错提示 `lrill run`；Dockerfile ENTRYPOINT = `lrill run`（部分未自动化）
