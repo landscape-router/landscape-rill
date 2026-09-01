@@ -11,7 +11,6 @@ use crate::path_service::PathSet;
 use landscape_rill_core::control::registry::NodeEntry;
 use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::path::Path;
 
 pub const STATE_SCHEMA: u32 = 1;
@@ -33,56 +32,51 @@ pub struct CoordState {
     pub path_seq: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error, landscape_rill_macro::ErrorId)]
 pub enum StoreError {
-    Io(std::io::Error),
-    Redb(String),
+    #[error("store io error: {0}")]
+    #[error_id("coord.store.io")]
+    Io(#[from] std::io::Error),
+    #[error("store backend error: {0}")]
+    #[error_id("coord.store.redb")]
+    Redb(#[from] redb::Error),
     /// 文件内容非法（损坏/篡改/未来版本）
+    #[error("corrupt store: {0}")]
+    #[error_id("coord.store.corrupt")]
     Corrupt(String),
     /// 语义不一致（拒绝启动，不猜测重建）
+    #[error("inconsistent store: {0}")]
+    #[error_id("coord.store.inconsistent")]
     Inconsistent(String),
 }
 
-impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StoreError::Io(e) => write!(f, "存储 IO: {e}"),
-            StoreError::Redb(e) => write!(f, "存储后端: {e}"),
-            StoreError::Corrupt(e) => write!(f, "存储损坏: {e}"),
-            StoreError::Inconsistent(e) => write!(f, "存储不一致: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
 impl From<redb::DatabaseError> for StoreError {
     fn from(e: redb::DatabaseError) -> Self {
-        StoreError::Redb(e.to_string())
+        StoreError::Redb(e.into())
     }
 }
 
 impl From<redb::StorageError> for StoreError {
     fn from(e: redb::StorageError) -> Self {
-        StoreError::Redb(e.to_string())
+        StoreError::Redb(e.into())
     }
 }
 
 impl From<redb::TransactionError> for StoreError {
     fn from(e: redb::TransactionError) -> Self {
-        StoreError::Redb(e.to_string())
+        StoreError::Redb(e.into())
     }
 }
 
 impl From<redb::TableError> for StoreError {
     fn from(e: redb::TableError) -> Self {
-        StoreError::Redb(e.to_string())
+        StoreError::Redb(e.into())
     }
 }
 
 impl From<redb::CommitError> for StoreError {
     fn from(e: redb::CommitError) -> Self {
-        StoreError::Redb(e.to_string())
+        StoreError::Redb(e.into())
     }
 }
 
@@ -106,7 +100,7 @@ impl CoordStore {
     /// 整快照原子写（redb 事务）
     pub fn save(&self, state: &CoordState) -> Result<(), StoreError> {
         let json = serde_json::to_vec(state)
-            .map_err(|e| StoreError::Corrupt(format!("状态序列化失败: {e}")))?;
+            .map_err(|e| StoreError::Corrupt(format!("state serialize failed: {e}")))?;
         let wtx = self.db.begin_write()?;
         {
             let mut table = wtx.open_table(STATE_TABLE)?;
@@ -128,10 +122,10 @@ impl CoordStore {
             return Ok(None);
         };
         let state: CoordState = serde_json::from_slice(guard.value())
-            .map_err(|e| StoreError::Corrupt(format!("状态反序列化失败: {e}")))?;
+            .map_err(|e| StoreError::Corrupt(format!("state deserialize failed: {e}")))?;
         if state.schema != STATE_SCHEMA {
             return Err(StoreError::Inconsistent(format!(
-                "schema={} 不兼容（当前 {}）",
+                "schema={} incompatible (current {})",
                 state.schema, STATE_SCHEMA
             )));
         }

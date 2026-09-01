@@ -6,9 +6,9 @@
 
 use crate::coordinator::Coordinator;
 use landscape_rill_core::control::registry::{AuthKeyPolicy, AuthKeySpec};
+use landscape_rill_core::error::ErrorId;
 use landscape_rill_core::route::Prefix;
 use serde::Deserialize;
-use std::fmt;
 use std::net::SocketAddr;
 
 pub const AUTH_KEY_PREFIX: &str = "lrk-";
@@ -64,34 +64,27 @@ fn base32_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
 pub enum AuthKeyError {
+    #[error("auth key must start with lrk-")]
+    #[error_id("coord.auth_key.bad_prefix")]
     BadPrefix,
+    #[error("auth key format must be lrk-<network>-<expiry>-<secret>")]
+    #[error_id("coord.auth_key.bad_format")]
     BadFormat,
+    #[error("invalid network segment (lowercase alphanumeric, no dashes)")]
+    #[error_id("coord.auth_key.bad_network")]
     BadNetwork,
+    #[error("invalid expiry segment (decimal unix seconds, 0 = never expires)")]
+    #[error_id("coord.auth_key.bad_expiry")]
     BadExpiry,
+    #[error("invalid auth key secret length")]
+    #[error_id("coord.auth_key.bad_secret_len")]
     BadSecretLen,
+    #[error("invalid auth key secret characters")]
+    #[error_id("coord.auth_key.bad_secret")]
     BadSecret,
 }
-
-impl fmt::Display for AuthKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                AuthKeyError::BadPrefix => "auth key 必须以 lrk- 开头",
-                AuthKeyError::BadFormat => "auth key 格式应为 lrk-<network>-<expiry>-<secret>",
-                AuthKeyError::BadNetwork => "network 段非法（小写字母/数字，不含连字符）",
-                AuthKeyError::BadExpiry => "expiry 段非法（十进制 unix 秒，0 = 永不过期）",
-                AuthKeyError::BadSecretLen => "auth key secret 段长度非法",
-                AuthKeyError::BadSecret => "auth key secret 段含非法字符",
-            }
-        )
-    }
-}
-
-impl std::error::Error for AuthKeyError {}
 
 /// network 段规范：小写字母/数字，非空，**不含连字符**（段分隔符为 `-`，
 /// 含连字符的网络名在 `lrk-<network>-...` 下无法无损解析，REQ-043 收紧）
@@ -214,20 +207,22 @@ fn default_policy() -> String {
     "reusable".into()
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct ConfigError(String);
 
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+impl ErrorId for ConfigError {
+    fn error_id(&self) -> &'static str {
+        "coord.config"
+    }
+    fn error_args(&self) -> landscape_rill_core::error::ErrorArgs {
+        landscape_rill_core::error::args(&[])
     }
 }
 
-impl std::error::Error for ConfigError {}
-
 impl From<serde_json::Error> for ConfigError {
     fn from(e: serde_json::Error) -> Self {
-        ConfigError(format!("JSON 解析失败: {e}"))
+        ConfigError(format!("json parse failed: {e}"))
     }
 }
 
@@ -242,7 +237,7 @@ impl CoordConfig {
 
     pub fn load(path: &std::path::Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError(format!("读取 {}: {e}", path.display())))?;
+            .map_err(|e| ConfigError(format!("read {}: {e}", path.display())))?;
         Self::parse(&text)
     }
 
@@ -251,25 +246,25 @@ impl CoordConfig {
         validate_network(&self.network).map_err(|e| ConfigError(e.to_string()))?;
         self.listen_addr
             .parse::<SocketAddr>()
-            .map_err(|_| ConfigError(format!("listen_addr 非法: {}", self.listen_addr)))?;
+            .map_err(|_| ConfigError(format!("invalid listen_addr: {}", self.listen_addr)))?;
         for ak in &self.auth_keys {
             let (net, _, _) = parse_auth_key(&ak.key).map_err(|e| ConfigError(e.to_string()))?;
             if net != self.network {
                 return Err(ConfigError(format!(
-                    "auth key 网络归域不匹配: key={net} 配置网络={}",
+                    "auth key network mismatch: key={net} config network={}",
                     self.network
                 )));
             }
             if ak.policy != "onetime" && ak.policy != "reusable" {
-                return Err(ConfigError(format!("policy 非法: {}", ak.policy)));
+                return Err(ConfigError(format!("invalid policy: {}", ak.policy)));
             }
         }
         for w in &self.announce_whitelist {
-            Prefix::parse(w).map_err(|_| ConfigError(format!("白名单前缀非法: {w}")))?;
+            Prefix::parse(w).map_err(|_| ConfigError(format!("invalid whitelist prefix: {w}")))?;
         }
         if let Some(p) = &self.storage_path {
             if p.trim().is_empty() {
-                return Err(ConfigError("storage_path 为空".into()));
+                return Err(ConfigError("storage_path is empty".into()));
             }
         }
         Ok(())
@@ -466,14 +461,14 @@ mod tests {
     fn config_rejects_network_mismatch() {
         let text = valid_config().replace("\"network\": \"lab\"", "\"network\": \"other\"");
         let err = CoordConfig::parse(&text).unwrap_err();
-        assert!(err.to_string().contains("网络归域不匹配"));
+        assert!(err.to_string().contains("auth key network mismatch"));
     }
 
     #[test]
     fn config_rejects_bad_policy() {
         let text = valid_config().replace("\"policy\": \"onetime\"", "\"policy\": \"root\"");
         let err = CoordConfig::parse(&text).unwrap_err();
-        assert!(err.to_string().contains("policy 非法"));
+        assert!(err.to_string().contains("invalid policy"));
     }
 
     #[test]

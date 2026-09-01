@@ -108,7 +108,7 @@ impl Coordinator {
         let max_node = state.nodes.iter().map(|n| n.node_id).max().unwrap_or(0);
         if state.next_node_id == 0 || state.next_node_id <= max_node {
             return Err(StoreError::Inconsistent(format!(
-                "next_node_id={} 与节点表最大 id={} 不一致",
+                "next_node_id={} inconsistent with max node id={}",
                 state.next_node_id, max_node
             )));
         }
@@ -117,13 +117,13 @@ impl Coordinator {
         for n in &state.nodes {
             if !seen_ids.insert(n.node_id) {
                 return Err(StoreError::Inconsistent(format!(
-                    "节点表含重复 node_id={}",
+                    "duplicate node_id={} in node table",
                     n.node_id
                 )));
             }
             if !seen_pubkeys.insert(n.static_pubkey) {
                 return Err(StoreError::Inconsistent(format!(
-                    "节点表含重复公钥 node_id={}",
+                    "duplicate pubkey node_id={}",
                     n.node_id
                 )));
             }
@@ -132,7 +132,7 @@ impl Coordinator {
         for (s, d, set) in &state.path_map {
             if path_map.insert((*s, *d), set.clone()).is_some() {
                 return Err(StoreError::Inconsistent(format!(
-                    "路径表含重复 (source={s}, dest={d})"
+                    "duplicate path entry (source={s}, dest={d})"
                 )));
             }
         }
