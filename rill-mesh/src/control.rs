@@ -159,18 +159,12 @@ pub fn envelope_bytes<T: MessageWrite>(msg_type: MsgType, msg: &T) -> Vec<u8> {
     out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
 pub enum EnvelopeError {
+    #[error("envelope decode failed")]
+    #[error_id("mesh.envelope.decode")]
     Decode,
 }
-
-impl std::fmt::Display for EnvelopeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for EnvelopeError {}
 
 pub fn parse_envelope(body: &[u8]) -> Result<(MsgType, Vec<u8>), EnvelopeError> {
     let owned = EnvelopeOwned::try_from(body.to_vec()).map_err(|_| EnvelopeError::Decode)?;
@@ -463,11 +457,7 @@ impl CoordinatorServer {
                     Err(e) => {
                         // 逐条输出 → 周期摘要（LOGGING §5；run_coord 打印）
                         self.register_rejected.tick();
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("{:?}", e),
-                        )
-                        .into());
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e).into());
                     }
                 }
             }
@@ -891,7 +881,7 @@ fn decoding_err(e: impl std::fmt::Debug) -> std::io::Error {
 }
 
 fn io_err(e: landscape_rill_core::control::session::SessionError) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{:?}", e))
+    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
 }
 
 #[cfg(test)]

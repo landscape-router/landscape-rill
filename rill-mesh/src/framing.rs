@@ -2,19 +2,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAX_MESSAGE_LEN: u32 = 1 << 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
 pub enum FrameError {
+    #[error("message too long")]
+    #[error_id("mesh.frame.too_long")]
     TooLong,
+    #[error("truncated frame")]
+    #[error_id("mesh.frame.truncated")]
     Truncated,
 }
-
-impl std::fmt::Display for FrameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for FrameError {}
 
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, std::io::Error> {
     let mut len_buf = [0u8; 4];

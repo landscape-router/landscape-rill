@@ -16,6 +16,8 @@ rustls-pki-types.workspace = true
 x25519-dalek.workspace = true
 rand.workspace = true
 tracing.workspace = true
+thiserror.workspace = true
+landscape-rill-macro = { path = "../rill-macro" }
 
 [dev-dependencies]
 rcgen.workspace = true

@@ -128,13 +128,25 @@ pub enum DropReason {
     RateLimited,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error, landscape_rill_macro::ErrorId)]
 pub enum SendError {
+    #[error("no session with peer")]
+    #[error_id("mesh.send.no_session")]
     NoSession,
+    #[error("no key material for destination")]
+    #[error_id("mesh.send.no_key_dst")]
     NoKeyDst,
+    #[error("no send context")]
+    #[error_id("mesh.send.no_context")]
     NoContext,
+    #[error("no peer binding")]
+    #[error_id("mesh.send.no_peer_binding")]
     NoPeerBinding,
-    Handshake(HandshakeError),
+    #[error(transparent)]
+    #[error_id(transparent)]
+    Handshake(#[from] HandshakeError),
+    #[error("aead failure")]
+    #[error_id("mesh.send.aead")]
     Aead,
 }
 
