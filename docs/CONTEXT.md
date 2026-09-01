@@ -125,7 +125,7 @@ docs/README.md（入口：阅读路线 + 三张图）
 3. protobuf schema 文件与代码生成（文档为语义级）——**已落地（2026-08-15，2026-08-30 重构为独立 rill-proto crate）**：`rill-proto/proto/control.proto`（CONTROL_PLANE §3 消息字段级）+ build.rs 用 **pb-rs** 生成 → OUT_DIR 的 wire 模块（不入库，`landscape-rill-proto` crate 对外暴露；quick-protobuf 运行时）
 4. v1 存储后端（redb / sqlite 候选，**REQ-037**）——**已定稿（2026-08-31，REQ-037 merged，CONTROL_PLANE §4.1）**：redb（Rust 原生、单文件、无 C 依赖；sqlite 否决——数据形态全为主键点查）；持久状态整快照原子写 + 写穿透（register/set_endpoints/request_paths/revoke/rotate_master_key）；一次性 auth key 消费 tombstone 落盘（重启/重载不复活）；损坏/不一致 → 拒绝启动（fail-closed）；`storage_path` 仅启动读取（None = 纯内存）
 5. **管理面形态**（前缀公告白名单配置方式，**REQ-038**）——**已定稿（2026-08-31，REQ-038 merged，CONTROL_PLANE §3.12）**：配置文件为唯一权威 + `CoordConfig`（加载即校验，fail-closed）+ 库 API 执行面分离（from_config/apply_config，函数调用生效）+ SIGHUP 重载增量应用；Web API 挂 P3（自研 ts2021 服务端/landscape-webserver 同批，REQ-040 边界自然满足）
-6. **运维基线**（P2，**REQ-039 部分合并 + REQ-044 挂账**）：日志治理已落地（2026-09-01，LOGGING 设计文档：daemon 走 tracing + RUST_LOG 级别 + stderr 委托 supervisor + 可选 --log-file 按天轮转 + 高频失败周期计数器摘要，教训 AO-04）；供应链（cargo audit 进 CI + 依赖最小化）与可复现构建拆出 REQ-044 挂账
+6. **运维基线**（P2，**REQ-039 部分合并 + REQ-044 挂账**）：日志治理已落地（2026-09-01，LOGGING 设计文档：daemon 走 tracing + RUST_LOG 级别 + stderr 委托 supervisor + 可选 --log-file 按天轮转 + 高频失败周期计数器摘要，教训 AO-04）；供应链审计（cargo audit 进 check.yml）已落地（2026-09-01）；依赖最小化与可复现构建推迟至 release 阶段（REQ-044 挂账）
 7. **配置解析要求**：配置中域名解析**缓存 + 指数退避**，禁止无背压循环解析——**已落地**（config.rs DnsCache，教训见 lessons/keys-config/KC-03）
 8. **WebUI 配置边界**（**REQ-040**）：关键配置只存服务端（coordinator 配置文件/DB），WebUI 不持有持久配置（教训见 lessons/admin-ops/AO-02）
 

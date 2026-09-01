@@ -5,6 +5,8 @@ use landscape_rill_core::control::session::{ClientSession, SessionState};
 use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead, MessageWrite, Writer};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -217,8 +219,7 @@ pub async fn client_tls_stream(
     ca_cert_pem: &[u8],
 ) -> Result<TlsStream<TcpStream>, Box<dyn std::error::Error>> {
     let mut roots = rustls::RootCertStore::empty();
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut std::io::Cursor::new(ca_cert_pem)).collect::<Result<_, _>>()?;
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(ca_cert_pem).collect::<Result<_, _>>()?;
     for cert in certs {
         roots.add(cert)?;
     }
@@ -237,9 +238,10 @@ pub async fn server_tls_stream(
     cert_pem: &[u8],
     key_pem: &[u8],
 ) -> Result<tokio_rustls::server::TlsStream<TcpStream>, Box<dyn std::error::Error>> {
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem)).collect::<Result<_, _>>()?;
-    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))?
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(cert_pem).collect::<Result<_, _>>()?;
+    let key = PrivateKeyDer::pem_slice_iter(key_pem)
+        .next()
+        .transpose()?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no key"))?;
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()

@@ -33,7 +33,6 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = [
     "tls12",
 ] }
 rustls-pki-types = "1.15.1"
-rustls-pemfile = "2.2.0"
 
 # --- Async runtime ---
 tokio = { version = "1.53.1", features = [

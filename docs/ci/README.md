@@ -8,12 +8,12 @@
 
 | workflow | 内容 | 触发 | required |
 |---|---|---|---|
-| `check.yml` | fmt / clippy(`-D warnings`) / `cargo test --workspace` / `ci/check-docs.sh` | PR + push | 是 |
+| `check.yml` | fmt / clippy(`-D warnings`) / `cargo test --workspace` / cargo audit / `ci/check-docs.sh` | PR + push | 是 |
 | `e2e-mesh.yml` | `e2e/run_e2e.sh` 双场景：direct（coord + node-a/b，IPv4+IPv6 ping）+ relay（a—b—c 线形经 b 中继，`MESH_E2E_SCENARIO=relay`） | PR + push main + workflow_dispatch | 否 |
 | `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
 
 - 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）
-- **不含 cargo audit**（REQ-039 未合并，届时并入 check.yml）
+- **含 cargo audit**（REQ-044 供应链审计部分落地；依赖最小化与可复现构建随 REQ-044 剩余部分推迟至 release 阶段）
 - e2e 不设 required（成本高，低频/手动路径）
 
 ## 2. check-docs.sh 检查规则

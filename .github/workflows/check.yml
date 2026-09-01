@@ -22,5 +22,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: unit tests
         run: cargo test --workspace
+      - name: cargo audit
+        run: cargo audit
       - name: docs consistency
         run: ./docs/ci/check-docs.sh
