@@ -140,6 +140,13 @@ for link in $links; do
   done < <(grep -rlF "]($target)" "$DOCS" --include='*.md' 2>/dev/null)
 done
 
+# ---------- 7. error_id 唯一（ERROR_ID §3.1：ID 一经发布不可改写/复用） ----------
+ids="$(grep -rhoE '#\[error_id\([^)]*"[^"]+"[^)]*\)' "$ROOT"/rill-core/src "$ROOT"/rill-coord/src "$ROOT"/rill-mesh/src "$ROOT"/rill-node/src --include='*.rs' 2>/dev/null | grep -v 'crate_path' | grep -oE '"[^"]+"' | tr -d '"' | sort)"
+dup="$(printf '%s\n' "$ids" | uniq -d)"
+if [ -n "$dup" ]; then
+  error "error_id 重复（i18n 键冲突）：$(printf '%s' "$dup" | tr '\n' ' ')"
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "check-docs.sh: 全部通过"
 fi
