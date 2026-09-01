@@ -52,22 +52,25 @@
 
 - 关联 REQ：REQ-039
 - 测试层：CLI + docker e2e
-- 状态：`待补充`
+- 状态：`已覆盖`
+- 证据：rilld/src/logging.rs、e2e/mesh/log/docker-compose.yaml、e2e/run_e2e.sh
 - 说明：优先级 CLI > env > 默认——`--log-level debug` 覆盖 `RUST_LOG=error`（debug 明细出现）；仅 `RUST_LOG=error` 时 info 级（`registered:`）不出；默认 `info` 时 `endpoint report`（debug）不出
 
 ## LOG-02 高频事件周期摘要
 
 - 关联 REQ：REQ-039
 - 测试层：单测 + 集成
-- 状态：`待补充`
-- 说明：RateCounter tick/poll 周期语义（ril-core/src/rate.rs 单测）；丢帧收口计数 per-peer/全局桶归因、伪造 node_id 不落 per-peer（ril-mesh/src/data.rs）；摘要输出 ≤1 条/s、0 不输出
+- 状态：`已覆盖`
+- 证据：rill-core/src/rate.rs、rill-mesh/src/data.rs
+- 说明：RateCounter tick/poll 周期语义（rate.rs 单测）；丢帧收口计数 per-peer/全局桶归因、伪造 node_id 不落 per-peer（data.rs drop_stats_attribution_and_summary_filter）；摘要输出 ≤1 条/s、0 不输出
 
 ## LOG-03 文件轮转与容量上限
 
 - 关联 REQ：REQ-039
 - 测试层：CLI + docker e2e
-- 状态：`待补充`
-- 说明：`lrill run --log-file <path>` > `LRILL_LOG_FILE` > 默认无；生成按天轮转文件（`<prefix>.<YYYY-MM-DD>`）、保留最多 7 个、stderr 仍输出
+- 状态：`已覆盖`
+- 证据：rilld/src/logging.rs、e2e/mesh/log/docker-compose.yaml、e2e/run_e2e.sh
+- 说明：`lrill run --log-file <path>` > `LRILL_LOG_FILE` > 默认无；生成按天轮转文件（`<prefix>.<YYYY-MM-DD>`）、保留最多 7 个、stderr 仍输出（双写）
 
 #### 验收断言（文件尾部汇总）
 
@@ -77,6 +80,6 @@
 - [x] ADM-04：`lrk-<network>-<base32>` 生成/解析/校验正确；非 lrk 前缀与 network 不匹配被拒；生成不落日志
 - [x] ADM-05：reusable 带 expires_at 过期即 InvalidAuthKey；onetime 注册即弃；配置移除 + 重载 = 吊销闭环
 - [ ] ADM-06：`lrill --help` 展示 pubkey/run/authkey/up/down/status；up/down/status 走 systemctl；无 systemd 明确报错提示 `lrill run`；Dockerfile ENTRYPOINT = `lrill run`（部分未自动化）
-- [ ] LOG-01：RUST_LOG 级别生效性（debug 明细出现 / 默认 info 不出现）
-- [ ] LOG-02：RateCounter 周期语义（tick 计数 / poll 周期返回并清零 / 0 不输出）；丢帧 per-peer 归因 + 伪造 node_id 落全局桶；摘要 ≤1 条/s
-- [ ] LOG-03：--log-file 按天轮转 + 保留上限 + stderr 双写
+- [x] LOG-01：RUST_LOG 级别生效性（debug 明细出现 / 默认 info 不出现）；CLI > env > 默认优先级
+- [x] LOG-02：RateCounter 周期语义（tick 计数 / poll 周期返回并清零 / 0 不输出）；丢帧 per-peer 归因 + 伪造 node_id 落全局桶；摘要 ≤1 条/s
+- [x] LOG-03：--log-file 按天轮转 + 保留上限 + stderr 双写

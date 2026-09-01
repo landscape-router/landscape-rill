@@ -15,11 +15,14 @@ hex() { openssl rand -hex 32; }
 # 幂等前提：启动前必清理
 "$E2E_DIR/cleanup.sh"
 
-# 场景选择：relay 用线形拓扑（b 双网卡）；persist 用四节点拓扑（coord 持久化，REQ-037）
+# 场景选择：relay 用线形拓扑（b 双网卡）；persist 用四节点拓扑（coord 持久化，REQ-037）；
+# log 用日志验收拓扑（同 direct，节点日志启动参数不同，LOGGING §2/§4）
 if [ "$SCENARIO" = "relay" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/relay/docker-compose.yaml"
 elif [ "$SCENARIO" = "persist" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/persist/docker-compose.yaml"
+elif [ "$SCENARIO" = "log" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/log/docker-compose.yaml"
 fi
 
 echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"

@@ -31,3 +31,8 @@ jobs:
           MESH_E2E_DNS: 1.1.1.1
           MESH_E2E_SCENARIO: persist
         run: ./e2e/run_e2e.sh
+      - name: mesh e2e (log)
+        env:
+          MESH_E2E_DNS: 1.1.1.1
+          MESH_E2E_SCENARIO: log
+        run: ./e2e/run_e2e.sh

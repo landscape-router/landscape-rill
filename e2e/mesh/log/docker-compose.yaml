@@ -1,0 +1,64 @@
+# mesh e2e log 场景（LOGGING §2/§4 验收）：日志级别/文件配置优先级
+# 拓扑与 direct 相同（coord + node-a + node-b），仅节点日志启动参数不同：
+#   node-a：--log-level debug --log-file /tmp/lrill（且 RUST_LOG=error）→ CLI 覆盖 env + 文件输出
+#   node-b：RUST_LOG=error（无 CLI）→ info 级被滤（registered: 不出）
+# 配置复用 setup.sh 生成的 coord.json / node-a.json / node-b.json（direct 同源）
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    environment:
+      RUST_LOG: "error"
+    command: ["--log-level", "debug", "--log-file", "/tmp/lrill"]
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    environment:
+      RUST_LOG: "error"
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24
