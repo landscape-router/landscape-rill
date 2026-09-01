@@ -517,6 +517,63 @@ mod tests {
         assert_eq!(snap[0].endpoints, vec!["203.0.113.1:41641"]);
     }
 
+    /// CTL-10（REQ-008）：白名单内公告并入 netmap；白名单外/过短前缀 → RouteNotAllowed（不部分采纳）
+    #[test]
+    fn announce_routes_enter_netmap_and_whitelist_gates() {
+        let ak = lrk(86_400);
+        let mut c = Coordinator::new([0x77; 32], [0x5a; 32]);
+        c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        c.set_announce_whitelist(vec![
+            Prefix::parse("10.0.0.0/8").unwrap(),
+            Prefix::parse("fd00::/8").unwrap(),
+        ]);
+        // 白名单内公告 → 注册成功 + 进入 netmap
+        let id = c
+            .register(
+                &ak,
+                &pubkey(1),
+                0x01,
+                vec!["10.42.0.0/24".into(), "fd00:2::/64".into()],
+            )
+            .unwrap()
+            .node_id;
+        let snap = c.netmap_snapshot();
+        assert_eq!(
+            snap.iter().find(|n| n.node_id == id).unwrap().routes,
+            vec!["10.42.0.0/24", "fd00:2::/64"]
+        );
+        // 白名单外公告 → 整批拒绝（不部分采纳）
+        let err = c.register(
+            &ak,
+            &pubkey(2),
+            0x01,
+            vec!["10.42.0.0/24".into(), "172.16.0.0/12".into()],
+        );
+        assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
+        // 过短前缀（IPv4 < /8）→ 拒绝
+        let err = c.register(&ak, &pubkey(3), 0x01, vec!["10.0.0.0/7".into()]);
+        assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
+        // 空白名单 = fail-closed（拒绝一切公告）
+        let mut c2 = Coordinator::new([0x77; 32], [0x5a; 32]);
+        c2.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        let err = c2.register(&ak, &pubkey(4), 0x01, vec!["10.42.0.0/24".into()]);
+        assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
+    }
+
+    /// SEC-28（REQ-020）：acl 能力位 v1 恒 false——注册/转发不做裁决，位原样透传（v1 恒放行）
+    #[test]
+    fn capability_acl_bit_reserved_v1() {
+        let (mut c, ak) = setup();
+        // 保留位 0x40（acl，v2 预留）：coordinator 不解释、不占用，netmap 原样带出
+        let id = c.register(&ak, &pubkey(7), 0x40, vec![]).unwrap().node_id;
+        let snap = c.netmap_snapshot();
+        assert_eq!(
+            snap.iter().find(|n| n.node_id == id).unwrap().capabilities & 0x40,
+            0x40
+        );
+        // 策略检查点恒放行断言在 rill-core/src/route.rs（policy_checkpoint_allow_all_v1）
+    }
+
     // ==================== 持久化（REQ-037） ====================
 
     #[test]
