@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$E2E_DIR/.." && pwd)"
 BUILD_DIR="$E2E_DIR/build"
 SCENARIO="${MESH_E2E_SCENARIO:-direct}"
 COMPOSE="docker compose -f $E2E_DIR/mesh/direct/docker-compose.yaml"
-OVERLAY="$ROOT_DIR/target/release/lrill"
+OVERLAY="$BUILD_DIR/lrill"
 
 hex() { openssl rand -hex 32; }
 
@@ -65,8 +65,17 @@ NODE_C_KEY=$(hex)
 NODE_D_KEY=$(hex)
 
 echo "==> 3/6 编译二进制"
-"$ROOT_DIR/scripts/build.sh"
-cp "$ROOT_DIR/target/release/lrill" "$BUILD_DIR/lrill"
+if [ "${E2E_SKIP_BUILD:-0}" = "1" ]; then
+  # CI 复用 build job 产物（matrix 各 job 不重复编译）；.cache 不被开头 cleanup 清掉
+  [ -f "$E2E_DIR/.cache/lrill" ] || {
+    echo "FAIL: E2E_SKIP_BUILD=1 但 e2e/.cache/lrill 不存在" >&2
+    exit 1
+  }
+  cp "$E2E_DIR/.cache/lrill" "$BUILD_DIR/lrill"
+else
+  "$ROOT_DIR/scripts/build.sh"
+  cp "$ROOT_DIR/target/release/lrill" "$BUILD_DIR/lrill"
+fi
 COORD_PUBKEY=$("$OVERLAY" pubkey "$SIGNING_SEED")
 
 echo "==> 4/6 生成配置"

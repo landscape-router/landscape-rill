@@ -14,5 +14,6 @@ for f in "$E2E_DIR"/mesh/*/docker-compose.yaml; do
 done
 
 # 构建产物（CA/密钥/证书/二进制拷贝）随配置一起清，保证 setup 幂等重建
+# 注意：不清理 .cache/——CI 中 build job artifact 落地目录，setup 开头 cleanup 必须先保留它
 rm -rf "$E2E_DIR/build"
 echo "==> cleanup: 容器/网络/build 已清理"

@@ -1,7 +1,8 @@
 # mesh docker e2e：direct（coord + node-a/node-b，IPv4 + IPv6 ping）+ relay（a—b—c 线形，经 b 中继）
 # + persist（coord 持久化重启恢复，REQ-037）+ log（日志治理，REQ-039）+ reload（SIGHUP 重载，REQ-038）
-# build job 编译一次 → 编译 cache（~/.cargo + target）→ matrix 场景 job 恢复 cache 后 cargo 秒级命中，
-# 各 job 不再重复全量编译。PR 也触发但不设 required；场景目录约定见 docs/ci/README.md §1
+# build job 编译一次：编译 cache（~/.cargo + target，内容键，失效时机确定）加速增量编译 →
+# release 二进制进 artifact → matrix 场景 job 下载二进制（E2E_SKIP_BUILD=1）不再编译。
+# PR 也触发但不设 required；场景目录约定见 docs/ci/README.md §1
 name: e2e-mesh
 
 on:
@@ -16,24 +17,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Restore cargo cache (previous run)
+      - name: rustc version
+        id: rustc
+        run: echo "version=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+      # 编译 cache 内容键（失效时机确定，无回退）：Cargo.lock 变更或 rustc 版本变更 → 失效；
+      # 源码变更不失效（cargo 指纹保证增量重编正确性）；同键已存在时 save 为 no-op
+      - name: Restore cargo cache
         uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo
             target
-          key: cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            cargo-${{ hashFiles('**/Cargo.lock') }}-
+          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
       - name: release build
         run: cargo build --release
-      - name: Save cargo cache (this run)
+      - name: Save cargo cache
         uses: actions/cache/save@v4
         with:
           path: |
             ~/.cargo
             target
-          key: cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lrill
+          path: target/release/lrill
+          retention-days: 1
 
   mesh:
     needs: build
@@ -44,17 +53,15 @@ jobs:
         scenario: [direct, relay, persist, log, reload]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Restore cargo cache (build job)
-        uses: actions/cache/restore@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+          name: lrill
+          # 注意：setup.sh 开头 cleanup 会清 build/，产物须放 .cache/（cleanup 不碰）
+          path: e2e/.cache
       - name: mesh e2e (${{ matrix.scenario }})
         env:
           # runner 的 /etc/resolv.conf 仅 systemd-resolved stub，容器内不可达，须显式公共 DNS
           MESH_E2E_DNS: 1.1.1.1
           MESH_E2E_SCENARIO: ${{ matrix.scenario }}
+          E2E_SKIP_BUILD: "1"
         run: ./e2e/run_e2e.sh
