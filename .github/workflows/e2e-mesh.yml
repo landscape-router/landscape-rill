@@ -1,5 +1,6 @@
 # mesh docker e2e：direct（coord + node-a/node-b，IPv4 + IPv6 ping）+ relay（a—b—c 线形，经 b 中继）
 # + persist（coord 持久化重启恢复，REQ-037）+ log（日志治理，REQ-039）+ reload（SIGHUP 重载，REQ-038）
+# matrix 并行（每场景一 job，fail-fast=false 互不牵连）；公共仓库分钟不限量，隔离优先。
 # PR 也触发但不设 required（低频成本换 mesh 改动提前断裂发现）；场景目录约定见 docs/ci/README.md §1
 name: e2e-mesh
 
@@ -12,32 +13,17 @@ on:
 jobs:
   mesh:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [direct, relay, persist, log, reload]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: mesh e2e (direct)
+      - name: mesh e2e (${{ matrix.scenario }})
         env:
           # runner 的 /etc/resolv.conf 仅 systemd-resolved stub，容器内不可达，须显式公共 DNS
           MESH_E2E_DNS: 1.1.1.1
-        run: ./e2e/run_e2e.sh
-      - name: mesh e2e (relay)
-        env:
-          MESH_E2E_DNS: 1.1.1.1
-          MESH_E2E_SCENARIO: relay
-        run: ./e2e/run_e2e.sh
-      - name: mesh e2e (persist)
-        env:
-          MESH_E2E_DNS: 1.1.1.1
-          MESH_E2E_SCENARIO: persist
-        run: ./e2e/run_e2e.sh
-      - name: mesh e2e (log)
-        env:
-          MESH_E2E_DNS: 1.1.1.1
-          MESH_E2E_SCENARIO: log
-        run: ./e2e/run_e2e.sh
-      - name: mesh e2e (reload)
-        env:
-          MESH_E2E_DNS: 1.1.1.1
-          MESH_E2E_SCENARIO: reload
+          MESH_E2E_SCENARIO: ${{ matrix.scenario }}
         run: ./e2e/run_e2e.sh
