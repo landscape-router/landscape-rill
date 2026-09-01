@@ -92,6 +92,14 @@
 - 证据：rill-node/src/runtime/
 - 说明：TLS 注册→netmap→keydist→端点上报→心跳收敛→懒握手→加密帧双向；数据面心跳 3 次 miss 拆会话
 
+## FRM-12 帧格式 golden vectors 与超长帧丢弃
+
+- 关联 REQ：REQ-053
+- 测试层：单测
+- 状态：`已覆盖`
+- 证据：rill-core/src/frame/、rill-mesh/src/data/tests.rs
+- 说明：encode/decode/auth_input 与规范逐字节绑定（对称漂移不可能无声通过）；超过接收上限的报文显式丢弃并计数，后续帧不受影响
+
 ## 验收断言
 
 - [x] FRM-01：帧头 roundtrip 与固定偏移断言成立
@@ -105,3 +113,4 @@
 - [x] FRM-09：转发路径丢弃原因显式化，ttl 递减不重签
 - [x] FRM-10：IPv4 + IPv6 全链路 0% 丢包
 - [x] FRM-11：注册→握手→加密帧全链路主机闭环
+- [x] FRM-12：golden vectors 与规范逐字节一致；超长帧丢弃计数、后续帧不受影响
