@@ -25,6 +25,23 @@ pub const BROADCAST_NODE_ID: u32 = 0xFFFF_FFFF;
 /// path_id = 0 = 默认路径 = 现有 key_dst 语义（v1 兼容回退）
 pub const PATH_ID_DEFAULT: u64 = 0;
 
+/// 帧头字段偏移（FRAME_HEADER §2）。encode/decode/auth_input/frame_payload/
+/// 转发 TTL 递减共用，golden vectors 逐字节钉死绝对布局。
+pub mod off {
+    pub const VERSION: usize = 0;
+    pub const PACKET_TYPE: usize = 1;
+    pub const FLAGS: usize = 2;
+    pub const TTL: usize = 3;
+    pub const TO_NODE: usize = 4;
+    pub const FROM_NODE: usize = 8;
+    pub const SEQ: usize = 12;
+    pub const LEN: usize = 16;
+    /// v2 专属：path_id 起始（v1 此处是 route_mac）
+    pub const PATH_ID_V2: usize = 18;
+    pub const ROUTE_MAC_V1: usize = 18;
+    pub const ROUTE_MAC_V2: usize = 26;
+}
+
 pub mod packet_type {
     pub const UNICAST: u8 = 0x01;
     pub const HANDSHAKE: u8 = 0x02;
@@ -77,19 +94,19 @@ pub fn header_len(version: u8) -> usize {
 impl MeshFrameHeader {
     pub fn encode(&self, out: &mut [u8]) {
         assert!(out.len() >= header_len(self.version));
-        out[0] = self.version;
-        out[1] = self.packet_type;
-        out[2] = self.flags;
-        out[3] = self.ttl;
-        out[4..8].copy_from_slice(&self.to_node_id.to_be_bytes());
-        out[8..12].copy_from_slice(&self.from_node_id.to_be_bytes());
-        out[12..16].copy_from_slice(&self.seq.to_be_bytes());
-        out[16..18].copy_from_slice(&self.len.to_be_bytes());
+        out[off::VERSION] = self.version;
+        out[off::PACKET_TYPE] = self.packet_type;
+        out[off::FLAGS] = self.flags;
+        out[off::TTL] = self.ttl;
+        out[off::TO_NODE..off::FROM_NODE].copy_from_slice(&self.to_node_id.to_be_bytes());
+        out[off::FROM_NODE..off::SEQ].copy_from_slice(&self.from_node_id.to_be_bytes());
+        out[off::SEQ..off::LEN].copy_from_slice(&self.seq.to_be_bytes());
+        out[off::LEN..off::PATH_ID_V2].copy_from_slice(&self.len.to_be_bytes());
         if self.version == VERSION2 {
-            out[18..26].copy_from_slice(&self.path_id.to_be_bytes());
-            out[26..42].copy_from_slice(&self.route_mac);
+            out[off::PATH_ID_V2..off::ROUTE_MAC_V2].copy_from_slice(&self.path_id.to_be_bytes());
+            out[off::ROUTE_MAC_V2..HEADER_LEN_V2].copy_from_slice(&self.route_mac);
         } else {
-            out[18..34].copy_from_slice(&self.route_mac);
+            out[off::ROUTE_MAC_V1..HEADER_LEN].copy_from_slice(&self.route_mac);
         }
     }
 
@@ -102,25 +119,26 @@ impl MeshFrameHeader {
         if buf.len() < hlen {
             return Err(DecodeError::Truncated);
         }
-        let to_node_id = u32::from_be_bytes(buf[4..8].try_into().unwrap());
-        let from_node_id = u32::from_be_bytes(buf[8..12].try_into().unwrap());
-        let seq = u32::from_be_bytes(buf[12..16].try_into().unwrap());
-        let len = u16::from_be_bytes(buf[16..18].try_into().unwrap());
+        let to_node_id = u32::from_be_bytes(buf[off::TO_NODE..off::FROM_NODE].try_into().unwrap());
+        let from_node_id = u32::from_be_bytes(buf[off::FROM_NODE..off::SEQ].try_into().unwrap());
+        let seq = u32::from_be_bytes(buf[off::SEQ..off::LEN].try_into().unwrap());
+        let len = u16::from_be_bytes(buf[off::LEN..off::PATH_ID_V2].try_into().unwrap());
         let (path_id, route_mac) = if version == VERSION2 {
-            let path_id = u64::from_be_bytes(buf[18..26].try_into().unwrap());
+            let path_id =
+                u64::from_be_bytes(buf[off::PATH_ID_V2..off::ROUTE_MAC_V2].try_into().unwrap());
             let mut rm = [0u8; ROUTE_MAC_LEN];
-            rm.copy_from_slice(&buf[26..42]);
+            rm.copy_from_slice(&buf[off::ROUTE_MAC_V2..HEADER_LEN_V2]);
             (path_id, rm)
         } else {
             let mut rm = [0u8; ROUTE_MAC_LEN];
-            rm.copy_from_slice(&buf[18..34]);
+            rm.copy_from_slice(&buf[off::ROUTE_MAC_V1..HEADER_LEN]);
             (PATH_ID_DEFAULT, rm)
         };
         Ok(Self {
             version,
-            packet_type: buf[1],
-            flags: buf[2],
-            ttl: buf[3],
+            packet_type: buf[off::PACKET_TYPE],
+            flags: buf[off::FLAGS],
+            ttl: buf[off::TTL],
             to_node_id,
             from_node_id,
             seq,
@@ -134,16 +152,16 @@ impl MeshFrameHeader {
     /// route_mac 与 AEAD AAD 共用（FRAME_HEADER §2.2/§3.1）。
     pub fn auth_input(&self) -> ([u8; AUTH_INPUT_LEN_V2], usize) {
         let mut out = [0u8; AUTH_INPUT_LEN_V2];
-        out[0] = self.version;
-        out[1] = self.packet_type;
-        out[2] = self.flags;
-        out[3] = 0;
-        out[4..8].copy_from_slice(&self.to_node_id.to_be_bytes());
-        out[8..12].copy_from_slice(&self.from_node_id.to_be_bytes());
-        out[12..16].copy_from_slice(&self.seq.to_be_bytes());
-        out[16..18].copy_from_slice(&self.len.to_be_bytes());
+        out[off::VERSION] = self.version;
+        out[off::PACKET_TYPE] = self.packet_type;
+        out[off::FLAGS] = self.flags;
+        out[off::TTL] = 0;
+        out[off::TO_NODE..off::FROM_NODE].copy_from_slice(&self.to_node_id.to_be_bytes());
+        out[off::FROM_NODE..off::SEQ].copy_from_slice(&self.from_node_id.to_be_bytes());
+        out[off::SEQ..off::LEN].copy_from_slice(&self.seq.to_be_bytes());
+        out[off::LEN..off::PATH_ID_V2].copy_from_slice(&self.len.to_be_bytes());
         if self.version == VERSION2 {
-            out[18..26].copy_from_slice(&self.path_id.to_be_bytes());
+            out[off::PATH_ID_V2..off::ROUTE_MAC_V2].copy_from_slice(&self.path_id.to_be_bytes());
             (out, AUTH_INPUT_LEN_V2)
         } else {
             (out, AUTH_INPUT_LEN)
@@ -195,11 +213,19 @@ pub fn frame_payload(frame: &[u8]) -> Option<&[u8]> {
     if frame.len() < hlen {
         return None;
     }
-    let len = u16::from_be_bytes(frame[16..18].try_into().unwrap()) as usize;
+    let len = u16::from_be_bytes(frame[off::LEN..off::PATH_ID_V2].try_into().unwrap()) as usize;
     if frame.len() < hlen + len {
         return None;
     }
     Some(&frame[hlen..hlen + len])
+}
+
+/// 转发路径原地 TTL 递减（FRAME_HEADER §4：ttl 不参与认证，转发不重签 route_mac）。
+/// 调用方保证 ttl ≥ 1（wrap 语义与原 `out[3] -= 1` 一致）。
+pub fn decrement_ttl(frame: &mut [u8]) {
+    if !frame.is_empty() {
+        frame[off::TTL] = frame[off::TTL].wrapping_sub(1);
+    }
 }
 
 pub fn open_frame(
@@ -522,5 +548,108 @@ mod tests {
         let (ai2, len2) = sample_v2_header().auth_input();
         assert_eq!(len2, AUTH_INPUT_LEN_V2);
         assert_eq!(&ai2[18..26], &sample_v2_header().path_id.to_be_bytes());
+    }
+
+    // ---- golden vectors（FRAME_HEADER §2 绝对布局钉死；对称漂移不可能无声通过）----
+
+    /// 手工按规范推定的期望字节：字段取互异值防偏移互换
+    fn golden_header_v1() -> MeshFrameHeader {
+        MeshFrameHeader {
+            version: VERSION,
+            packet_type: 0x03,
+            flags: 0xAB,
+            ttl: 0x2A,
+            to_node_id: 0x1122_3344,
+            from_node_id: 0x5566_7788,
+            seq: 0x99AA_BBC0,
+            len: 0xDDEE,
+            path_id: PATH_ID_DEFAULT,
+            route_mac: [0xA5; ROUTE_MAC_LEN],
+        }
+    }
+
+    /// v1 共享前缀 [0..18]（v2 相同，仅 version 字节不同）
+    const GOLDEN_PREFIX: [u8; 18] = [
+        0x01, 0x03, 0xAB, 0x2A, // version, packet_type, flags, ttl
+        0x11, 0x22, 0x33, 0x44, // to_node_id
+        0x55, 0x66, 0x77, 0x88, // from_node_id
+        0x99, 0xAA, 0xBB, 0xC0, // seq
+        0xDD, 0xEE, // len
+    ];
+
+    #[test]
+    fn golden_v1_header_bytes() {
+        let h = golden_header_v1();
+        let mut buf = [0u8; HEADER_LEN];
+        h.encode(&mut buf);
+        assert_eq!(&buf[..18], &GOLDEN_PREFIX);
+        assert_eq!(&buf[18..34], &[0xA5; ROUTE_MAC_LEN]);
+        assert_eq!(buf.len(), 34);
+        // decode 还原
+        let d = MeshFrameHeader::decode(&buf).unwrap();
+        assert_eq!(d, h);
+    }
+
+    #[test]
+    fn golden_v2_header_bytes() {
+        let h = MeshFrameHeader {
+            version: VERSION2,
+            path_id: 0x1234_5678_9ABC_DEF0,
+            route_mac: [0x5A; ROUTE_MAC_LEN],
+            ..golden_header_v1()
+        };
+        let mut buf = [0u8; HEADER_LEN_V2];
+        h.encode(&mut buf);
+        let mut prefix = GOLDEN_PREFIX;
+        prefix[0] = 0x02;
+        assert_eq!(&buf[..18], &prefix);
+        assert_eq!(&buf[18..26], &0x1234_5678_9ABC_DEF0u64.to_be_bytes());
+        assert_eq!(&buf[26..42], &[0x5A; ROUTE_MAC_LEN]);
+        assert_eq!(buf.len(), 42);
+        assert_eq!(MeshFrameHeader::decode(&buf).unwrap(), h);
+    }
+
+    #[test]
+    fn golden_auth_input_bytes() {
+        // auth_input = 帧头 [0..18]（ttl 置零）|| path_id（v2），route_mac 不参与
+        let h = golden_header_v1();
+        let (ai, len) = h.auth_input();
+        assert_eq!(len, AUTH_INPUT_LEN);
+        let mut expect = GOLDEN_PREFIX;
+        expect[3] = 0;
+        assert_eq!(&ai[..len], &expect);
+
+        let h2 = MeshFrameHeader {
+            version: VERSION2,
+            path_id: 0x1234_5678_9ABC_DEF0,
+            ..golden_header_v1()
+        };
+        let (ai2, len2) = h2.auth_input();
+        assert_eq!(len2, AUTH_INPUT_LEN_V2);
+        let mut expect2 = [0u8; AUTH_INPUT_LEN_V2];
+        expect2[..18].copy_from_slice(&expect);
+        expect2[0] = 0x02;
+        expect2[18..26].copy_from_slice(&0x1234_5678_9ABC_DEF0u64.to_be_bytes());
+        assert_eq!(&ai2[..len2], &expect2);
+    }
+
+    #[test]
+    fn golden_len_offset_in_frame_payload() {
+        // frame_payload 从 off::LEN(16..18) 取长度：len=0xDDEE 的帧载荷不足应拒绝
+        let h = golden_header_v1();
+        let mut buf = [0u8; HEADER_LEN + 4];
+        h.encode(&mut buf);
+        assert_eq!(frame_payload(&buf), None);
+        buf[16..18].copy_from_slice(&4u16.to_be_bytes());
+        assert_eq!(frame_payload(&buf), Some(&buf[34..38][..]));
+    }
+
+    #[test]
+    fn decrement_ttl_wraps_and_ignores_empty() {
+        let mut frame = [0x01u8, 0x03, 0xAB, 0x2A];
+        decrement_ttl(&mut frame);
+        assert_eq!(frame[3], 0x29);
+        let mut empty: [u8; 0] = [];
+        decrement_ttl(&mut empty);
     }
 }

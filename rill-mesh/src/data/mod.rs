@@ -1,6 +1,6 @@
 use landscape_rill_core::frame::{
-    build_frame, build_handshake_frame, frame_payload, open_frame, packet_type, MeshFrameHeader,
-    ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, VERSION, VERSION2,
+    build_frame, build_handshake_frame, decrement_ttl, frame_payload, open_frame, packet_type,
+    MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, VERSION, VERSION2,
 };
 use landscape_rill_core::handshake::{
     HandshakeContext, HandshakeError, HandshakeInitiator, HandshakeResponder, Session,

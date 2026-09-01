@@ -124,7 +124,7 @@ impl MeshData {
         let mut forwarded = Vec::new();
         if self.flood_bucket.take() {
             let mut out = frame.to_vec();
-            out[3] -= 1;
+            decrement_ttl(&mut out);
             for (id, addrs) in &self.endpoint_table {
                 if *id == self.self_node_id || *id == header.from_node_id {
                     continue;
