@@ -144,9 +144,8 @@ pub struct Node {
 
 impl Node {
     pub async fn new(cfg: Config, opts: NodeOptions) -> Result<Self, Box<dyn std::error::Error>> {
-        cfg.validate().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{:?}", e))
-        })?;
+        cfg.validate()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let mesh = MeshData::bind("0.0.0.0:0".parse()?, 0).await?;
         // 枚举本机非 loopback、非 tun 接口地址（供 EndpointReport 通告；多宿主节点
         // 通告全部端点，coordinator 并入 netmap，对端按可达性选用）

@@ -17,9 +17,13 @@ pub struct PacketInfo {
     pub total_len: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
 pub enum PacketError {
+    #[error("not an IP packet")]
+    #[error_id("node.packet.not_ip")]
     NotIp,
+    #[error("truncated IP packet")]
+    #[error_id("node.packet.truncated")]
     Truncated,
 }
 
