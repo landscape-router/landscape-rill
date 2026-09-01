@@ -108,7 +108,7 @@ rm -f "$tmp"
 
 # ---------- 5. src/ 注释短名契约 ----------
 # 匹配 `<短名> §x.y`，短名须注册，章节标题须存在于目标文件
-cmds="$(grep -rhoE '\b(ARCHITECTURE|FRAME_HEADER|CONTROL_PLANE|CONNECTIVITY|TS2021_LEG|DN42_LEG|ROUTE_ENGINE|LOGGING) §[0-9]+(\.[0-9]+)?' "$ROOT"/rill-core/src "$ROOT"/rill-coord/src "$ROOT"/rill-mesh/src "$ROOT"/rill-node/src "$ROOT"/rilld/src --include='*.rs' 2>/dev/null | sort -u)"
+cmds="$(grep -rhoE '\b(ARCHITECTURE|FRAME_HEADER|CONTROL_PLANE|CONNECTIVITY|TS2021_LEG|DN42_LEG|ROUTE_ENGINE|LOGGING|ERROR_ID) §[0-9]+(\.[0-9]+)?' "$ROOT"/rill-core/src "$ROOT"/rill-coord/src "$ROOT"/rill-mesh/src "$ROOT"/rill-node/src "$ROOT"/rilld/src --include='*.rs' 2>/dev/null | sort -u)"
 while IFS= read -r c; do
   [ -n "$c" ] || continue
   short="$(printf '%s' "$c" | awk '{print $1}')"

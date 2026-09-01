@@ -15,6 +15,7 @@
 | legs | [legs/dn42.md](./legs/dn42.md) | `DN42_LEG` | dn42 接入、eBGP-lite、import/export policy |
 | routing | [routing/route-engine.md](./routing/route-engine.md) | `ROUTE_ENGINE` | 路由策略引擎、LPM、fallback、MTU、DNS 分类 |
 | runtime | [runtime/logging.md](./runtime/logging.md) | `LOGGING` | daemon 日志：框架、级别、格式、存储、限速、红线 |
+| runtime | [runtime/errors.md](./runtime/errors.md) | `ERROR_ID` | 错误处理：thiserror 规范、稳定错误 ID、序列化信封 |
 
 ## 2. 短名注册（代码注释引用契约）
 
@@ -30,6 +31,7 @@
 | `DN42_LEG` | [legs/dn42.md](./legs/dn42.md) |
 | `ROUTE_ENGINE` | [routing/route-engine.md](./routing/route-engine.md) |
 | `LOGGING` | [runtime/logging.md](./runtime/logging.md) |
+| `ERROR_ID` | [runtime/errors.md](./runtime/errors.md) |
 
 引用规范：
 - 只在**协议/安全契约绑定处**引用（常量、线格式、加密语义、安全边界），纯实现逻辑不引
@@ -44,9 +46,11 @@ landscape-rill/                  # cargo workspace（virtual）
 │   ├── proto/control.proto      # protobuf schema（CONTROL_PLANE §3 字段级）
 │   ├── build.rs                 # pb-rs 生成（proto/ → OUT_DIR wire 模块，不入库）
 │   └── src/lib.rs               # pub mod wire（include! OUT_DIR/mod.rs）
+├── rill-macro/                  # derive 宏（发布名 landscape-rill-macro）：ErrorId（ERROR_ID §3）
 ├── rill-core/                   # ★ I/O 无关纯逻辑（见 §4 边界），发布名 landscape-rill-core
 │   └── src/
 │       ├── crypto.rs            # HKDF-SHA256 / X25519 / ChaCha20-Poly1305 / route_mac
+│       ├── error.rs             # ErrorId trait + ErrorEnvelope（ERROR_ID）
 │       ├── frame.rs             # 34B 帧头编解码 + AEAD（FRAME_HEADER）
 │       ├── handshake.rs         # Noise_XX 握手状态机与会话（FRAME_HEADER §2.4）
 │       ├── route.rs             # LPM 路由表 + fallback（ROUTE_ENGINE）
