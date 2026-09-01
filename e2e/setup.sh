@@ -71,7 +71,9 @@ if [ "${E2E_SKIP_BUILD:-0}" = "1" ]; then
     echo "FAIL: E2E_SKIP_BUILD=1 但 e2e/.cache/lrill 不存在" >&2
     exit 1
   }
+  # actions/download-artifact 解包丢失可执行位，须恢复
   cp "$E2E_DIR/.cache/lrill" "$BUILD_DIR/lrill"
+  chmod +x "$BUILD_DIR/lrill"
 else
   "$ROOT_DIR/scripts/build.sh"
   cp "$ROOT_DIR/target/release/lrill" "$BUILD_DIR/lrill"
