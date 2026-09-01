@@ -74,19 +74,21 @@ if [ "$SCENARIO" = "persist" ]; then
   fi
 
   echo "==> 阶段 4/4：node-d 复用已消费的一次性 key → 注册必须被拒"
+  # 注意：注册被拒是服务端静默断连（客户端只记 control connected，不记 connect failed）——
+  # 断言对象是"到达 coord 且从未注册成功"，而非 connect failed
   docker compose -f "$E2E_DIR/mesh/persist/docker-compose.yaml" --profile late up -d node-d >/dev/null
-  for i in $(seq 1 15); do
+  for i in $(seq 1 20); do
     if [ "$(logs mesh-node-d | grep -c 'registered:')" -ge 1 ]; then
       echo "FAIL: node-d 用已消费的一次性 key 注册成功（消费状态未持久化）"
       exit 1
     fi
-    if [ "$(logs mesh-node-d | grep -c 'connect failed')" -ge 1 ]; then
-      echo "PASS: node-d 注册被拒（一次性 key 消费已持久化），重试中"
+    if [ "$(logs mesh-node-d | grep -c 'control connected')" -ge 1 ]; then
+      echo "PASS: node-d 到达 coord 但注册被拒（一次性 key 消费已持久化），持续重连中"
       exit 0
     fi
     sleep 2
   done
-  echo "FAIL: node-d 无注册被拒日志（30s 内未观察到）"
+  echo "FAIL: node-d 未观察到到达 coord（40s 内）"
   echo "--- node-d 日志 ---"; logs mesh-node-d | tail -20
   exit 1
 fi

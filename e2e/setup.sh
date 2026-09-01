@@ -143,6 +143,11 @@ fi
 
 echo "==> 5/6 构建并启动"
 $COMPOSE build -q
+if [ "$SCENARIO" = "persist" ]; then
+  # compose build 默认跳过 profile 门控服务（persist 的 node-d）——须显式带 profile 构建，
+  # 否则 stage-4 的 up 会复用旧镜像（证书/二进制陈旧导致 BadSignature）
+  $COMPOSE --profile late build -q node-d
+fi
 $COMPOSE up -d --force-recreate
 
 echo "==> 6/6 等待注册 + 注入 mesh 路由/黑洞（场景: $SCENARIO）"

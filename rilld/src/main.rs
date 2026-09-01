@@ -200,7 +200,14 @@ async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error +
                 }
             }
             next = accept_next(&mut listener, &cert, &key) => {
-                let tls = next?;
+                // 单连接 TLS 错误不得杀死 coordinator（恶意/畸形握手 → 记日志继续监听）
+                let tls = match next {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[coord] accept failed: {e}");
+                        continue;
+                    }
+                };
                 let srv = server.clone();
                 tokio::spawn(async move {
                     let mut conn = ConnectionState::default();
