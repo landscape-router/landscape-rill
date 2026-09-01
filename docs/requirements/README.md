@@ -29,7 +29,6 @@ proposed（提出：日期 + 动机 + 验收草案）
 
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
-| [REQ-039](./REQ-039.md) | 需求 | 📌 proposed | P1 | 08-15 | — |
 | [REQ-046](./REQ-046-probe-mandatory-ratelimit.md) | 需求 | 📌 proposed | P1 | 09-01 | — |
 | [REQ-047](./REQ-047-control-plane-ratelimit.md) | 需求 | 📌 proposed | P1 | 09-01 | — |
 | [REQ-040](./REQ-040.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
@@ -72,6 +71,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-036](./REQ-036.md) | 需求 | ✅ merged | — | 08-15 | CONTROL_PLANE §3.12/§6 |
 | [REQ-037](./REQ-037.md) | 决策 | ✅ merged | — | 08-15 | CONTROL_PLANE §4.1 |
 | [REQ-038](./REQ-038.md) | 需求 | ✅ merged | — | 08-15 | CONTROL_PLANE §3.12 |
+| [REQ-039](./REQ-039.md) | 需求 | ✅ merged | — | 08-15 | LOGGING §1 |
 | [REQ-032](./REQ-032.md) | 需求 | ✅ merged | — | 08-16 | FRAME_HEADER §2.6/§3.1 |
 | [REQ-033](./REQ-033.md) | 需求 | ✅ merged | — | 08-16 | TS2021_LEG §6 |
 | [REQ-034](./REQ-034.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.11 / FRAME_HEADER §9 |
