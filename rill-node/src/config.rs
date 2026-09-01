@@ -18,7 +18,21 @@ pub struct Config {
     pub coord_signing_pubkey: [u8; 32],
     /// TLS 信任锚 CA 证书路径（内网部署形态；公网 PKI 留 webpki-roots）
     pub ca_cert_path: String,
+    /// coordinator UDP 回显目标（CONNECTIVITY §2，"host:port" 允许主机名）；
+    /// None = 按 coordinator_url 推导（coordinator 默认 TCP/UDP 同端口）
+    pub udp_echo_addr: Option<String>,
     pub coord: Option<CoordConfig>,
+}
+
+impl Config {
+    /// 从 coordinator_url 推导 UDP 回显目标 "host:port"（`https://host[:port]`，缺省 8443）
+    pub fn coord_echo_target(url: &str) -> String {
+        let rest = url.strip_prefix("https://").unwrap_or(url);
+        match rest.rsplit_once(':') {
+            Some((_, p)) if p.parse::<u16>().is_ok() => rest.to_string(),
+            _ => format!("{rest}:{DEFAULT_COORD_PORT}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +195,7 @@ mod tests {
             announce_routes: vec![],
             coord_signing_pubkey: [7; 32],
             ca_cert_path: "/etc/landscape/ca.pem".into(),
+            udp_echo_addr: None,
             coord: None,
         }
     }

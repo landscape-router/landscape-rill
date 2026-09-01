@@ -1,0 +1,108 @@
+# probe e2e 拓扑（CONNECTIVITY §2/§4/§5，CON-01/03/04/05/06 + SEC-26）：
+# coord + node-a(net1) + node-c(net2) + node-b/node-d 双网卡自愿 relay
+# a↔c 无直连 UDP 可达性（黑洞 /32），中继路径：b 或 d；断言挂靠 + b 停机后切 d
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      net1:
+        ipv4_address: 192.168.240.10
+      net2:
+        ipv4_address: 192.168.241.10
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      net1:
+        ipv4_address: 192.168.240.11
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      net1:
+        ipv4_address: 192.168.240.21
+      net2:
+        ipv4_address: 192.168.241.21
+
+  node-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-c.json:/etc/landscape/overlay.json
+    networks:
+      net2:
+        ipv4_address: 192.168.241.31
+
+  node-d:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-d
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-d.json:/etc/landscape/overlay.json
+    networks:
+      net1:
+        ipv4_address: 192.168.240.41
+      net2:
+        ipv4_address: 192.168.241.41
+
+networks:
+  net1:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24
+  net2:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.241.0/24

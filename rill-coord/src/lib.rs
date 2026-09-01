@@ -5,6 +5,7 @@ pub mod config;
 pub mod coordinator;
 pub mod directory;
 pub mod domain;
+pub mod echo;
 pub mod keys;
 pub mod liveness;
 pub mod path_service;

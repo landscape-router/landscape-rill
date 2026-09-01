@@ -5,6 +5,7 @@ edition.workspace = true
 description = "landscape mesh protocol primitives: frame, handshake, route, control-plane registry/session"
 
 [dependencies]
+rand.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 hkdf.workspace = true

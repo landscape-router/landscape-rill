@@ -31,6 +31,10 @@ pub struct CoordConfig {
     /// 仅启动时读取，SIGHUP 重载不更换存储文件。
     #[serde(default)]
     pub storage_path: Option<String>,
+    /// UDP 数据面监听地址（CONNECTIVITY §2：coordinator 回显 + relay RTT 探测）。
+    /// None = 与 listen_addr 同地址（TCP 8443 ↔ UDP 8443 协议区分）。
+    #[serde(default)]
+    pub udp_listen_addr: Option<String>,
     /// 隔离网络列表（CONTROL_PLANE §1.5）：每网络独立主密钥 / auth key 空间 / 白名单
     #[serde(default)]
     pub networks: Vec<NetworkConfig>,
@@ -143,6 +147,10 @@ impl CoordConfig {
             if p.trim().is_empty() {
                 return Err(ConfigError("storage_path is empty".into()));
             }
+        }
+        if let Some(addr) = &self.udp_listen_addr {
+            addr.parse::<SocketAddr>()
+                .map_err(|_| ConfigError(format!("invalid udp_listen_addr: {addr}")))?;
         }
         Ok(())
     }

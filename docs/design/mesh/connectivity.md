@@ -2,7 +2,7 @@
 
 > 端点发现、直连验证、中继兜底——mesh 接入的"DERP 等价物"专题。
 > 34B 帧头的转发语义见 FRAME_HEADER；端点传播进 netmap 见 CONTROL_PLANE §3.2。
-> 版本：v0.2（2026-08-31 修订：术语统一——节点类型 / "接入"叫法）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028
+> 版本：v0.3（2026-09-01 修订：probe 体系实现落档——§2/§4/§5/§6 全链路）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028
 
 ## 1. 问题与目标
 
@@ -109,4 +109,5 @@ probe = magic(4B) + 类型(1B: 请求/响应) + from_node_id(4B) + to_node_id(4B
 | 日期 | 决策 |
 |---|---|
 | 2026-08-15 | 端点探测 = coordinator UDP 回显（STUN 式，零额外组件）；直连 v1 = 简单互探（专用 probe 小包）+ 中继兜底，不做对称 NAT 打洞；中继 = 三层模型（coordinator 兜底 + 自愿节点 opt-in 扩容 + 独立 relay 可选），全部零协议改动 |
+| 2026-09-01 | **probe 体系实现落档（CON-01/03/04/05/06/08 + SEC-26）**：①**probe 线格式**（rill-core/src/probe.rs）：`magic("LPRB") + type(PING/PONG) + from_node_id + to_node_id + nonce`，`to_node_id=0` = coordinator 回显标记；PONG 可携带载荷（echo 的 seen 地址 "ip:port"）；解析 fail-closed（CN-02）；②**端口分派**（data.rs handle_incoming）：首字节 `0x01..=0x0F` → 34B 帧，magic 匹配 → probe，都不匹配 → 丢弃；③**coordinator UDP 数据面**（rilld run_coord_udp，默认与 TCP 同端口）：echo（按源 IP 令牌桶 10/s 突发 20，SEC-26）+ relay RTT 排序（30s 周期向各网 relay 端点 PING 测 RTT → relay_list 排序随 netmap 下发 + PathService relay 顺序 = 挂靠优先级）；④**节点侧**（runtime pump_probes，30s 周期）：echo（结果并入 EndpointReport 重报）+ 对全部 peer 候选端点互探（PONG 匹配 → 端点活性恢复）+ relay 探测（确认 → `apply_relay_endpoints`：v1 帧端点表 = 直连 ++ 确认中继，miss 轮转回落）；⑤**CON-06 故障切换修复**：心跳 miss 同时落到**实际选用路径**（`last_sent_path`——只 miss 主路径时在用中继死亡会卡死）+ 全候选 miss 耗尽时按 miss 升序选（最不坏优先，收包恢复闭环）；⑥echo 目标 = coordinator_url 推导（host:port 允许主机名，每周期 DNS 解析），可用 `udp_echo_addr` 显式覆盖 |
 | 2026-08-15 | **数据面转发路径实现（legs/mesh/data.rs 落档，FRAME_HEADER §4 语义落地）**：`MeshData` = UDP socket + key_dst 表（KeyDist 应用）+ 端点表（netmap endpoints 应用）；`relay()` 顺序 = 帧头解析 → version 校验 → route_mac 校验（key_dst 按 to_node_id）→ 目标为自己则交付上层 / ttl==0 丢弃 / 查端点表 → **ttl 递减后直接转发，不重签 route_mac**（§3.1 语义验证，测试断言转发后帧仍可校验）；丢弃原因显式化（BadVersion/BadRouteMac/TtlExpired/NoEndpoint/NoKeyDst/Short，fail-closed）；目的节点交付返回给上层（AEAD 解密属会话层，握手后接线）；**回环 UDP 集成测试**：A→relay→B 转发、ttl 递减、篡改/版本/短帧/无端点/无密钥丢弃、送达自身 |

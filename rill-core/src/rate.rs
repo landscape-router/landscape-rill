@@ -1,12 +1,46 @@
-//! 周期计数器（LOGGING §5）：事件计数 + 固定周期摘要输出
+//! 限速与周期计数（CONNECTIVITY §2.2/§5.1 / LOGGING §5）
 //!
-//! 语义：事件只计数不逐条输出；poll 每周期返回累计数（0 由调用方决定不打印），
-//! 输出率严格有界（每计数器每周期 ≤1 行）。与日志框架解耦，纯逻辑可单测。
+//! - [`TokenBucket`]：令牌桶限速（泛洪抑制、coordinator 回显按源地址限速）
+//! - [`RateCounter`]：事件计数 + 固定周期摘要输出（高频失败摘要，输出率严格有界）
 
 use std::time::{Duration, Instant};
 
 /// 周期摘要默认周期（LOGGING §5）：高频事件每周期最多 1 条摘要
 pub const RATE_SUMMARY_PERIOD: Duration = Duration::from_secs(1);
+
+/// 令牌桶（CONNECTIVITY §2.2 回显限速 / FRAME_HEADER §2.6 泛洪限速）
+#[derive(Debug)]
+pub struct TokenBucket {
+    capacity: u32,
+    rate_per_sec: f64,
+    tokens: f64,
+    last: Instant,
+}
+
+impl TokenBucket {
+    pub fn new(rate_per_sec: f64, capacity: u32) -> Self {
+        Self {
+            capacity,
+            rate_per_sec,
+            tokens: capacity as f64,
+            last: Instant::now(),
+        }
+    }
+
+    /// 尝试取一个令牌；桶空返回 false
+    pub fn take(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.capacity as f64);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// 事件计数 + 周期摘要
 #[derive(Debug, Clone)]

@@ -46,11 +46,10 @@
 ## SEC-26 反射放大（coordinator 回显）
 
 - 关联 REQ：REQ-017
-- 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：coordinator UDP 回显探测未实现（依赖 CON-01，probe 体系阶段），限速语义随之待验证
-- 说明：伪造源地址灌 probe → 按源地址限速生效；响应 ≈ 请求大小
+- 测试层：docker e2e + 单测
+- 状态：`已覆盖`
+- 证据：e2e/run_e2e.sh、rill-coord/src/echo.rs
+- 说明：伪造源地址灌 probe → 按源 IP 令牌桶限速生效（默认 10/s 突发 20；probe 场景宿主灌 200 包 → coord `echo rate-limited` 摘要）；响应 ≈ 请求大小（PONG 仅回显 seen 地址，放大因子 ~1:1）；单测 `limiter_allows_burst_then_blocks`/`echo_rejects_non_echo_or_garbage`
 
 ## SEC-27 联邦边界（v2 预置断言）
 
@@ -75,6 +74,6 @@
 - [x] SEC-23：跨网络 auth key 注册被拒（e2e ghost 网络 key + 配置层归域校验）
 - [x] SEC-24：跨网络身份绑定验签失败（集成：verify_binding + 跨网握手 prologue）
 - [x] SEC-25：跨网络白名单公告被拒（单测：白名单分域）
-- [ ] SEC-26：反射放大被限速收敛（probe 体系阶段）
+- [x] SEC-26：反射放大被限速收敛（probe 场景 rate-limited 摘要 + 单测）
 - [ ] SEC-27：普通节点不持有远端端点（v2）
 - [x] SEC-28：v1 断言——`acl` 位（0x40）恒 false（coordinator 不解释不占用）、策略检查点恒放行（route.rs）

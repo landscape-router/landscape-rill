@@ -109,6 +109,18 @@ pub enum LanOutcome {
     Dropped,
 }
 
+/// 挂靠中继条目（CONNECTIVITY §5）：端点 + 归属节点（netmap 端点匹配）+ 确认状态。
+/// confirmed = 节点侧 probe 确认可达（CON-04 挂靠）；v1 帧端点表追加为回退候选
+#[derive(Debug, Clone)]
+pub struct RelayEntry {
+    pub endpoint: SocketAddr,
+    pub node_id: Option<u32>,
+    pub confirmed: bool,
+}
+
+/// probe 周期（CONNECTIVITY §2：探测 30s + 网络变更触发；v1 仅周期）
+pub const PROBE_PERIOD: Duration = Duration::from_secs(30);
+
 pub struct Node {
     cfg: Config,
     opts: NodeOptions,
@@ -141,6 +153,17 @@ pub struct Node {
     rejected_stats: HashMap<u32, RateCounter>,
     /// 控制面连接失败计数（LOGGING §5：周期摘要替代逐条输出，退避逻辑不变）
     connect_failed: RateCounter,
+    /// coordinator UDP 回显目标（CONNECTIVITY §2）：(host, port)；host 为容器名/主机名
+    /// 时每周期经 DNS 解析（30s 节奏，缓存无必要）；None = 未配置（跳过 echo）
+    echo_target: Option<(String, u16)>,
+    /// 上次 probe 周期时刻（echo + 互探 + relay 探测，PROBE_PERIOD）
+    last_probe: Instant,
+    /// 挂靠中继（netmap relay_list 权威全量替换）
+    relays: Vec<RelayEntry>,
+    /// netmap 端点缓存（apply_relay_endpoints 用：direct ++ 确认 relay 追加）
+    peer_endpoints: HashMap<u32, Vec<SocketAddr>>,
+    /// echo 得到的 seen 地址（候选端点补充；变化时重发 EndpointReport）
+    echoed_endpoints: Vec<SocketAddr>,
 }
 
 impl Node {
@@ -156,6 +179,10 @@ impl Node {
             None => None,
         };
         let next_rekey = Instant::now() + opts.rekey_interval;
+        let echo_target = cfg.udp_echo_addr.as_deref().and_then(|s| {
+            let (host, port) = s.rsplit_once(':')?;
+            Some((host.to_string(), port.parse::<u16>().ok()?))
+        });
         Ok(Self {
             cfg,
             opts,
@@ -180,6 +207,11 @@ impl Node {
             recent_multicast_writes: HashMap::new(),
             rejected_stats: HashMap::new(),
             connect_failed: RateCounter::new(RATE_SUMMARY_PERIOD),
+            echo_target,
+            last_probe: Instant::now(),
+            relays: Vec::new(),
+            peer_endpoints: HashMap::new(),
+            echoed_endpoints: Vec::new(),
         })
     }
 
@@ -288,10 +320,76 @@ impl Node {
                 info!("[node] relayed frame to {}", to);
                 None
             }
+            IncomingEvent::ProbePing { from } => {
+                debug!("[node] probe ping from {}", from);
+                None
+            }
+            IncomingEvent::ProbePong {
+                from,
+                endpoint,
+                payload,
+            } => {
+                self.handle_probe_pong(from, endpoint, payload).await;
+                None
+            }
             IncomingEvent::Dropped { reason } => {
                 debug!("[node] dropped frame: {:?}", reason);
                 None
             }
+        }
+    }
+
+    /// probe 响应处理（CONNECTIVITY §2/§4/§5）：
+    /// - 载荷非空 = coordinator 回显 seen 地址 → 候选端点补充 + 重报
+    /// - 载荷空 = 互探确认（端点可达性恢复）/ 中继挂靠确认（v1 回退端点追加）
+    async fn handle_probe_pong(&mut self, _from: u32, endpoint: SocketAddr, payload: Vec<u8>) {
+        if !payload.is_empty() {
+            let Ok(addr) = String::from_utf8(payload).map(|s| s.parse::<SocketAddr>()) else {
+                return;
+            };
+            let Ok(addr) = addr else {
+                return;
+            };
+            info!("[node] echo confirmed: {}", addr);
+            if !self.echoed_endpoints.contains(&addr) {
+                self.echoed_endpoints.push(addr);
+                self.report_endpoints().await;
+            }
+            return;
+        }
+        // 互探确认：端点活性恢复（直连路径持续可达）
+        self.mesh.note_probe_ok(endpoint);
+        if let Some(relay) = self.relays.iter_mut().find(|r| r.endpoint == endpoint) {
+            if !relay.confirmed {
+                relay.confirmed = true;
+                info!(
+                    "[node] relay attached: {} (node {:?})",
+                    endpoint, relay.node_id
+                );
+                self.apply_relay_endpoints();
+            }
+        } else {
+            debug!("[node] probe confirmed direct via {}", endpoint);
+        }
+    }
+
+    /// 中继挂靠（CONNECTIVITY §5，CON-04）：v1 帧端点表 = 直连端点 ++ 确认中继端点
+    /// （直连 miss 轮转自然落到中继；miss_endpoint 逐个排除）
+    fn apply_relay_endpoints(&mut self) {
+        let relays: Vec<SocketAddr> = self
+            .relays
+            .iter()
+            .filter(|r| r.confirmed)
+            .map(|r| r.endpoint)
+            .collect();
+        let peers: Vec<(u32, Vec<SocketAddr>)> = self.peer_endpoints.clone().into_iter().collect();
+        for (peer, mut direct) in peers {
+            for r in &relays {
+                if !direct.contains(r) {
+                    direct.push(*r);
+                }
+            }
+            self.mesh.set_endpoints(peer, direct);
         }
     }
 
@@ -433,7 +531,75 @@ impl Node {
                 session.rekey(now);
             }
         }
+        self.pump_probes(now).await;
         self.pump_fail_summaries(now);
+    }
+
+    /// probe 周期（CONNECTIVITY §2/§4/§5，PROBE_PERIOD）：
+    /// ① coordinator UDP 回显（STUN 式：发现 NAT 后公网映射）
+    /// ② 对全部 peer 候选端点互探（直连确认，CON-03）
+    /// ③ 未确认中继端点探测（挂靠确认，CON-04）
+    async fn pump_probes(&mut self, now: Instant) {
+        if now.duration_since(self.last_probe) < PROBE_PERIOD {
+            return;
+        }
+        self.last_probe = now;
+        let Some(id) = self.node_id else {
+            return;
+        };
+        if let Some((host, port)) = self.echo_target.clone() {
+            let Some(echo_ip) = tokio::net::lookup_host((host.as_str(), port))
+                .await
+                .ok()
+                .and_then(|mut it| it.next())
+                .map(|a| a.ip())
+            else {
+                debug!("[node] echo target unresolved: {host}:{port}");
+                return;
+            };
+            let _ = self
+                .mesh
+                .send_probe_ping(SocketAddr::new(echo_ip, port), id, 0)
+                .await;
+        }
+        let peers = self.mesh.peer_endpoints();
+        for (peer, endpoints) in peers {
+            for ep in endpoints {
+                let _ = self.mesh.send_probe_ping(ep, id, peer).await;
+            }
+        }
+        for relay in self.relays.iter().filter(|r| !r.confirmed) {
+            if let Some(node_id) = relay.node_id {
+                let _ = self.mesh.send_probe_ping(relay.endpoint, id, node_id).await;
+            }
+        }
+    }
+
+    /// 端点通告（注册后 / echo 结果变化时）：本地接口 IP ++ echo seen 地址
+    async fn report_endpoints(&mut self) {
+        let Some(control) = self.control.as_mut() else {
+            return;
+        };
+        let Ok(addr) = self.mesh.local_addr() else {
+            return;
+        };
+        let mut eps: Vec<String> = self
+            .advertise_ips
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, addr.port()).to_string())
+            .collect();
+        for echoed in &self.echoed_endpoints {
+            let s = echoed.to_string();
+            if !eps.contains(&s) {
+                eps.push(s);
+            }
+        }
+        if eps.is_empty() {
+            eps.push(addr.to_string());
+        }
+        debug!("[node] endpoint report: {:?}", eps);
+        let report = control.endpoint_report_envelope(eps);
+        let _ = control.send_envelope(&report).await;
     }
 
     /// 高频失败事件 → 周期摘要（LOGGING §5）：事件只计数，每周期 ≤1 条，0 不输出
@@ -493,7 +659,7 @@ impl Node {
             tokio::select! {
                 ev = self.mesh.handle_incoming() => {
                     if let Ok(ev) = ev {
-                        if let Some(payload) = self.handle_mesh_event(ev) {
+                        if let Some(payload) = self.handle_mesh_event(ev).await {
                             self.write_lan(&payload).await;
                         }
                     }
@@ -532,7 +698,7 @@ impl Node {
         }
     }
 
-    fn handle_mesh_event(&mut self, ev: IncomingEvent) -> Option<Vec<u8>> {
+    async fn handle_mesh_event(&mut self, ev: IncomingEvent) -> Option<Vec<u8>> {
         match ev {
             IncomingEvent::Established { peer } => {
                 info!("[node] session established with {}", peer);
@@ -558,6 +724,18 @@ impl Node {
             IncomingEvent::Responded { .. } => None,
             IncomingEvent::Relayed { to } => {
                 info!("[node] relayed frame to {}", to);
+                None
+            }
+            IncomingEvent::ProbePing { from } => {
+                debug!("[node] probe ping from {}", from);
+                None
+            }
+            IncomingEvent::ProbePong {
+                from,
+                endpoint,
+                payload,
+            } => {
+                self.handle_probe_pong(from, endpoint, payload).await;
                 None
             }
             IncomingEvent::Dropped { reason } => {
@@ -598,22 +776,8 @@ impl Node {
                             binding,
                         )
                     });
-                // 端点上报：数据面 UDP 地址（本机各接口 IP + 端口）→ coordinator 并入 netmap
-                if let Some(control) = self.control.as_mut() {
-                    if let Ok(addr) = self.mesh.local_addr() {
-                        let mut eps: Vec<String> = self
-                            .advertise_ips
-                            .iter()
-                            .map(|ip| SocketAddr::new(*ip, addr.port()).to_string())
-                            .collect();
-                        if eps.is_empty() {
-                            eps.push(addr.to_string());
-                        }
-                        debug!("[node] endpoint report: {:?}", eps);
-                        let report = control.endpoint_report_envelope(eps);
-                        let _ = control.send_envelope(&report).await;
-                    }
-                }
+                // 端点上报：数据面 UDP 地址（本机各接口 IP + echo seen 地址）→ coordinator 并入 netmap
+                self.report_endpoints().await;
             }
             ControlEvent::Netmap(netmap) => {
                 // 挑战通过后服务端重推 netmap：Reconnecting → ChallengeOk
@@ -741,10 +905,12 @@ impl Node {
         Ok(())
     }
 
-    /// netmap 全量替换语义（CONTROL_PLANE §3.2）：peer 静态公钥/端点/mesh 路由重建
+    /// netmap 全量替换语义（CONTROL_PLANE §3.2）：peer 静态公钥/端点/mesh 路由重建。
+    /// relay 列表（netmap 权威）全量替换 → 挂靠候选重建（CONNECTIVITY §5）。
     fn apply_netmap(&mut self, netmap: &NetmapData) {
         let mut fresh: HashSet<u32> = HashSet::new();
         self.engine.reset_mesh_routes();
+        let mut peer_endpoints: HashMap<u32, Vec<SocketAddr>> = HashMap::new();
         for entry in &netmap.entries {
             if Some(entry.node_id) == self.node_id {
                 continue;
@@ -758,6 +924,7 @@ impl Node {
                     addrs.push(addr);
                 }
             }
+            peer_endpoints.insert(entry.node_id, addrs.clone());
             self.mesh.set_endpoints(entry.node_id, addrs);
             for route in &entry.routes {
                 if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(route) {
@@ -782,6 +949,31 @@ impl Node {
             self.engine.remove_mesh_node(*stale);
         }
         self.netmap_peers = fresh;
+        self.peer_endpoints = peer_endpoints;
+        // relay 列表：netmap 权威全量替换；归属节点按 netmap 端点匹配解析
+        // （relay_list 为端点串，须定位节点才能定向互探）
+        let netmap_endpoints: HashMap<SocketAddr, u32> = netmap
+            .entries
+            .iter()
+            .flat_map(|e| {
+                e.endpoints
+                    .iter()
+                    .filter_map(|ep| ep.parse::<SocketAddr>().ok().map(|a| (a, e.node_id)))
+            })
+            .collect();
+        self.relays = netmap
+            .relay_list
+            .iter()
+            .filter_map(|ep| ep.parse::<SocketAddr>().ok())
+            .map(|endpoint| RelayEntry {
+                endpoint,
+                node_id: netmap_endpoints.get(&endpoint).copied(),
+                confirmed: false,
+            })
+            .collect();
+        if !self.relays.is_empty() {
+            debug!("[node] relay candidates: {:?}", self.relays);
+        }
     }
 
     /// 登记待发路径请求（netmap 全量替换每次都会触发，幂等：重复请求 = 刷新路径集）
@@ -911,6 +1103,7 @@ mod tests {
             announce_routes: routes,
             coord_signing_pubkey: VerifyingKey::from(&signing_key).to_bytes(),
             ca_cert_path: ca_path.into(),
+            udp_echo_addr: None,
             coord: None,
         }
     }

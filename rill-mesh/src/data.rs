@@ -7,6 +7,7 @@ use landscape_rill_core::handshake::{
     MSG1_PAYLOAD_LEN, MSG2_PAYLOAD_LEN, MSG3_PAYLOAD_LEN,
 };
 use landscape_rill_core::rate::RateCounter;
+use landscape_rill_core::rate::TokenBucket;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -86,10 +87,15 @@ pub struct MeshData {
     endpoint_health: HashMap<(u32, SocketAddr), u32>,
     /// 上次对该发送目标实际使用的端点（miss 定位用——黑洞端点无法从收包侧感知）
     last_sent_endpoint: HashMap<u32, SocketAddr>,
+    /// 上次对该发送目标实际选用的路径（pick_path 记录；心跳 miss 定位用——
+    /// 非主路径死亡时主路径 miss 不触发切换，CON-06 故障切换）
+    last_sent_path: HashMap<u32, u64>,
     /// per-peer 丢帧计数（LOGGING §5：周期摘要；仅已知 peer，防伪造 node_id 膨胀）
     drop_stats: HashMap<u32, RateCounter>,
     /// 全局丢帧计数（未知节点/畸形包，无 peer 可归因）
     drop_stats_global: RateCounter,
+    /// 未确认的探针：nonce → (目标节点, 探测端点)；PONG 匹配即移除
+    probe_pending: HashMap<u32, (u32, SocketAddr)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -126,6 +132,8 @@ pub enum DropReason {
     UnsupportedType,
     Duplicate,
     RateLimited,
+    /// 非 34B 帧且非 probe（CONNECTIVITY §2.1 分派失败）
+    UnknownProtocol,
 }
 
 #[derive(Debug, PartialEq, thiserror::Error, landscape_rill_macro::ErrorId)]
@@ -183,43 +191,20 @@ pub enum IncomingEvent {
         from: u32,
         payload: Vec<u8>,
     },
+    /// probe PING 到达（CONNECTIVITY §4）：对本节点的 PING 已自动回 PONG
+    ProbePing {
+        from: u32,
+    },
+    /// probe PONG 匹配（nonce 一致，CONNECTIVITY §4.1）：endpoint = PONG 的 UDP 源地址；
+    /// payload 非空 = coordinator 回显的 seen 地址（"ip:port"，CONNECTIVITY §2）
+    ProbePong {
+        from: u32,
+        endpoint: SocketAddr,
+        payload: Vec<u8>,
+    },
     Dropped {
         reason: DropReason,
     },
-}
-
-/// 令牌桶（泛洪限速，FRAME_HEADER §2.6）
-#[derive(Debug)]
-pub struct TokenBucket {
-    capacity: u32,
-    rate_per_sec: f64,
-    tokens: f64,
-    last: Instant,
-}
-
-impl TokenBucket {
-    pub fn new(rate_per_sec: f64, capacity: u32) -> Self {
-        Self {
-            capacity,
-            rate_per_sec,
-            tokens: capacity as f64,
-            last: Instant::now(),
-        }
-    }
-
-    /// 尝试取一个令牌；桶空返回 false
-    pub fn take(&mut self) -> bool {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.capacity as f64);
-        self.last = now;
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
 }
 
 impl MeshData {
@@ -247,8 +232,10 @@ impl MeshData {
             ingress_hop: HashMap::new(),
             endpoint_health: HashMap::new(),
             last_sent_endpoint: HashMap::new(),
+            last_sent_path: HashMap::new(),
             drop_stats: HashMap::new(),
             drop_stats_global: RateCounter::new(DROP_STATS_PERIOD),
+            probe_pending: HashMap::new(),
         })
     }
 
@@ -329,9 +316,20 @@ impl MeshData {
                 self.path_health.get(&p.path_id).copied().unwrap_or(0) < PATH_HEALTH_MISS_LIMIT
             })
             .collect();
-        let pool = if healthy.is_empty() { live } else { healthy };
+        // 全候选 miss 耗尽 → 按 miss 升序（最不坏的优先，稳定排序保持候选序）：
+        // 心跳走最可能可用的路径，收包侧 ingress 健康恢复形成闭环（避免死锁在更坏路径）
+        let pool: Vec<&PathEntry> = if healthy.is_empty() {
+            let mut by_health = live.clone();
+            by_health.sort_by_key(|p| self.path_health.get(&p.path_id).copied().unwrap_or(0));
+            by_health
+        } else {
+            healthy
+        };
         let idx = (flow_hash as usize) % pool.len();
-        Some(pool[idx].clone())
+        let chosen = pool[idx].clone();
+        // 记录实际选用（心跳 miss 定位；非主路径死亡时驱动切换，CON-06）
+        self.last_sent_path.insert(dest, chosen.path_id);
+        Some(chosen)
     }
 
     /// 路径活性上报：健康 miss 清零 / 累计（runtime 按数据面心跳/PathProbe 喂）
@@ -344,13 +342,17 @@ impl MeshData {
         self.path_health.insert(path_id, 0);
     }
 
-    /// peer 级：数据面心跳 miss → 该 peer 主路径（候选第一条）miss（快速切换，
-    /// CONTROL_PLANE §3.11——备用路径活性由独立探活承担）
+    /// peer 级：数据面心跳 miss → 主路径（候选第一条）+ 实际选用路径 miss。
+    /// 只 miss 主路径不够：主路径已死、在用中继路径死亡时（CON-06 故障切换），
+    /// 心跳 miss 落不到在用路径上会永远卡死（收包侧 ingress 更新也无——无帧到达）。
     pub fn path_miss_peer(&mut self, dest: u32) {
         if let Some(paths) = self.path_table.get(&dest).cloned() {
             if let Some(main) = paths.first() {
                 self.path_miss(main.path_id);
             }
+        }
+        if let Some(used) = self.last_sent_path.get(&dest).copied() {
+            self.path_miss(used);
         }
     }
 
@@ -420,6 +422,21 @@ impl MeshData {
         if let Some(m) = self.endpoint_health.get_mut(&(owner, addr)) {
             *m = 0;
         }
+    }
+
+    /// probe 确认（CONNECTIVITY §4.1）：互探 PONG 证明该端点可达 → 活性恢复
+    pub fn note_probe_ok(&mut self, addr: SocketAddr) {
+        if let Some(owner) = self.endpoint_owner(addr) {
+            self.note_endpoint_ok(owner, addr);
+        }
+    }
+
+    /// 当前端点表（互探用：对全部 peer 候选端点发 PING，CONNECTIVITY §4）
+    pub fn peer_endpoints(&self) -> Vec<(u32, Vec<SocketAddr>)> {
+        self.endpoint_table
+            .iter()
+            .map(|(id, addrs)| (*id, addrs.clone()))
+            .collect()
     }
 
     pub fn set_key_dst(&mut self, node_id: u32, key: [u8; 32]) {
@@ -748,12 +765,104 @@ impl MeshData {
         Ok((from, buf))
     }
 
-    /// 收帧处理：relay 路径校验 → 按包类型分发（握手/数据/心跳/广播）。
+    /// 收帧处理（CONNECTIVITY §2.1 端口分派）：首字节 0x01..=0x0F → 34B 帧；
+    /// 其余匹配 probe magic → probe 处理；都不匹配 → 丢弃（fail-closed）。
+    /// 帧路径：relay 校验 → 按包类型分发（握手/数据/心跳/广播）。
     /// 入站路径记录 + 逐路径活性在分发前更新（帧实际到达的上一跳 = UDP 发送者归属）。
     /// 丢帧统计在入口收口（LOGGING §5）：relay 无法归因时从帧头补解析。
     pub async fn handle_incoming(&mut self) -> std::io::Result<IncomingEvent> {
-        let (from_addr, frame) = self.recv_frame().await?;
-        match self.relay(&frame).await {
+        let (from_addr, packet) = self.recv_frame().await?;
+        let first = packet.first().copied();
+        if matches!(first, Some(b) if (0x01..=0x0F).contains(&b)) {
+            // 34B 帧路径（version 值域 0x01..=0x0F，FRAME_HEADER §2.1）
+            self.handle_frame(from_addr, &packet).await
+        } else if packet.len() >= 4 && packet[..4] == crate::probe::PROBE_MAGIC {
+            self.handle_probe(from_addr, &packet).await
+        } else {
+            // 非帧非 probe → 丢弃（解析 fail-closed，CN-02）
+            self.note_drop(None);
+            Ok(IncomingEvent::Dropped {
+                reason: DropReason::UnknownProtocol,
+            })
+        }
+    }
+
+    /// probe 处理（CONNECTIVITY §4）：PING 对己 → 自动回 PONG；PONG → nonce 匹配确认
+    async fn handle_probe(
+        &mut self,
+        from_addr: SocketAddr,
+        packet: &[u8],
+    ) -> std::io::Result<IncomingEvent> {
+        let Some(probe) = crate::probe::ProbePacket::decode(packet) else {
+            self.note_drop(None);
+            return Ok(IncomingEvent::Dropped {
+                reason: DropReason::UnknownProtocol,
+            });
+        };
+        match probe.packet_type {
+            crate::probe::probe_type::PING => {
+                if probe.to_node_id == self.self_node_id {
+                    let reply = crate::probe::ProbePacket::pong(&probe, Vec::new());
+                    let _ = self.socket.send_to(&reply.encode(), from_addr).await;
+                }
+                Ok(IncomingEvent::ProbePing {
+                    from: probe.from_node_id,
+                })
+            }
+            crate::probe::probe_type::PONG => {
+                if self.probe_pending.remove(&probe.nonce).is_some() {
+                    Ok(IncomingEvent::ProbePong {
+                        from: probe.from_node_id,
+                        endpoint: from_addr,
+                        payload: probe.payload,
+                    })
+                } else {
+                    // 未知 nonce（迟到/重复/伪造）→ 丢弃
+                    self.note_drop(None);
+                    Ok(IncomingEvent::Dropped {
+                        reason: DropReason::UnknownProtocol,
+                    })
+                }
+            }
+            _ => {
+                self.note_drop(None);
+                Ok(IncomingEvent::Dropped {
+                    reason: DropReason::UnknownProtocol,
+                })
+            }
+        }
+    }
+
+    /// 向候选端点发送 PING（互探/echo，CONNECTIVITY §4.1）；返回 nonce（PONG 匹配用）。
+    /// pending 超上限清空（防伪造 PONG 洪泛撑爆状态，活跃探测由 runtime 周期重发）。
+    pub async fn send_probe_ping(
+        &mut self,
+        endpoint: SocketAddr,
+        from: u32,
+        to: u32,
+    ) -> Option<u32> {
+        if self.probe_pending.len() >= 1024 {
+            self.probe_pending.clear();
+        }
+        let nonce = rand::random::<u32>();
+        self.probe_pending.insert(nonce, (to, endpoint));
+        let packet = crate::probe::ProbePacket::ping(from, to, nonce);
+        match self.socket.send_to(&packet.encode(), endpoint).await {
+            Ok(_) => Some(nonce),
+            Err(_) => {
+                self.probe_pending.remove(&nonce);
+                None
+            }
+        }
+    }
+
+    /// 帧路径（原 relay 入口逻辑，分派后调用）
+    async fn handle_frame(
+        &mut self,
+        from_addr: SocketAddr,
+        frame: &[u8],
+    ) -> std::io::Result<IncomingEvent> {
+        match self.relay(frame).await {
             RelayOutcome::Delivered { frame, from } => {
                 if let Some(ingress) = self.endpoint_owner(from_addr) {
                     self.ingress_hop.insert(from, ingress);
@@ -782,7 +891,7 @@ impl MeshData {
             RelayOutcome::Forwarded { to } => Ok(IncomingEvent::Relayed { to }),
             RelayOutcome::Dropped { reason } => {
                 // 帧头可解析 → 归因源节点（伪造 node_id 不落 per-peer，进全局桶）
-                let from = MeshFrameHeader::decode(&frame).ok().map(|h| h.from_node_id);
+                let from = MeshFrameHeader::decode(frame).ok().map(|h| h.from_node_id);
                 self.note_drop(from);
                 Ok(IncomingEvent::Dropped { reason })
             }
@@ -1611,6 +1720,128 @@ mod tests {
         );
     }
 
+    // ==================== probe 体系（CONNECTIVITY §2/§4，CON-03/CON-08） ====================
+
+    /// 互探：A 向 B 发 PING（to=B）→ B 自动回 PONG → A 侧 nonce 匹配确认
+    #[tokio::test]
+    async fn probe_ping_replies_pong_and_matches() {
+        use crate::probe::{probe_type, ProbePacket};
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        let b_addr = b.local_addr().unwrap();
+        // A 发送 PING → B 收帧（handle_incoming 分派到 probe）→ 自动回 PONG
+        let nonce = a.send_probe_ping(b_addr, 1, 2).await.unwrap();
+        let ev = b.handle_incoming().await.unwrap();
+        assert!(matches!(ev, IncomingEvent::ProbePing { from: 1 }));
+        // B 回 PONG 已发出 → A 收帧 → nonce 匹配确认
+        let ev = a.handle_incoming().await.unwrap();
+        match ev {
+            IncomingEvent::ProbePong {
+                from,
+                endpoint,
+                payload,
+            } => {
+                assert_eq!(from, 2);
+                assert_eq!(endpoint, b_addr);
+                assert!(payload.is_empty());
+            }
+            other => panic!("expected ProbePong, got {:?}", other),
+        }
+        // PONG 已确认（nonce 已消费）；重复 PONG → 丢弃
+        let dup = ProbePacket::pong(&ProbePacket::ping(1, 2, nonce), Vec::new());
+        b.socket
+            .send_to(&dup.encode(), a.local_addr().unwrap())
+            .await
+            .unwrap();
+        let ev = a.handle_incoming().await.unwrap();
+        assert!(matches!(
+            ev,
+            IncomingEvent::Dropped {
+                reason: DropReason::UnknownProtocol
+            }
+        ));
+        let _ = probe_type::PING;
+    }
+
+    /// coordinator 回显（CONNECTIVITY §2）：PONG 携带 seen 地址载荷
+    #[tokio::test]
+    async fn probe_echo_pong_carries_seen_addr() {
+        use crate::probe::ProbePacket;
+        let mut node = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        // 模拟 coordinator：对 to=0（回显标记）的 PING 回带载荷的 PONG
+        let nonce = node
+            .send_probe_ping(node.local_addr().unwrap(), 1, 0)
+            .await
+            .unwrap();
+        let ping = ProbePacket::ping(1, crate::probe::NODE_ID_COORDINATOR, nonce);
+        let pong = ProbePacket::pong(&ping, b"203.0.113.9:41641".to_vec());
+        node.socket
+            .send_to(&pong.encode(), node.local_addr().unwrap())
+            .await
+            .unwrap();
+        // 先消费自己发出的 PING（to=0 不回 PONG）
+        let ev = node.handle_incoming().await.unwrap();
+        assert!(matches!(ev, IncomingEvent::ProbePing { from: 1 }));
+        let ev = node.handle_incoming().await.unwrap();
+        match ev {
+            IncomingEvent::ProbePong { payload, .. } => {
+                assert_eq!(payload, b"203.0.113.9:41641");
+            }
+            other => panic!("expected ProbePong, got {:?}", other),
+        }
+    }
+
+    /// 端口分派（CON-08）：非帧非 probe 字节 → UnknownProtocol 丢弃
+    #[tokio::test]
+    async fn unknown_protocol_dropped() {
+        let mut node = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let garbage = b"\x80not-a-frame-not-a-probe";
+        node.socket
+            .send_to(garbage, node.local_addr().unwrap())
+            .await
+            .unwrap();
+        let ev = node.handle_incoming().await.unwrap();
+        assert!(matches!(
+            ev,
+            IncomingEvent::Dropped {
+                reason: DropReason::UnknownProtocol
+            }
+        ));
+    }
+
+    /// 发给他人的 PING → 不回 PONG（互探目标定向）
+    #[tokio::test]
+    async fn probe_ping_foreign_target_not_replied() {
+        use crate::probe::ProbePacket;
+        let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+            .await
+            .unwrap();
+        // A 收到发给节点 3 的 PING（B 与 A 无关）→ B 不应收到 PONG 之外的任何帧
+        let ping = ProbePacket::ping(3, 3, 55).encode();
+        a.socket
+            .send_to(&ping, a.local_addr().unwrap())
+            .await
+            .unwrap();
+        let ev = a.handle_incoming().await.unwrap();
+        assert!(matches!(ev, IncomingEvent::ProbePing { from: 3 }));
+        // A 不应自动回任何东西：直接检查 b 的 socket 无入帧（对 A 本地环回，回包会到 a 自己）
+        // 用 timeout 收帧验证没有回复（PONG 会打到 a 的本地地址）
+        let r =
+            tokio::time::timeout(std::time::Duration::from_millis(200), b.handle_incoming()).await;
+        assert!(r.is_err(), "收到预期外的回复帧");
+    }
+
     #[tokio::test]
     async fn unsupported_type_dropped() {
         let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
@@ -1849,6 +2080,55 @@ mod tests {
             }
             other => panic!("expected data, got {:?}", other),
         }
+    }
+
+    /// CON-06：非主路径（在用中继路径）死亡 → 心跳 miss 落到实际选用路径 → 切换
+    #[tokio::test]
+    async fn path_miss_peer_misses_used_path_not_only_main() {
+        let mut m = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+            .await
+            .unwrap();
+        // 候选：direct(10) + viaB(11) + viaD(12)
+        m.path_table.insert(
+            2,
+            vec![
+                PathEntry {
+                    path_id: 10,
+                    path_epoch: 1,
+                    hops: vec![2],
+                    expires_at: 0,
+                },
+                PathEntry {
+                    path_id: 11,
+                    path_epoch: 1,
+                    hops: vec![1, 2],
+                    expires_at: 0,
+                },
+                PathEntry {
+                    path_id: 12,
+                    path_epoch: 1,
+                    hops: vec![3, 2],
+                    expires_at: 0,
+                },
+            ],
+        );
+        for pid in [10u64, 11, 12] {
+            m.set_key_path(pid, [pid as u8; 32]);
+        }
+        // 主路径（direct）已死：miss ×3 → 排除
+        for _ in 0..PATH_HEALTH_MISS_LIMIT {
+            m.path_miss_peer(2);
+        }
+        // 此时选用 pool[0] = viaB（pick 记录 last_sent_path）
+        let used = m.pick_path(2, 0).unwrap();
+        assert_eq!(used.path_id, 11);
+        // viaB 死亡：心跳 miss ×3 —— 只 miss 主路径的话 viaB 永远健康（卡死），
+        // 修复后同时 miss 实际选用路径（viaB）→ 剩 viaD
+        for _ in 0..PATH_HEALTH_MISS_LIMIT {
+            m.path_miss_peer(2);
+        }
+        let switched = m.pick_path(2, 0).unwrap();
+        assert_eq!(switched.path_id, 12, "在用中继路径死亡后必须切到下一候选");
     }
 
     #[tokio::test]

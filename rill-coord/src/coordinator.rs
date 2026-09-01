@@ -534,6 +534,28 @@ impl Coordinator {
         }
     }
 
+    /// relay 探测目标（CONNECTIVITY §5：可达性验证 + RTT 测量）：某网络
+    /// relay 能力节点及其已上报端点。返回 (node_id, endpoints)。
+    pub fn relay_probe_targets(&self, network_id: u32) -> Vec<(u32, Vec<String>)> {
+        let Some(domain) = self.domain_by_network_id(network_id) else {
+            return Vec::new();
+        };
+        domain
+            .registry
+            .entries()
+            .filter(|e| e.capabilities & CAPABILITY_RELAY != 0)
+            .map(|e| (e.node_id, self.directory.endpoints_of(e.node_id).to_vec()))
+            .collect()
+    }
+
+    /// RTT 排序结果落位（按网络分域）：PathService relay 集合按实测 RTT 排序
+    /// （路径候选顺序 = 挂靠优先级，CONNECTIVITY §5）；relay_list 由 set_relay_list 落位
+    pub fn set_relay_order(&mut self, network: &str, ordered_node_ids: Vec<u32>) {
+        if let Some(domain) = self.domain_by_name_mut(network) {
+            domain.paths.set_relays(ordered_node_ids);
+        }
+    }
+
     // ==================== netmap 快照 ====================
 
     /// 网络隔离（SEC-21/CTL-09）：只返回指定网络的条目

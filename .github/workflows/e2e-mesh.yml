@@ -1,6 +1,7 @@
 # mesh docker e2e：direct（coord + node-a/node-b，IPv4 + IPv6 ping）+ relay（a—b—c 线形，经 b 中继）
 # + persist（coord 持久化重启恢复，REQ-037）+ log（日志治理，REQ-039）+ reload（SIGHUP 重载，REQ-038）
 # + tenancy（单 coordinator 双网络隔离 + 跨网伪造帧注入，CONTROL_PLANE §1.5，SEC-21~25）
+# + probe（UDP 回显/互探/中继挂靠与故障切换 + 回显限速，CONNECTIVITY §2/§4/§5）
 # build job 编译一次：编译 cache（~/.cargo + target，内容键，失效时机确定）加速增量编译 →
 # release 二进制进 artifact → matrix 场景 job 下载二进制（E2E_SKIP_BUILD=1）不再编译。
 # PR 也触发但不设 required；场景目录约定见 docs/ci/README.md §1
@@ -59,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [direct, relay, persist, log, reload, tenancy]
+        scenario: [direct, relay, persist, log, reload, tenancy, probe]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

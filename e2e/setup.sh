@@ -18,7 +18,8 @@ hex() { openssl rand -hex 32; }
 # 场景选择：relay 用线形拓扑（b 双网卡）；persist 用四节点拓扑（coord 持久化，REQ-037）；
 # log 用日志验收拓扑（同 direct，节点日志启动参数不同，LOGGING §2/§4）；
 # reload 用 SIGHUP 重载拓扑（同 direct，node-c/d profile late 门控，REQ-038）；
-# tenancy 用双网络拓扑（lab + work 各两节点，单 coordinator，CONTROL_PLANE §1.5）
+# tenancy 用双网络拓扑（lab + work 各两节点，单 coordinator，CONTROL_PLANE §1.5）；
+# probe 用双 relay 拓扑（a/c 无直连 + b/d 自愿 relay，CONNECTIVITY §2/§4/§5）
 if [ "$SCENARIO" = "relay" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/relay/docker-compose.yaml"
 elif [ "$SCENARIO" = "persist" ]; then
@@ -29,6 +30,8 @@ elif [ "$SCENARIO" = "reload" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/reload/docker-compose.yaml"
 elif [ "$SCENARIO" = "tenancy" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/tenancy/docker-compose.yaml"
+elif [ "$SCENARIO" = "probe" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/probe/docker-compose.yaml"
 fi
 
 echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"
@@ -88,13 +91,14 @@ echo "==> 4/6 生成配置"
 NODE_A_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_C_AUTHKEY=$("$OVERLAY" authkey --network lab)
-gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key
+gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认1)
+  CAP="${7:-1}"
   cat > "$BUILD_DIR/$1" <<EOF
 {
   "coordinator_url": "https://coord:8443",
   "auth_key": "$6",
   "static_key_seed": "$2",
-  "capabilities": 1,
+  "capabilities": $CAP,
   "announce_routes": $5,
   "coord_signing_pubkey": "$COORD_PUBKEY",
   "ca_cert_path": "/etc/landscape/ca.pem",
@@ -240,6 +244,30 @@ EOF
   echo "$WORK_KEY" > "$BUILD_DIR/.tenancy_work_key"
 fi
 
+if [ "$SCENARIO" = "probe" ]; then
+  # probe 场景（CONNECTIVITY §2/§4/§5）：a/c 无直连 + b/d 自愿 relay（capabilities=1），
+  # 其余节点非 relay（capabilities=0）；coordinator UDP 回显默认同端口（8443）
+  NODE_D_KEY=$(hex)
+  NODE_D_AUTHKEY=$("$OVERLAY" authkey --network lab)
+  gen_node_config node-a.json "$NODE_A_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_A_AUTHKEY" 0
+  gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY" 0
+  gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" '["10.43.0.0/24", "fd00:3::/64"]' "$NODE_B_AUTHKEY" 1
+  gen_node_config node-d.json "$NODE_D_KEY" "10.45.0.1/24" "fd00:5::1/64" '["10.45.0.0/24", "fd00:5::/64"]' "$NODE_D_AUTHKEY" 1
+  # coordinator 配置需包含 node-d 的 auth key（base 段只有 A/B/C）
+  python3 - "$NODE_D_AUTHKEY" "$BUILD_DIR/coord.json" <<'PYEOF'
+import json, sys
+key = sys.argv[1]
+path = sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+for net in cfg["coord"]["networks"]:
+    if net["name"] == "lab":
+        net["auth_keys"].append({"key": key, "policy": "reusable"})
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+fi
+
 if [ "$SCENARIO" = "relay" ]; then
   # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，
   # 否则 docker 网桥自身路由会命中；ip route get 命中默认路由不可用）
@@ -274,6 +302,14 @@ if [ "$SCENARIO" = "relay" ]; then
   docker exec mesh-node-c ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
   # 模拟"c↔a 无直连 UDP 可达性"（docker host ip_forward 会在网桥间路由，须主动隔离）：
   # 固定 IP（compose ipam）：a=192.168.240.11 / c=192.168.241.31，互加黑洞路由，只黑这两个 /32
+  docker exec mesh-node-c ip route add blackhole 192.168.240.11/32 2>/dev/null || true
+  docker exec mesh-node-a ip route add blackhole 192.168.241.31/32 2>/dev/null || true
+elif [ "$SCENARIO" = "probe" ]; then
+  # probe 场景：a↔c 路由 + 互黑直连（模拟无直连 UDP 可达性，CONNECTIVITY §4）
+  docker exec mesh-node-a ip route add 10.44.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ip -6 route add fd00:4::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
   docker exec mesh-node-c ip route add blackhole 192.168.240.11/32 2>/dev/null || true
   docker exec mesh-node-a ip route add blackhole 192.168.241.31/32 2>/dev/null || true
 elif [ "$SCENARIO" = "tenancy" ]; then

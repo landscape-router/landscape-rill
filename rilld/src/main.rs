@@ -31,13 +31,14 @@ use landscape_rill_node::config::Config;
 use landscape_rill_node::runtime::{Node, NodeOptions};
 use landscape_rill_node::tun::TunConfig;
 use serde::{Deserialize, Deserializer, Serializer};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 边界 I/O 结果别名（ERROR_ID §2.2）：统一 `Box<dyn Error + Send + Sync>`
 type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -151,6 +152,9 @@ struct FileConfig {
     coord_signing_pubkey: Option<[u8; 32]>,
     #[serde(default)]
     ca_cert_path: String,
+    /// coordinator UDP 回显地址（host:port）；缺省 = coordinator_url host + 8443
+    #[serde(default)]
+    udp_echo_addr: Option<String>,
     #[serde(default)]
     tun: Option<TunFile>,
     #[serde(default)]
@@ -252,11 +256,31 @@ async fn run_coord(config_path: &Path) -> BoxResult<()> {
     // 高频失败 → 周期摘要（LOGGING §5）：事件只计数，每周期 ≤1 条，0 不输出
     let mut accept_failed = RateCounter::new(RATE_SUMMARY_PERIOD);
     let mut summary = tokio::time::interval(RATE_SUMMARY_PERIOD);
+    // UDP 数据面（CONNECTIVITY §2/§5）：coordinator 回显 + relay RTT 排序；独立任务
+    let networks: Vec<(String, u32)> = config
+        .networks
+        .iter()
+        .map(|n| {
+            (
+                n.name.clone(),
+                landscape_rill_coord::domain::network_id_for(&n.name),
+            )
+        })
+        .collect();
+    let udp_addr: SocketAddr = config
+        .udp_listen_addr
+        .as_deref()
+        .map(|s| s.parse().expect("validated"))
+        .unwrap_or_else(|| config.listen_addr.parse().expect("validated"));
+    let udp = tokio::net::UdpSocket::bind(udp_addr).await?;
+    let udp_server = server.clone();
+    tokio::spawn(async move { run_coord_udp(udp, udp_server, networks).await });
     let net_names: Vec<String> = config.networks.iter().map(|n| n.name.clone()).collect();
     info!(
-        "[coord] listening on {} (networks={}, reload=SIGHUP)",
+        "[coord] listening on {} (networks={}, udp={}, reload=SIGHUP)",
         listener.local_addr()?,
-        net_names.join(",")
+        net_names.join(","),
+        udp_addr
     );
     loop {
         tokio::select! {
@@ -327,6 +351,158 @@ async fn accept_next(
     server_tls_stream(listener, cert, key).await.map_err(|e| {
         Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(e.to_string()))
     })
+}
+
+/// relay RTT 探测周期（CONNECTIVITY §5：可达性验证 + RTT 测量）
+const RELAY_RTT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+/// RTT 收集窗口（PONG 应答等待）
+const RELAY_RTT_COLLECT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// coordinator UDP 数据面任务（CONNECTIVITY §2/§5）：
+/// ① 回显：probe PING（to=0 标记）→ PONG 携带 seen 地址（STUN 式），按源 IP 限速（§2.2）
+/// ② relay RTT 排序：周期向各网 relay 端点发 PING 测 RTT → 排序写入 relay_list +
+///    PathService relay 顺序（挂靠优先级）
+async fn run_coord_udp(
+    udp: tokio::net::UdpSocket,
+    server: std::sync::Arc<tokio::sync::Mutex<CoordinatorServer>>,
+    networks: Vec<(String, u32)>,
+) {
+    use landscape_rill_coord::echo::{
+        echo_response, EchoLimiter, ECHO_CAPACITY, ECHO_RATE_PER_SEC,
+    };
+    use landscape_rill_core::probe::{probe_type, ProbePacket, NODE_ID_COORDINATOR};
+    let mut limiter = EchoLimiter::new(ECHO_RATE_PER_SEC, ECHO_CAPACITY);
+    let mut answered = RateCounter::new(RATE_SUMMARY_PERIOD);
+    let mut limited = RateCounter::new(RATE_SUMMARY_PERIOD);
+    let mut summary = tokio::time::interval(RATE_SUMMARY_PERIOD);
+    // RTT 探测状态：nonce → (network_id, node_id, endpoint, sent)
+    let mut rtt_probes: HashMap<u32, (u32, u32, String, std::time::Instant)> = HashMap::new();
+    // 已测 RTT：network_id → (node_id, endpoint) → rtt
+    let mut rtt_done: HashMap<u32, HashMap<(u32, String), u64>> = HashMap::new();
+    let mut collecting = false;
+    let mut collect_deadline = std::time::Instant::now();
+    let mut next_rtt = std::time::Instant::now() + RELAY_RTT_PERIOD;
+    let mut buf = vec![0u8; 65535];
+    loop {
+        let until = if collecting {
+            tokio::time::Instant::from_std(collect_deadline)
+        } else {
+            tokio::time::Instant::from_std(next_rtt)
+        };
+        tokio::select! {
+            r = udp.recv_from(&mut buf) => {
+                let Ok((n, from)) = r else { continue };
+                let Some(p) = ProbePacket::decode(&buf[..n]) else { continue };
+                match p.packet_type {
+                    probe_type::PING if p.to_node_id == NODE_ID_COORDINATOR => {
+                        if limiter.allow(from.ip()) {
+                            if let Some(resp) = echo_response(&buf[..n], from) {
+                                let _ = udp.send_to(&resp, from).await;
+                                answered.tick();
+                            }
+                        } else {
+                            limited.tick();
+                        }
+                        limiter.prune();
+                    }
+                    probe_type::PONG if collecting => {
+                        if let Some((net_id, node, ep, sent)) = rtt_probes.remove(&p.nonce) {
+                            let rtt_ms = sent.elapsed().as_millis() as u64;
+                            rtt_done.entry(net_id).or_default().insert((node, ep), rtt_ms);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep_until(until) => {
+                if collecting {
+                    // 收集窗口结束：按 RTT 排序应用（relay_list + 路径挂靠顺序）
+                    collecting = false;
+                    for (name, net_id) in &networks {
+                        let done = rtt_done.remove(net_id).unwrap_or_default();
+                        if done.is_empty() {
+                            continue;
+                        }
+                        let mut node_best: HashMap<u32, u64> = HashMap::new();
+                        for ((node, _ep), rtt) in &done {
+                            let e = node_best.entry(*node).or_insert(u64::MAX);
+                            *e = (*e).min(*rtt);
+                        }
+                        let mut eps: Vec<(String, u64)> = done
+                            .into_iter()
+                            .map(|((_n, ep), rtt)| (ep, rtt))
+                            .collect();
+                        eps.sort_by_key(|(_, r)| *r);
+                        let mut nodes: Vec<(u32, u64)> =
+                            node_best.into_iter().collect();
+                        nodes.sort_by_key(|(_, r)| *r);
+                        let mut guard = server.lock().await;
+                        guard.coordinator.set_relay_list(
+                            name,
+                            eps.iter().map(|(e, _)| e.clone()).collect(),
+                        );
+                        guard.coordinator.set_relay_order(
+                            name,
+                            nodes.iter().map(|(n, _)| *n).collect(),
+                        );
+                        info!(
+                            "[coord] relay rtt (net={}): {}",
+                            name,
+                            eps.iter()
+                                .map(|(e, r)| format!("{e}({r}ms)"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                    next_rtt = std::time::Instant::now() + RELAY_RTT_PERIOD;
+                } else {
+                    // 发起新一轮 RTT 探测（各网络 relay 能力节点的全部已上报端点）
+                    rtt_probes.clear();
+                    let mut sent = 0usize;
+                    for (_name, net_id) in &networks {
+                        let targets = server
+                            .lock()
+                            .await
+                            .coordinator
+                            .relay_probe_targets(*net_id);
+                        for (node, eps) in targets {
+                            for ep in eps {
+                                let Ok(addr) = ep.parse::<SocketAddr>() else { continue };
+                                let nonce = landscape_rill_core::probe::random_nonce();
+                                let ping = ProbePacket::ping(NODE_ID_COORDINATOR, node, nonce);
+                                if udp.send_to(&ping.encode(), addr).await.is_ok() {
+                                    rtt_probes.insert(
+                                        nonce,
+                                        (*net_id, node, ep, std::time::Instant::now()),
+                                    );
+                                    sent += 1;
+                                }
+                            }
+                        }
+                    }
+                    if sent > 0 {
+                        collecting = true;
+                        collect_deadline = std::time::Instant::now() + RELAY_RTT_COLLECT;
+                    } else {
+                        next_rtt = std::time::Instant::now() + RELAY_RTT_PERIOD;
+                    }
+                    debug!("[coord] relay rtt probe sent: {sent}");
+                }
+            }
+            _ = summary.tick() => {
+                if let Some(n) = answered.poll(std::time::Instant::now()) {
+                    if n > 0 {
+                        debug!("[coord] echo answered: {n} in last 1s");
+                    }
+                }
+                if let Some(n) = limited.poll(std::time::Instant::now()) {
+                    if n > 0 {
+                        warn!("[coord] echo rate-limited: {n} in last 1s (SEC-26)");
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -498,6 +674,14 @@ fn run_daemon(
             std::future::pending::<()>().await;
             return Ok(());
         };
+        // coordinator UDP 回显目标（host:port，允许主机名）：显式配置优先，
+        // 缺省从 coordinator_url 推导（coordinator 默认 TCP/UDP 同端口，CONNECTIVITY §2）
+        let udp_echo_addr = match &file.udp_echo_addr {
+            Some(s) => Some(s.clone()),
+            None => Some(landscape_rill_node::config::Config::coord_echo_target(
+                &coordinator_url,
+            )),
+        };
         let config = Config {
             coordinator_url,
             auth_key,
@@ -506,6 +690,7 @@ fn run_daemon(
             announce_routes: file.announce_routes.clone(),
             coord_signing_pubkey,
             ca_cert_path,
+            udp_echo_addr,
             coord: None,
         };
         config.validate().map_err(|e| {
