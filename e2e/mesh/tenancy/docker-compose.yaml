@@ -1,0 +1,117 @@
+# tenancy e2e 拓扑（CONTROL_PLANE §1.5，SEC-21~25/CTL-09）：
+# 单 coordinator + 双网络（lab: node-a1/a2；work: node-b1/b2）+ node-d（ghost 网络 key，profile late）
+# 全部容器同一 docker bridge——隔离是逻辑的（控制面分域），非物理隔离：
+# 容器间 L2/L3 可达但 mesh 层互不可见，隔离断言更有说服力
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  node-a1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a1
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-a1.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  node-a2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a2
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-a2.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.12
+
+  node-b1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b1
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-b1.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+  node-b2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b2
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    command: ["--log-level", "debug"]
+    volumes:
+      - ../../build/node-b2.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.22
+
+  node-d:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-d
+    profiles: ["late"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-d.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.31
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24

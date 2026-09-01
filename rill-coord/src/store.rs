@@ -13,12 +13,17 @@ use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const STATE_SCHEMA: u32 = 1;
+pub const STATE_SCHEMA: u32 = 2;
 
 const STATE_TABLE: TableDefinition<&'static str, &[u8]> = TableDefinition::new("coord_state");
 const STATE_KEY: &str = "state";
 
+/// 每网络 PathMap 持久化条目：(network_id, PathMap, path_seq)
+pub type NetworkPathMap = (u32, Vec<(u32, u32, PathSet)>, u64);
+
 /// 持久状态快照（全部确定性 Vec，restore 时重建索引）
+/// schema v2（2026-09-01，CONTROL_PLANE §1.5 多网络）：key 版本 / PathMap / relay 列表
+/// 按网络分组（主密钥与路径域独立）；node_id 全局唯一（跨网络不冲突）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordState {
     pub schema: u32,
@@ -26,10 +31,13 @@ pub struct CoordState {
     pub nodes: Vec<NodeEntry>,
     pub consumed_one_time_keys: Vec<String>,
     pub netmap_version: u64,
-    pub key_version: u32,
+    /// (network_id, key_version)：每网络独立
+    pub key_versions: Vec<(u32, u32)>,
     pub endpoints: Vec<(u32, Vec<String>)>,
-    pub path_map: Vec<(u32, u32, PathSet)>,
-    pub path_seq: u64,
+    /// (network_id, PathMap, path_seq)：每网络独立
+    pub path_maps: Vec<NetworkPathMap>,
+    /// (network_id, relay_list)：RTT 排序结果落盘（CONNECTIVITY §5）
+    pub relay_lists: Vec<(u32, Vec<String>)>,
 }
 
 #[derive(Debug, thiserror::Error, landscape_rill_macro::ErrorId)]

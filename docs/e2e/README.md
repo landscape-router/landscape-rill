@@ -37,6 +37,11 @@ node-C 容器 ──┘
     移除 key → HUP → 即刻失效（node-c/d 用 compose profile `late` 门控，随阶段拉起）。
     注意：**bind mount 文件不可用 `sed -i` 修改**（rename 断开 inode，容器仍读旧文件）——
     须临时文件 + `cp` 原址覆盖
+  - `tenancy`：单 coordinator 双网络隔离（CONTROL_PLANE §1.5，SEC-21~25）——lab
+    （node-a1/a2）+ work（node-b1/b2）共用一个 coordinator，全部容器同 bridge（隔离是逻辑的）：
+    组内双栈互通、跨网络不可达、netmap 各见本网条目；node-d 持未配置网络（ghost）key 注册被拒；
+    `e2e/mesh/tenancy/forge.py` 向 node-a2 注入伪造 34B 帧（route_mac 用 work 主密钥派生）
+    断言 BadRouteMac 丢弃 + lab 主密钥正对照（越过 route_mac，证明 drop 因密钥不匹配）
 - **e2e 容器网段**（RFC 1918，避开 docker 默认池 172.17-172.30 与 CGNAT）：
   - `192.168.240.0/23`：mesh e2e 专用（direct 用 `192.168.240.0/24`，relay 的
     net1/net2 用 `192.168.240.0/24` + `192.168.241.0/24`）
@@ -46,7 +51,7 @@ node-C 容器 ──┘
 
 | 脚本 | 覆盖 | 前置条件 |
 |---|---|---|
-| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist\|log\|reload`（默认 direct） | docker + compose 构建 |
+| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist\|log\|reload\|tenancy`（默认 direct） | docker + compose 构建 |
 | `e2e/setup.sh` | 初始化：base 镜像/CA/密钥/编译/配置/构建启动/路由与黑洞注入；幂等（开头强制 `cleanup.sh`） | 同上 |
 | `e2e/cleanup.sh` | 幂等清理：全部 mesh 场景容器/网络 + `build/`（可重复执行） | 同上 |
 | `e2e/p0_tailscale/run_p0.sh` | P0 过渡验证（headscale + 官方客户端入网 + WG 直连） | docker，GitHub/pkgs 可达 |

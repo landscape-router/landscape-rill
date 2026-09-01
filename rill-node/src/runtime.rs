@@ -288,7 +288,10 @@ impl Node {
                 info!("[node] relayed frame to {}", to);
                 None
             }
-            IncomingEvent::Dropped { .. } => None,
+            IncomingEvent::Dropped { reason } => {
+                debug!("[node] dropped frame: {:?}", reason);
+                None
+            }
         }
     }
 
@@ -557,7 +560,10 @@ impl Node {
                 info!("[node] relayed frame to {}", to);
                 None
             }
-            IncomingEvent::Dropped { .. } => None,
+            IncomingEvent::Dropped { reason } => {
+                debug!("[node] dropped frame: {:?}", reason);
+                None
+            }
         }
     }
 
@@ -859,9 +865,10 @@ mod tests {
             .await
             .coordinator
             .add_auth_key(&ak, AuthKeyPolicy::Reusable);
-        server.lock().await.coordinator.set_announce_whitelist(vec![
-            landscape_rill_core::route::Prefix::parse("10.0.0.0/8").unwrap(),
-        ]);
+        server.lock().await.coordinator.set_announce_whitelist(
+            "lab",
+            vec![landscape_rill_core::route::Prefix::parse("10.0.0.0/8").unwrap()],
+        );
         let srv = server.clone();
         tokio::spawn(async move {
             let mut listener = listener;

@@ -35,9 +35,10 @@ pub fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn netmap_push_message(coordinator: &Coordinator) -> NetmapPush<'static> {
+/// 网络隔离（SEC-21/CTL-09）：只推指定网络的条目与 relay 列表
+pub fn netmap_push_message(coordinator: &Coordinator, network_id: u32) -> NetmapPush<'static> {
     let entries = coordinator
-        .netmap_snapshot()
+        .netmap_snapshot(network_id)
         .into_iter()
         .map(|info| NetmapEntry {
             node_id: info.node_id,
@@ -53,7 +54,7 @@ pub fn netmap_push_message(coordinator: &Coordinator) -> NetmapPush<'static> {
         version: coordinator.netmap_version(),
         entries,
         relay_list: coordinator
-            .relay_list()
+            .relay_list_for(network_id)
             .iter()
             .map(|s| Cow::Owned(s.clone()))
             .collect(),
@@ -80,19 +81,37 @@ pub struct CoordinatorServer {
 impl CoordinatorServer {
     pub fn new(master_key: [u8; 32], signing_seed: [u8; 32]) -> Self {
         Self {
-            coordinator: Coordinator::new(master_key, signing_seed),
+            coordinator: Coordinator::new(signing_seed),
             register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
         }
+        .with_network("lab", master_key)
     }
 
-    /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（auth keys + 白名单）；
+    /// 注册网络域（多网络；网络名 → fnv1a network_id，CONTROL_PLANE §1.5）
+    pub fn with_network(mut self, name: &str, master_key: [u8; 32]) -> Self {
+        self.coordinator.add_network(name, master_key);
+        self
+    }
+
+    /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（网络域 + auth keys + 白名单）；
     /// 配置 storage_path 时打开持久化存储（REQ-037），损坏/不一致 → Err（fail-closed）
     pub fn from_config(cfg: &CoordConfig) -> BoxResult<Self> {
+        let networks: Vec<(String, [u8; 32])> = cfg
+            .networks
+            .iter()
+            .map(|n| (n.name.clone(), n.master_key))
+            .collect();
         let coordinator = match &cfg.storage_path {
             Some(path) => {
-                Coordinator::open(std::path::Path::new(path), cfg.master_key, cfg.signing_seed)?
+                Coordinator::open(std::path::Path::new(path), &networks, cfg.signing_seed)?
             }
-            None => Coordinator::new(cfg.master_key, cfg.signing_seed),
+            None => {
+                let mut coord = Coordinator::new(cfg.signing_seed);
+                for (name, key) in &networks {
+                    coord.add_network(name, *key);
+                }
+                coord
+            }
         };
         let mut server = Self {
             coordinator,
@@ -107,13 +126,18 @@ impl CoordinatorServer {
         cfg.apply_to(&mut self.coordinator);
     }
 
-    /// 注册成功/挑战通过后：全量 netmap + 逐节点 key_dst + 广播密钥（v1 全量互连）
-    async fn push_snapshot<W: AsyncWriteExt + Unpin>(&self, stream: &mut W) -> BoxResult<()> {
-        let push = netmap_push_message(&self.coordinator);
+    /// 注册成功/挑战通过后：全量 netmap + 逐节点 key_dst + 广播密钥（v1 全量互连）。
+    /// 按注册节点所属网络隔离（SEC-21/CTL-09）。
+    async fn push_snapshot<W: AsyncWriteExt + Unpin>(
+        &self,
+        stream: &mut W,
+        network_id: u32,
+    ) -> BoxResult<()> {
+        let push = netmap_push_message(&self.coordinator, network_id);
         write_msg(stream, MsgType::NETMAP_PUSH, &envelope_body(&push)).await?;
         let node_ids: Vec<u32> = self
             .coordinator
-            .netmap_snapshot()
+            .netmap_snapshot(network_id)
             .into_iter()
             .map(|n| n.node_id)
             .collect();
@@ -184,7 +208,11 @@ impl CoordinatorServer {
                             .await?;
                         state.registered = Some(data.node_id);
                         self.coordinator.heartbeat(data.node_id, unix_seconds());
-                        self.push_snapshot(stream).await?;
+                        self.push_snapshot(
+                            stream,
+                            self.coordinator.network_id_of(data.node_id).unwrap_or(0),
+                        )
+                        .await?;
                         state.challenge = None;
                     }
                     Err(landscape_rill_core::control::registry::RegisterError::InvalidAuthKey) => {
@@ -260,7 +288,8 @@ impl CoordinatorServer {
                 }
                 state.registered = Some(node_id);
                 self.coordinator.heartbeat(node_id, unix_seconds());
-                self.push_snapshot(stream).await?;
+                let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
+                self.push_snapshot(stream, network_id).await?;
                 state.challenge = None;
             }
             MsgType::HEARTBEAT => {
@@ -269,7 +298,8 @@ impl CoordinatorServer {
                 if let Some(node_id) = state.registered {
                     self.coordinator.heartbeat(node_id, unix_seconds());
                     // 周期收敛：端点/离线等软状态随心跳广播（v1 无增量推送）
-                    self.push_snapshot(stream).await?;
+                    let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
+                    self.push_snapshot(stream, network_id).await?;
                     // 路径事件推送（v1.5，CONTROL_PLANE §3.11）：PathUpdate/PathWithdraw
                     self.push_path_events(stream, node_id).await?;
                     let lease = Lease {
@@ -347,7 +377,7 @@ impl CoordinatorServer {
                                 expires_at: c.expires_at,
                                 key_path: Cow::Owned(
                                     self.coordinator
-                                        .key_path_for(c.path_id, c.path_epoch)
+                                        .key_path_for(src, c.path_id, c.path_epoch)
                                         .to_vec(),
                                 ),
                             })
@@ -442,7 +472,10 @@ mod tests {
         let mut reader = BytesReader::from_bytes(&body);
         let resp = RegisterResponse::from_reader(&mut reader, &body).unwrap();
         assert_eq!(resp.node_id, 1);
-        assert_eq!(resp.network_id, 1);
+        assert_eq!(
+            resp.network_id,
+            landscape_rill_coord::domain::network_id_for("lab")
+        );
         let (mt2, body2) =
             tokio::time::timeout(std::time::Duration::from_secs(2), read_envelope(&mut tls))
                 .await

@@ -69,11 +69,10 @@
 ## CTL-09 租户隔离（多网络）
 
 - 关联 REQ：REQ-010
-- 测试层：单测（核心）
-- 状态：`待补充`
-- 证据：—
-- 缺口：多网络分域实现（network_id/独立主密钥/auth key 归域）未落地；跨网伪造 route_mac 无验证
-- 说明：实现后联动 SEC-21 ~ SEC-25 对抗断言
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`
+- 证据：rill-coord/src/coordinator.rs、rill-coord/src/domain.rs、e2e/run_e2e.sh
+- 说明：单 coordinator 多网络（CONTROL_PLANE §1.5）——每网络独立 registry/主密钥/auth key 空间/白名单/路径域；netmap 按网络过滤；跨网 key 伪造、auth key 归域、绑定越权、白名单越权对抗断言见 SEC-21~25（docs/tests/security/tenancy.md）
 
 ## CTL-10 前缀公告白名单
 

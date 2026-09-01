@@ -4,9 +4,12 @@
 //! 生效走 `apply_to`（库 API，函数调用），CLI/未来管理面为薄调用层。
 //! 变更生效 = SIGHUP 重载：重新 parse/validate 后再次 apply_to（增量收敛）。
 //! lrk auth key 格式见 [`authkey`](crate::authkey)。
+//! 多网络（CONTROL_PLANE §1.5，2026-09-01）：`networks` 列表定义隔离网络
+//! （每网络独立主密钥 / auth key 空间 / 前缀白名单；network_id = fnv1a(name) 确定性散列）。
 
 use crate::authkey::{parse_auth_key, validate_network};
 use crate::coordinator::Coordinator;
+use crate::domain::network_id_for;
 use landscape_rill_core::control::registry::{AuthKeyPolicy, AuthKeySpec};
 use landscape_rill_core::error::ErrorId;
 use landscape_rill_core::route::Prefix;
@@ -19,24 +22,31 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoordConfig {
-    /// 网络标识（auth key 归域绑定，CONTROL_PLANE §1.5）
-    pub network: String,
     pub listen_addr: String,
     pub tls_cert_path: String,
     pub tls_key_path: String,
     #[serde(with = "hex32")]
-    pub master_key: [u8; 32],
-    #[serde(with = "hex32")]
     pub signing_seed: [u8; 32],
+    /// 持久化存储文件（REQ-037，CONTROL_PLANE §4.1）；None = 纯内存（重启丢失注册）。
+    /// 仅启动时读取，SIGHUP 重载不更换存储文件。
+    #[serde(default)]
+    pub storage_path: Option<String>,
+    /// 隔离网络列表（CONTROL_PLANE §1.5）：每网络独立主密钥 / auth key 空间 / 白名单
+    #[serde(default)]
+    pub networks: Vec<NetworkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkConfig {
+    /// 网络标识（auth key 归域绑定；network_id = fnv1a(name)）
+    pub name: String,
+    #[serde(with = "hex32")]
+    pub master_key: [u8; 32],
     #[serde(default)]
     pub auth_keys: Vec<AuthKeyConfig>,
     /// 允许公告的前缀集合；空 = 拒绝一切公告（fail-closed）
     #[serde(default)]
     pub announce_whitelist: Vec<String>,
-    /// 持久化存储文件（REQ-037，CONTROL_PLANE §4.1）；None = 纯内存（重启丢失注册）。
-    /// 仅启动时读取，SIGHUP 重载不更换存储文件。
-    #[serde(default)]
-    pub storage_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,26 +98,46 @@ impl CoordConfig {
         Self::parse(&text)
     }
 
-    /// 校验（fail-closed）：必填字段、auth key 格式/归域、白名单前缀合法 + 长度边界
+    /// 校验（fail-closed）：必填字段、网络唯一性、auth key 格式/归域、白名单前缀合法 + 长度边界
     pub fn validate(&self) -> Result<(), ConfigError> {
-        validate_network(&self.network).map_err(|e| ConfigError(e.to_string()))?;
         self.listen_addr
             .parse::<SocketAddr>()
             .map_err(|_| ConfigError(format!("invalid listen_addr: {}", self.listen_addr)))?;
-        for ak in &self.auth_keys {
-            let (net, _, _) = parse_auth_key(&ak.key).map_err(|e| ConfigError(e.to_string()))?;
-            if net != self.network {
+        if self.networks.is_empty() {
+            return Err(ConfigError("networks must not be empty".into()));
+        }
+        let mut seen_names = std::collections::HashSet::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        for net in &self.networks {
+            validate_network(&net.name).map_err(|e| ConfigError(e.to_string()))?;
+            if !seen_names.insert(net.name.clone()) {
+                return Err(ConfigError(format!("duplicate network name: {}", net.name)));
+            }
+            let network_id = network_id_for(&net.name);
+            if !seen_ids.insert(network_id) {
                 return Err(ConfigError(format!(
-                    "auth key network mismatch: key={net} config network={}",
-                    self.network
+                    "network_id collision (fnv1a): {} / 换名",
+                    net.name
                 )));
             }
-            if ak.policy != "onetime" && ak.policy != "reusable" {
-                return Err(ConfigError(format!("invalid policy: {}", ak.policy)));
+            for ak in &net.auth_keys {
+                let (net_name, _, _) =
+                    parse_auth_key(&ak.key).map_err(|e| ConfigError(e.to_string()))?;
+                // 归域（CONTROL_PLANE §1.5）：key 内嵌网络必须等于所在网络段
+                if net_name != net.name {
+                    return Err(ConfigError(format!(
+                        "auth key network mismatch: key={net_name} network segment={}",
+                        net.name
+                    )));
+                }
+                if ak.policy != "onetime" && ak.policy != "reusable" {
+                    return Err(ConfigError(format!("invalid policy: {}", ak.policy)));
+                }
             }
-        }
-        for w in &self.announce_whitelist {
-            Prefix::parse(w).map_err(|_| ConfigError(format!("invalid whitelist prefix: {w}")))?;
+            for w in &net.announce_whitelist {
+                Prefix::parse(w)
+                    .map_err(|_| ConfigError(format!("invalid whitelist prefix: {w}")))?;
+            }
         }
         if let Some(p) = &self.storage_path {
             if p.trim().is_empty() {
@@ -117,32 +147,35 @@ impl CoordConfig {
         Ok(())
     }
 
-    /// 应用到 Coordinator（库 API，函数调用生效；增量收敛：auth key 增删、白名单替换）
+    /// 应用到 Coordinator（库 API，函数调用生效；按网络增量收敛：auth key 增删、白名单替换）。
+    /// 前提：Coordinator 已按本配置的 networks 建域（new + add_network 或 open）。
     pub fn apply_to(&self, coord: &mut Coordinator) {
-        for ak in &self.auth_keys {
-            let policy = match ak.policy.as_str() {
-                "onetime" => AuthKeyPolicy::OneTime,
-                _ => AuthKeyPolicy::Reusable,
-            };
-            coord.add_auth_key_spec(
-                &ak.key,
-                AuthKeySpec {
-                    policy,
-                    tag: ak.tag.clone(),
-                },
-            );
-        }
-        for existing in coord.auth_key_list() {
-            if !self.auth_keys.iter().any(|ak| ak.key == existing) {
-                coord.remove_auth_key(&existing);
+        for net in &self.networks {
+            for ak in &net.auth_keys {
+                let policy = match ak.policy.as_str() {
+                    "onetime" => AuthKeyPolicy::OneTime,
+                    _ => AuthKeyPolicy::Reusable,
+                };
+                coord.add_auth_key_spec(
+                    &ak.key,
+                    AuthKeySpec {
+                        policy,
+                        tag: ak.tag.clone(),
+                    },
+                );
             }
+            for existing in coord.auth_key_list_for(&net.name) {
+                if !net.auth_keys.iter().any(|ak| ak.key == existing) {
+                    coord.remove_auth_key(&existing);
+                }
+            }
+            let whitelist: Vec<Prefix> = net
+                .announce_whitelist
+                .iter()
+                .map(|w| Prefix::parse(w).expect("validated"))
+                .collect();
+            coord.set_announce_whitelist(&net.name, whitelist);
         }
-        let whitelist: Vec<Prefix> = self
-            .announce_whitelist
-            .iter()
-            .map(|w| Prefix::parse(w).expect("validated"))
-            .collect();
-        coord.set_announce_whitelist(whitelist);
     }
 }
 
@@ -180,17 +213,21 @@ mod tests {
     fn valid_config() -> String {
         format!(
             r#"{{
-  "network": "lab",
   "listen_addr": "0.0.0.0:8443",
   "tls_cert_path": "/t/crt.pem",
   "tls_key_path": "/t/key.pem",
-  "master_key": "{}",
   "signing_seed": "{}",
-  "auth_keys": [{{ "key": "{}", "policy": "onetime" }}],
-  "announce_whitelist": ["10.0.0.0/8", "fd00:2::/32"]
+  "networks": [
+    {{
+      "name": "lab",
+      "master_key": "{}",
+      "auth_keys": [{{ "key": "{}", "policy": "onetime" }}],
+      "announce_whitelist": ["10.0.0.0/8", "fd00:2::/32"]
+    }}
+  ]
 }}"#,
-            "11".repeat(32),
             "22".repeat(32),
+            "11".repeat(32),
             generate_auth_key("lab", 3600).unwrap()
         )
     }
@@ -198,14 +235,15 @@ mod tests {
     #[test]
     fn config_parse_and_validate() {
         let cfg = CoordConfig::parse(&valid_config()).unwrap();
-        assert_eq!(cfg.network, "lab");
-        assert_eq!(cfg.auth_keys.len(), 1);
-        assert_eq!(cfg.announce_whitelist.len(), 2);
+        assert_eq!(cfg.networks.len(), 1);
+        assert_eq!(cfg.networks[0].name, "lab");
+        assert_eq!(cfg.networks[0].auth_keys.len(), 1);
+        assert_eq!(cfg.networks[0].announce_whitelist.len(), 2);
     }
 
     #[test]
     fn config_rejects_network_mismatch() {
-        let text = valid_config().replace("\"network\": \"lab\"", "\"network\": \"other\"");
+        let text = valid_config().replace("\"name\": \"lab\"", "\"name\": \"other\"");
         let err = CoordConfig::parse(&text).unwrap_err();
         assert!(err.to_string().contains("auth key network mismatch"));
     }
@@ -233,20 +271,97 @@ mod tests {
     }
 
     #[test]
+    fn config_empty_networks_rejected() {
+        let text = format!(
+            r#"{{
+  "listen_addr": "0.0.0.0:8443",
+  "tls_cert_path": "/t/crt.pem",
+  "tls_key_path": "/t/key.pem",
+  "signing_seed": "{}",
+  "networks": []
+}}"#,
+            "22".repeat(32)
+        );
+        let err = CoordConfig::parse(&text).unwrap_err();
+        assert!(err.to_string().contains("networks must not be empty"));
+    }
+
+    #[test]
+    fn config_duplicate_network_rejected() {
+        // 同名单网络段 → 拒绝
+        let net = format!(
+            r#"{{
+        "name": "lab",
+        "master_key": "{}",
+        "auth_keys": [],
+        "announce_whitelist": []
+      }}"#,
+            "33".repeat(32)
+        );
+        let text = format!(
+            r#"{{
+  "listen_addr": "0.0.0.0:8443",
+  "tls_cert_path": "/t/crt.pem",
+  "tls_key_path": "/t/key.pem",
+  "signing_seed": "{}",
+  "networks": [{net}]
+}}"#,
+            "22".repeat(32)
+        );
+        // 两份 lab → duplicate
+        let dup = text.replace(&net.clone(), &format!("{net}, {net}"));
+        assert!(CoordConfig::parse(&dup).is_err());
+    }
+
+    #[test]
+    fn config_multi_network_ok() {
+        let ka = generate_auth_key("lab", 3600).unwrap();
+        let kb = generate_auth_key("work", 3600).unwrap();
+        let text = format!(
+            r#"{{
+  "listen_addr": "0.0.0.0:8443",
+  "tls_cert_path": "/t/crt.pem",
+  "tls_key_path": "/t/key.pem",
+  "signing_seed": "{}",
+  "networks": [
+    {{ "name": "lab", "master_key": "{}", "auth_keys": [{{ "key": "{ka}", "policy": "reusable" }}], "announce_whitelist": ["10.0.0.0/8"] }},
+    {{ "name": "work", "master_key": "{}", "auth_keys": [{{ "key": "{kb}", "policy": "reusable" }}], "announce_whitelist": ["192.168.0.0/16"] }}
+  ]
+}}"#,
+            "22".repeat(32),
+            "11".repeat(32),
+            "44".repeat(32)
+        );
+        let cfg = CoordConfig::parse(&text).unwrap();
+        assert_eq!(cfg.networks.len(), 2);
+        // 跨网络 key 放错段 → 拒绝
+        let bad = text.replace(&format!("\"key\": \"{kb}\""), &format!("\"key\": \"{ka}\""));
+        assert!(CoordConfig::parse(&bad).is_err());
+    }
+
+    #[test]
     fn apply_to_syncs_auth_keys_and_whitelist() {
         let cfg = CoordConfig::parse(&valid_config()).unwrap();
-        let mut coord = Coordinator::new([0x33; 32], [0x44; 32]);
+        let mut coord = Coordinator::new([0x44; 32]);
+        for net in &cfg.networks {
+            coord.add_network(&net.name, net.master_key);
+        }
         cfg.apply_to(&mut coord);
         assert_eq!(coord.auth_key_list().len(), 1);
         assert_eq!(
-            coord.announce_whitelist(),
+            coord.announce_whitelist("lab"),
             vec!["10.0.0.0/8", "fd00:2::/32"]
         );
         // 再应用一次（幂等）；移除 key 后收敛
         cfg.apply_to(&mut coord);
         assert_eq!(coord.auth_key_list().len(), 1);
         let empty = CoordConfig {
-            auth_keys: vec![],
+            networks: vec![NetworkConfig {
+                name: "lab".into(),
+                master_key: [0x11; 32],
+                auth_keys: vec![],
+                announce_whitelist: vec![],
+            }],
             ..cfg.clone()
         };
         empty.apply_to(&mut coord);

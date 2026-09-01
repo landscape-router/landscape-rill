@@ -252,10 +252,11 @@ async fn run_coord(config_path: &Path) -> BoxResult<()> {
     // 高频失败 → 周期摘要（LOGGING §5）：事件只计数，每周期 ≤1 条，0 不输出
     let mut accept_failed = RateCounter::new(RATE_SUMMARY_PERIOD);
     let mut summary = tokio::time::interval(RATE_SUMMARY_PERIOD);
+    let net_names: Vec<String> = config.networks.iter().map(|n| n.name.clone()).collect();
     info!(
-        "[coord] listening on {} (network={}, reload=SIGHUP)",
+        "[coord] listening on {} (networks={}, reload=SIGHUP)",
         listener.local_addr()?,
-        config.network
+        net_names.join(",")
     );
     loop {
         tokio::select! {

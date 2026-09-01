@@ -14,6 +14,7 @@ pub enum AuthKeyPolicy {
 /// auth key 生命周期配置（REQ-036）：策略 + 可读标签。
 /// 过期时间内嵌在 key 自身（REQ-043，`lrk-<network>-<expiry>-<secret>`），由
 /// Coordinator 注册时解析校验（admission-time），注册表按不透明字符串处理。
+/// 网络维度由 key 自身携带（CONTROL_PLANE §1.5 归域）：一个 Registry 实例 = 一个网络。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthKeySpec {
     pub policy: AuthKeyPolicy,
@@ -62,6 +63,9 @@ pub enum RegisterOutcome {
     Existing(u32),
 }
 
+/// 单个网络的注册表（CONTROL_PLANE §1.5 分域：auth key 空间 / 条目 / 白名单按网络独立）。
+/// node_id 由调用方全局分配（coordinator 持全局计数器），跨网络不冲突
+/// （Directory/Liveness 按 node_id 键控，全局唯一是前置条件）。
 pub struct Registry {
     entries: HashMap<u32, NodeEntry>,
     pubkeys: HashMap<[u8; STATIC_PUBKEY_LEN], u32>,
@@ -70,7 +74,6 @@ pub struct Registry {
     consumed_one_time: Vec<String>,
     announce_whitelist: Vec<Prefix>,
     network_id: u32,
-    next_node_id: u32,
 }
 
 /// 前缀长度边界（CONTROL_PLANE §3.8）：IPv4 < /8、IPv6 < /32 拒绝
@@ -91,8 +94,11 @@ impl Registry {
             consumed_one_time: Vec::new(),
             announce_whitelist: Vec::new(),
             network_id,
-            next_node_id: 1,
         }
+    }
+
+    pub fn network_id(&self) -> u32 {
+        self.network_id
     }
 
     pub fn add_auth_key(&mut self, key: &str, policy: AuthKeyPolicy) {
@@ -146,20 +152,24 @@ impl Registry {
         Ok(())
     }
 
+    /// 注册（admission）：auth key 查表 → pubkey 幂等/冲突 → 白名单校验 → 插入。
+    /// `node_id` 由调用方分配（全局唯一）；归域（auth key 网络 = 本 Registry 网络）由
+    /// 调用方在解析 key 后选择 Registry 实例完成（CONTROL_PLANE §1.5）。
     pub fn register(
         &mut self,
         auth_key: &str,
         static_pubkey: &[u8; STATIC_PUBKEY_LEN],
         capabilities: u32,
         routes: Vec<String>,
+        node_id: u32,
         signer: &dyn IdentitySigner,
     ) -> Result<RegisterOutcome, RegisterError> {
         let spec = self
             .auth_keys
             .get(auth_key)
             .ok_or(RegisterError::InvalidAuthKey)?;
-        if let Some(node_id) = self.pubkeys.get(static_pubkey) {
-            let node_id = *node_id;
+        if let Some(existing) = self.pubkeys.get(static_pubkey) {
+            let node_id = *existing;
             let entry = self.entries.get(&node_id).unwrap();
             if entry.capabilities == capabilities && entry.routes == routes {
                 return Ok(RegisterOutcome::Existing(node_id));
@@ -167,8 +177,6 @@ impl Registry {
             return Err(RegisterError::PubkeyMismatch);
         }
         self.check_announce_routes(&routes)?;
-        let node_id = self.next_node_id;
-        self.next_node_id += 1;
         let binding = signer.sign(&binding_message(node_id, static_pubkey));
         let entry = NodeEntry {
             node_id,
@@ -205,25 +213,19 @@ impl Registry {
         self.pubkeys.get(static_pubkey).copied()
     }
 
-    /// 下一节点号（持久化；重启不重用，防 node_id 复用）
-    pub fn next_node_id(&self) -> u32 {
-        self.next_node_id
-    }
-
     /// 已消费的一次性 auth key（持久化 tombstone）
     pub fn consumed_one_time_keys(&self) -> &[String] {
         &self.consumed_one_time
     }
 
     /// 恢复持久化状态（REQ-037）：一致性校验由调用方 fail-closed 完成
-    pub fn restore(&mut self, entries: Vec<NodeEntry>, next_node_id: u32, consumed: Vec<String>) {
+    pub fn restore(&mut self, entries: Vec<NodeEntry>, consumed: Vec<String>) {
         self.entries.clear();
         self.pubkeys.clear();
         for e in entries {
             self.pubkeys.insert(e.static_pubkey, e.node_id);
             self.entries.insert(e.node_id, e);
         }
-        self.next_node_id = next_node_id;
         self.consumed_one_time = consumed;
     }
 }
@@ -268,11 +270,25 @@ mod tests {
         reg.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
         reg.set_announce_whitelist(vec![Prefix::parse("10.0.0.0/8").unwrap()]);
         let out1 = reg
-            .register("ak-1", &key(1), 0x0d, vec!["10.0.0.0/24".into()], &signer)
+            .register(
+                "ak-1",
+                &key(1),
+                0x0d,
+                vec!["10.0.0.0/24".into()],
+                1,
+                &signer,
+            )
             .unwrap();
         assert_eq!(out1, RegisterOutcome::NewNode(1));
         let out2 = reg
-            .register("ak-1", &key(1), 0x0d, vec!["10.0.0.0/24".into()], &signer)
+            .register(
+                "ak-1",
+                &key(1),
+                0x0d,
+                vec!["10.0.0.0/24".into()],
+                1,
+                &signer,
+            )
             .unwrap_err();
         assert_eq!(out2, RegisterError::InvalidAuthKey);
     }
@@ -282,11 +298,17 @@ mod tests {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
-        let a = reg.register("ak-r", &key(1), 0, vec![], &signer).unwrap();
-        let b = reg.register("ak-r", &key(2), 0, vec![], &signer).unwrap();
+        let a = reg
+            .register("ak-r", &key(1), 0, vec![], 1, &signer)
+            .unwrap();
+        let b = reg
+            .register("ak-r", &key(2), 0, vec![], 2, &signer)
+            .unwrap();
         assert_eq!(a, RegisterOutcome::NewNode(1));
         assert_eq!(b, RegisterOutcome::NewNode(2));
-        let idem = reg.register("ak-r", &key(1), 0, vec![], &signer).unwrap();
+        let idem = reg
+            .register("ak-r", &key(1), 0, vec![], 1, &signer)
+            .unwrap();
         assert_eq!(idem, RegisterOutcome::Existing(1));
     }
 
@@ -295,10 +317,10 @@ mod tests {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
-        reg.register("ak-r", &key(1), 0x01, vec![], &signer)
+        reg.register("ak-r", &key(1), 0x01, vec![], 1, &signer)
             .unwrap();
         let err = reg
-            .register("ak-r", &key(1), 0x02, vec![], &signer)
+            .register("ak-r", &key(1), 0x02, vec![], 1, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::PubkeyMismatch);
     }
@@ -308,7 +330,7 @@ mod tests {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         let err = reg
-            .register("nope", &key(1), 0, vec![], &signer)
+            .register("nope", &key(1), 0, vec![], 1, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::InvalidAuthKey);
     }
@@ -318,7 +340,10 @@ mod tests {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
-        let node_id = match reg.register("ak-1", &key(1), 0, vec![], &signer).unwrap() {
+        let node_id = match reg
+            .register("ak-1", &key(1), 0, vec![], 1, &signer)
+            .unwrap()
+        {
             RegisterOutcome::NewNode(id) => id,
             _ => panic!("expected new node"),
         };
@@ -326,7 +351,9 @@ mod tests {
         reg.revoke(node_id);
         assert!(reg.entry(node_id).is_none());
         reg.add_auth_key("ak-2", AuthKeyPolicy::OneTime);
-        let out = reg.register("ak-2", &key(1), 0, vec![], &signer).unwrap();
+        let out = reg
+            .register("ak-2", &key(1), 0, vec![], 2, &signer)
+            .unwrap();
         match out {
             RegisterOutcome::NewNode(id) => assert_ne!(id, node_id),
             _ => panic!("expected new node"),
@@ -338,7 +365,10 @@ mod tests {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
-        let node_id = match reg.register("ak-1", &key(1), 0, vec![], &signer).unwrap() {
+        let node_id = match reg
+            .register("ak-1", &key(1), 0, vec![], 1, &signer)
+            .unwrap()
+        {
             RegisterOutcome::NewNode(id) => id,
             _ => panic!("expected new node"),
         };
@@ -357,7 +387,14 @@ mod tests {
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
         reg.set_announce_whitelist(vec![Prefix::parse("10.0.0.0/8").unwrap()]);
         let err = reg
-            .register("ak-r", &key(1), 0, vec!["192.168.1.0/24".into()], &signer)
+            .register(
+                "ak-r",
+                &key(1),
+                0,
+                vec!["192.168.1.0/24".into()],
+                1,
+                &signer,
+            )
             .unwrap_err();
         assert_eq!(err, RegisterError::RouteNotAllowed);
     }
@@ -377,6 +414,7 @@ mod tests {
                 &key(1),
                 0,
                 vec!["10.42.0.0/24".into(), "fd00:2::/64".into()],
+                1,
                 &signer,
             )
             .unwrap();
@@ -389,7 +427,7 @@ mod tests {
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
         let err = reg
-            .register("ak-r", &key(1), 0, vec!["10.0.0.0/24".into()], &signer)
+            .register("ak-r", &key(1), 0, vec!["10.0.0.0/24".into()], 1, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::RouteNotAllowed);
     }
@@ -401,11 +439,11 @@ mod tests {
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
         reg.set_announce_whitelist(vec![Prefix::parse("0.0.0.0/0").unwrap()]);
         let err = reg
-            .register("ak-r", &key(1), 0, vec!["0.0.0.0/0".into()], &signer)
+            .register("ak-r", &key(1), 0, vec!["0.0.0.0/0".into()], 1, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::RouteNotAllowed);
         let err = reg
-            .register("ak-r", &key(1), 0, vec!["fd00::/16".into()], &signer)
+            .register("ak-r", &key(1), 0, vec!["fd00::/16".into()], 1, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::RouteNotAllowed);
     }
@@ -417,7 +455,7 @@ mod tests {
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
         reg.set_announce_whitelist(vec![Prefix::parse("10.0.0.0/8").unwrap()]);
         let err = reg
-            .register("ak-r", &key(1), 0, vec!["not-a-cidr".into()], &signer)
+            .register("ak-r", &key(1), 0, vec!["not-a-cidr".into()], 1, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::BadRoute);
     }
