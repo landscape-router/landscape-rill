@@ -42,6 +42,14 @@ mod logging;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/landscape/overlay.json";
 const UNIT_NAME: &str = "lrill.service";
+/// 配置文件路径环境变量（CONTROL_PLANE §3.12：CLI > env > 默认）
+const CONFIG_ENV: &str = "LRILL_CONFIG";
+
+/// 配置文件路径选择（CONTROL_PLANE §3.12 通用约定）：`run [config]` > `LRILL_CONFIG` > 默认
+fn select_config(cli: Option<PathBuf>) -> PathBuf {
+    cli.or_else(|| std::env::var_os(CONFIG_ENV).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))
+}
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -429,13 +437,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(Command::Up) => cmd_up().map_err(Into::into),
         Some(Command::Down) => cmd_down().map_err(Into::into),
         Some(Command::Status) => cmd_status().map_err(Into::into),
-        None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH), None, None),
+        None => run_daemon(&select_config(None), None, None),
         Some(Command::Run {
             config,
             log_file,
             log_level,
         }) => run_daemon(
-            &config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)),
+            &select_config(config),
             log_file,
             log_level.map(LogLevel::as_filter),
         ),

@@ -5,7 +5,7 @@
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
 > 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038
 
-**版本：v0.6（2026-08-31 修订：术语统一——节点类型 / "接入"叫法）**
+**版本：v0.7（2026-09-01 修订：§3.12 启动参数优先级通用约定 CLI > env > 默认）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -281,6 +281,18 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 - 二进制 `lrill`，子命令：`pubkey <seed>`（Ed25519 公钥工具）/ `run [config]`（前台 daemon，容器/开发形态）/ `authkey`（生成 auth key，§6）/ `up|down|status`（systemd 托管）
 - **daemon 托管 = systemd 优先**：`up` 生成并安装 unit 模板 + `systemctl start`；`down`/`status` 走 systemctl；无 systemd 环境 `up/down/status` 明确报错并提示 `lrill run`
 - 明确否决：v1 不做自守护 + unix socket（SSH session SIGHUP 坑、多线程 fork 时序、容器 PID1 冲突）；等真实需求出现再开 REQ
+
+**启动参数优先级（通用约定，2026-09-01）**
+
+进程级可配置项统一按 **CLI 显式 > 环境变量 > 默认值** 解析（新增此类配置必须遵循）：
+
+| 配置项 | CLI | 环境变量 | 默认 |
+|---|---|---|---|
+| 配置文件路径 | `lrill run [config]` | `LRILL_CONFIG` | `/etc/landscape/overlay.json` |
+| 日志级别 | `lrill run --log-level` | `RUST_LOG` | `info`（LOGGING §2） |
+| 日志文件 | `lrill run --log-file` | `LRILL_LOG_FILE` | 仅 stderr（LOGGING §4） |
+
+配置文件内容（coord 配置字段）不在此链内——配置文件本身是唯一权威（本节）；此约定只管"进程启动时选哪份配置 / 开关怎么设"。
 
 ## 4. 状态模型（Raft 兼容核心）
 
