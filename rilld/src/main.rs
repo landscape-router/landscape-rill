@@ -18,7 +18,10 @@
 //! 生效走 CoordinatorServer::from_config/apply_config 库 API；本文件只是薄调用层。
 
 use clap::{Parser, Subcommand};
-use landscape_rill_coord::config::{generate_auth_key, CoordConfig};
+use landscape_rill_coord::config::{
+    generate_auth_key, is_expired, parse_auth_key, parse_duration, validate_network, CoordConfig,
+    AUTH_KEY_DEFAULT_TTL_SECS,
+};
 use landscape_rill_mesh::control::{
     read_envelope, server_tls_stream, ConnectionState, CoordinatorServer,
 };
@@ -35,6 +38,13 @@ use tokio::sync::Mutex;
 const DEFAULT_CONFIG_PATH: &str = "/etc/landscape/overlay.json";
 const UNIT_NAME: &str = "lrill.service";
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Parser)]
 #[command(name = "lrill", version, about = "landscape-rill edge node daemon")]
 struct Cli {
@@ -48,11 +58,15 @@ enum Command {
     Pubkey { seed: String },
     /// 前台运行 daemon（缺省配置 /etc/landscape/overlay.json）
     Run { config: Option<PathBuf> },
-    /// 生成 auth key（lrk-<network>-<base32>，输出仅 stdout，不落日志）
+    /// 生成 auth key（lrk-<network>-<expiry>-<base32>，输出仅 stdout，不落日志；
+    /// 默认有效期 24h，--ttl 0 永不过期；REQ-036/REQ-043）
     Authkey {
         /// 网络标识（归域绑定，须与 coordinator 配置 network 一致）
         #[arg(long)]
         network: String,
+        /// 有效期：<num><s|m|h|d>（如 30m/12h/7d），0 = 永不过期；默认 24h
+        #[arg(long)]
+        ttl: Option<String>,
     },
     /// 安装并启动 systemd 服务（无 systemd 环境报错提示 `lrill run`）
     Up,
@@ -346,8 +360,17 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             println!("{}", hex32::encode_owned(&vk.to_bytes()));
             Ok(())
         }
-        Some(Command::Authkey { network }) => {
-            let key = generate_auth_key(&network)?;
+        Some(Command::Authkey { network, ttl }) => {
+            validate_network(&network).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+            })?;
+            let ttl_secs = match ttl {
+                Some(v) => parse_duration(&v).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                })?,
+                None => AUTH_KEY_DEFAULT_TTL_SECS,
+            };
+            let key = generate_auth_key(&network, ttl_secs)?;
             println!("{key}");
             Ok(())
         }
@@ -415,6 +438,19 @@ fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync
                 format!("config invalid: {:?}", e),
             )
         })?;
+        // REQ-043：auth key 过期 → 告警不阻断（已注册节点仍可走挑战恢复路径，
+        // 硬拒绝会卡死重连）；格式非法同样只告警（coordinator 是最终裁决）
+        if is_expired(&config.auth_key, unix_now()) {
+            eprintln!(
+                "[node] warning: auth key 已过期（{}），新注册将被拒；已注册节点仍可经挑战恢复",
+                config.auth_key
+            );
+        } else if parse_auth_key(&config.auth_key).is_err() {
+            eprintln!(
+                "[node] warning: auth key 格式无法解析（{}），注册将失败",
+                config.auth_key
+            );
+        }
         let opts = NodeOptions {
             tun: file.tun.as_ref().map(|t| TunConfig {
                 name: t.name.clone(),

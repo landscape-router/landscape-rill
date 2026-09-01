@@ -29,7 +29,6 @@ proposed（提出：日期 + 动机 + 验收草案）
 
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
-| [REQ-043](./REQ-043.md) | 需求 | 📌 proposed | P1 | 08-31 | — |
 | [REQ-039](./REQ-039.md) | 需求 | 📌 proposed | P1 | 08-15 | — |
 | [REQ-040](./REQ-040.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
 | [REQ-041](./REQ-041.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
@@ -72,6 +71,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-034](./REQ-034.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.11 / FRAME_HEADER §9 |
 | [REQ-035](./REQ-035.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.1/§3.3 / FRAME_HEADER §2.6 |
 | [REQ-042](./REQ-042-lrill-cli.md) | 需求 | ✅ merged | — | 08-30 | CONTROL_PLANE §3.12 |
+| [REQ-043](./REQ-043.md) | 需求 | ✅ merged | — | 08-31 | CONTROL_PLANE §6/§3.1/§3.12 |
 
 ## 4. 维护规则
 

@@ -132,6 +132,14 @@
 - 证据：rill-coord/src/store.rs、rill-coord/src/coordinator.rs、e2e/run_e2e.sh、e2e/setup.sh、e2e/mesh/persist/docker-compose.yaml
 - 说明：redb 快照整写；损坏/不一致 fail-closed；一次性 key 消费 tombstone 跨重启存活
 
+## CTL-17 auth key 内嵌过期时间（REQ-043）
+
+- 关联 REQ：REQ-043
+- 测试层：单测
+- 状态：`已覆盖`
+- 证据：rill-coord/src/config.rs、rill-coord/src/coordinator.rs、rilld/src/main.rs
+- 说明：过期时间嵌入 key 自身（advisory），admission 时 coordinator 校验；节点侧仅告警不阻断（挑战恢复路径不受影响）
+
 ## 验收断言
 
 - [x] CTL-01：注册幂等、身份绑定签名可验证
@@ -151,3 +159,4 @@
 - [x] CTL-15：Path* 消息族 + 候选路径（直连 + relay，幂等）/flow hash 选择/主路径 miss 快速切换/key_path 参与者全量签发/吊销联动撤销/path_id=0 回退 key_dst（v2 帧头 42B 纳入 route_mac 与 AAD）
   - relay docker e2e：a—b—c 线形（b 双网卡，a↔c 无直连可达性），直连候选 miss → 快速切换经 b 中继建立会话 + 数据双向（e2e/mesh/relay/，b 日志 relayed frame 为证据）
 - [x] CTL-16：coordinator 持久化——单测（roundtrip 恢复/一次性 key 消费存活/node_id+path_id 单调/损坏与不一致 fail-closed/重载不复活）+ docker e2e（coord 重启 → a↔b 恢复、node-c 挑战重连无新注册、node-d 复用已消费 key 被拒，e2e/mesh/persist/）
+- [x] CTL-17：auth key 内嵌过期——parse 层（格式/过期段/永不过期/时长解析）+ 注册时（admission）过期 key 拒绝 + 非 lrk 格式 fail-closed + 未过期注册不受影响 + `lrill authkey --ttl` 默认 24h

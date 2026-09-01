@@ -910,12 +910,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let master = [0x11; 32];
         let seed = [0x22; 32];
+        let ak_loop = landscape_rill_coord::config::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
         let server = tokio::spawn(async move {
             let mut listener = listener;
             let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
             let mut server = CoordinatorServer::new(master, seed);
             server.coordinator.add_auth_key(
-                "ak-loop",
+                &ak_server,
                 landscape_rill_core::control::registry::AuthKeyPolicy::OneTime,
             );
             server.handle_connection(&mut tls).await.unwrap();
@@ -929,7 +931,7 @@ mod tests {
         let config = MeshLegConfig {
             coordinator_host: host,
             coordinator_port: addr.port(),
-            auth_key: "ak-loop".into(),
+            auth_key: ak_loop.clone(),
             static_key: [0x33; 32],
             capabilities: 0x01,
             announce_routes: vec![],

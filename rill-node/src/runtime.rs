@@ -810,11 +810,12 @@ mod tests {
         let master = [0x11; 32];
         let seed = [0x22; 32];
         let server = Arc::new(Mutex::new(CoordinatorServer::new(master, seed)));
+        let ak = auth_test_key();
         server
             .lock()
             .await
             .coordinator
-            .add_auth_key("ak-test", AuthKeyPolicy::Reusable);
+            .add_auth_key(&ak, AuthKeyPolicy::Reusable);
         server.lock().await.coordinator.set_announce_whitelist(vec![
             landscape_rill_core::route::Prefix::parse("10.0.0.0/8").unwrap(),
         ]);
@@ -854,7 +855,7 @@ mod tests {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]);
         Config {
             coordinator_url: url.into(),
-            auth_key: "ak-test".into(),
+            auth_key: auth_test_key(),
             static_key_seed: [seed; 32],
             capabilities: 0x01,
             announce_routes: routes,
@@ -862,6 +863,13 @@ mod tests {
             ca_cert_path: ca_path.into(),
             coord: None,
         }
+    }
+
+    /// 与 start_coord 共享的 key（测试专用；生成一次全局复用，24h 有效）
+    fn auth_test_key() -> String {
+        static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| landscape_rill_coord::config::generate_auth_key("lab", 86_400).unwrap())
+            .clone()
     }
 
     fn v4_packet(dst: [u8; 4]) -> Vec<u8> {

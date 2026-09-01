@@ -35,7 +35,7 @@
 | 域 | 文件 | 场景 ID |
 |---|---|---|
 | mesh 帧头/握手/广播 | [mesh/frame.md](./mesh/frame.md) | `FRM-01` ~ `FRM-11` |
-| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-16` |
+| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-17` |
 | mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-09` |
 | ts2021 接入 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-10` |
 | dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
@@ -93,6 +93,7 @@
 | REQ-040 | — | 📌 proposed（无验收场景） | — |
 | REQ-041 | — | 📌 proposed（无验收场景） | — |
 | REQ-042 | ADM-06 | 部分覆盖 | e2e/Dockerfile、e2e/run_e2e.sh、rilld/src/main.rs |
+| REQ-043 | CTL-17 | 已覆盖 | rill-coord/src/config.rs、rill-coord/src/coordinator.rs、rilld/src/main.rs |
 
 ## 5. 维护规则
 

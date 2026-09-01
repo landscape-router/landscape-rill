@@ -85,7 +85,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 ### 3.1 RegisterRequest / RegisterResponse（注册）
 
 **RegisterRequest**
-- `auth_key`：预授权密钥（一次性/可复用，见 §6）——**生成时绑定网络**（§1.5），注册即归域
+- `auth_key`：预授权密钥（一次性/可复用，见 §6）——**生成时绑定网络**（§1.5），注册即归域；过期时间内嵌 key（REQ-043），注册时校验
 - `static_pubkey`：Noise 静态公钥（32B）
 - `capabilities`：能力位（见下表）
 - 元数据（可选）：hostname、OS、版本
@@ -270,11 +270,11 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 - systemd 形态 `ExecReload=kill -HUP $MAINPID`；进程收到 SIGHUP → 重新解析配置文件 → `apply_config` **增量应用**（auth key 增删、白名单更新），**不中断在途 TLS 连接与已注册节点**
 - 重载失败（新配置非法）→ **保持旧配置继续运行** + 日志报错（fail-closed 于启动，容错于重载）
 
-**auth key 生命周期管理（§6 落地，REQ-036）**
+**auth key 生命周期管理（§6 落地，REQ-036 + REQ-043）**
 
-- 生成：`lrill authkey` 子命令（§1.3 lrill CLI），输出仅 stdout、不落日志（教训 AO-01/AO-02）
+- 生成：`lrill authkey --network <slug> [--ttl <dur>]` 子命令（§1.3 lrill CLI），输出仅 stdout、不落日志（教训 AO-01/AO-02）；**默认有效期 24h**（auth key 仅入场令牌，短命是特性），`--ttl 0` 永不过期
 - 增删/吊销：配置文件编辑 + SIGHUP 重载；`apply_config` 增量生效（新 key 可注册、移除的 key 即刻失效）
-- 过期：reusable key 带 `expires_at`，注册时校验，过期即 `InvalidAuthKey`
+- **过期（REQ-043）**：过期时间**内嵌在 key 自身**（`lrk-<network>-<expiry>-<secret>`，§6），注册时（admission）校验，过期即 `InvalidAuthKey`；`AuthKeyConfig.expires_at` 字段已移除（key 自过期 = 单一权威）；已过期 key 可在配置中保留（inert，不阻断启动——硬拒绝会卡死已注册节点的挑战恢复）
 
 **lrill CLI（REQ-042）**
 
@@ -392,8 +392,8 @@ coordinator Revoke(node_id)
 
 ## 6. 安全与信任模型
 
-- **auth key 生命周期**：一次性（单次注册即失效）/ 可复用（带 tag 与过期时间）；吊销联动（Revoke 使相关 auth key 失效）
-- **auth key 格式（REQ-036 定稿）**：`lrk-<network>-<secret>`——`lrk` 固定前缀（类型标识 + 配置校验拒绝非 `lrk` 开头的键）；`<network>` 为配置声明的网络标识（小写字母数字连字符，归域绑定 §1.5）；`<secret>` = 32B CSPRNG → base32（RFC 4648 无填充，52 字符）。格式非法 → 配置加载即拒绝启动；network 段与配置不匹配 → 注册拒绝。**生成不依赖 master_key**（auth key 是注册凭据非 KDF 派生），`lrill authkey new` 纯本地生成，输出仅 stdout（不落日志，教训 AO-01/AO-02）
+- **auth key 生命周期**：一次性（单次注册即失效）/ 可复用（带 tag）；吊销联动（Revoke 使相关 auth key 失效）
+- **auth key 格式（REQ-036 定稿，REQ-043 修订）**：`lrk-<network>-<expiry>-<secret>`——`lrk` 固定前缀（类型标识 + 配置校验拒绝非 `lrk` 开头的键）；`<network>` 为配置声明的网络标识（小写字母数字，**不含连字符**——段分隔符冲突，归域绑定 §1.5）；`<expiry>` = 十进制 unix 秒（**0 = 永不过期**），**解析即知过期**；`<secret>` = 32B CSPRNG → base32（RFC 4648 无填充，52 字符）。格式非法 → 配置加载即拒绝启动；network 段与配置不匹配 → 注册拒绝；**过期在注册时（admission）校验**（嵌入时间仅 advisory，防篡改 key 改长有效期——coordinator 是最终裁决），节点侧启动对过期 key 仅告警不阻断（已注册节点仍可经挑战恢复）。**生成不依赖 master_key**（auth key 是注册凭据非 KDF 派生），`lrill authkey --network <slug> --ttl <dur>` 纯本地生成（默认 24h，`0` = 永不过期），输出仅 stdout（不落日志，教训 AO-01/AO-02）
 - **身份绑定签名**：防成员冒充/中继 MITM 的关键——数据面握手双保险：msg1 携带目标 node_id + 接收方校验（FRAME_HEADER §2.3），握手后双方交叉验证 coordinator 签发的绑定
 - **边界划分**：控制面管"谁有资格"（身份/密钥），数据面管"包是否合法"（route_mac / AEAD 双层认证）
 - **传输安全**：TLS 1.3；coordinator 间 mTLS（P2 Raft 期）

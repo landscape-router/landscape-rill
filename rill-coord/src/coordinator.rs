@@ -242,6 +242,13 @@ impl Coordinator {
         capabilities: u32,
         routes: Vec<String>,
     ) -> Result<RegisterData, RegisterError> {
+        // 过期时间内嵌在 key 自身（REQ-043）：admission 时解析校验；
+        // 解析失败 = 非法 key（fail-closed）。格式知识在 rill-coord，注册表按不透明字符串处理。
+        let parsed =
+            crate::config::parse_auth_key(auth_key).map_err(|_| RegisterError::InvalidAuthKey)?;
+        if parsed.1 != 0 && unix_seconds() > parsed.1 {
+            return Err(RegisterError::InvalidAuthKey);
+        }
         let outcome =
             self.registry
                 .register(auth_key, static_pubkey, capabilities, routes, &self.signer)?;
@@ -406,23 +413,27 @@ mod tests {
         [seed; 32]
     }
 
-    fn setup() -> Coordinator {
-        let mut c = Coordinator::new([0x77; 32], [0x5a; 32]);
-        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
-        c
+    /// lrk 格式 auth key（REQ-043 起注册校验要求可解析 + 未过期）
+    fn lrk(ttl_secs: u64) -> String {
+        crate::config::generate_auth_key("lab", ttl_secs).unwrap()
     }
 
-    fn register_node(c: &mut Coordinator, seed: u8) -> u32 {
-        c.register("ak-1", &pubkey(seed), 0x01, vec![])
-            .unwrap()
-            .node_id
+    fn setup() -> (Coordinator, String) {
+        let ak = lrk(86_400);
+        let mut c = Coordinator::new([0x77; 32], [0x5a; 32]);
+        c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        (c, ak)
+    }
+
+    fn register_node(c: &mut Coordinator, ak: &str, seed: u8) -> u32 {
+        c.register(ak, &pubkey(seed), 0x01, vec![]).unwrap().node_id
     }
 
     #[test]
     fn register_and_netmap() {
-        let mut c = setup();
+        let (mut c, ak) = setup();
         let v0 = c.netmap_version();
-        let id = register_node(&mut c, 1);
+        let id = register_node(&mut c, &ak, 1);
         assert_eq!(id, 1);
         assert_eq!(c.netmap_version(), v0 + 1);
         let snap = c.netmap_snapshot();
@@ -433,33 +444,22 @@ mod tests {
 
     #[test]
     fn register_idempotent_no_version_bump() {
-        let mut c = setup();
+        let (mut c, ak) = setup();
         let v0 = c.netmap_version();
-        register_node(&mut c, 1);
+        register_node(&mut c, &ak, 1);
         let v1 = c.netmap_version();
         assert_eq!(v1, v0 + 1);
-        let out = c.register("ak-1", &pubkey(1), 0x01, vec![]).unwrap();
+        let out = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap();
         assert_eq!(out.node_id, 1);
         assert_eq!(c.netmap_version(), v1);
     }
 
     #[test]
     fn relay_list_follows_registration() {
-        let mut c = setup();
-        c.add_auth_key("ak-2", AuthKeyPolicy::Reusable);
-        c.add_auth_key("ak-3", AuthKeyPolicy::Reusable);
-        let relay = c
-            .register("ak-1", &pubkey(1), 0x01, vec![])
-            .unwrap()
-            .node_id;
-        let src = c
-            .register("ak-2", &pubkey(2), 0x00, vec![])
-            .unwrap()
-            .node_id;
-        let dst = c
-            .register("ak-3", &pubkey(3), 0x00, vec![])
-            .unwrap()
-            .node_id;
+        let (mut c, ak) = setup();
+        let relay = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap().node_id;
+        let src = c.register(&ak, &pubkey(2), 0x00, vec![]).unwrap().node_id;
+        let dst = c.register(&ak, &pubkey(3), 0x00, vec![]).unwrap().node_id;
         let cands = c.request_paths(src, dst, 4);
         assert!(cands.iter().any(|(p, _)| p.hops == vec![relay, dst]));
         assert_eq!(cands.len(), 2); // direct + relay
@@ -467,8 +467,8 @@ mod tests {
 
     #[test]
     fn key_dist_deterministic_per_node() {
-        let mut c = setup();
-        let id = register_node(&mut c, 1);
+        let (mut c, ak) = setup();
+        let id = register_node(&mut c, &ak, 1);
         let k1 = c.key_dist(id).unwrap();
         let k2 = c.key_dist(id).unwrap();
         assert_eq!(k1, k2);
@@ -480,14 +480,14 @@ mod tests {
 
     #[test]
     fn key_dist_unknown_node_none() {
-        let c = setup();
+        let (c, _ak) = setup();
         assert!(c.key_dist(99).is_none());
     }
 
     #[test]
     fn revoke_removes_and_bumps_versions() {
-        let mut c = setup();
-        let id = register_node(&mut c, 1);
+        let (mut c, ak) = setup();
+        let id = register_node(&mut c, &ak, 1);
         let nv = c.netmap_version();
         let kv = c.key_version();
         c.revoke(id);
@@ -499,8 +499,8 @@ mod tests {
 
     #[test]
     fn rotate_master_key_changes_keys() {
-        let mut c = setup();
-        let id = register_node(&mut c, 1);
+        let (mut c, ak) = setup();
+        let id = register_node(&mut c, &ak, 1);
         let before = c.key_dist(id).unwrap();
         c.rotate_master_key([0x99; 32]);
         let after = c.key_dist(id).unwrap();
@@ -510,8 +510,8 @@ mod tests {
 
     #[test]
     fn heartbeat_and_offline() {
-        let mut c = setup();
-        let id = register_node(&mut c, 1);
+        let (mut c, ak) = setup();
+        let id = register_node(&mut c, &ak, 1);
         c.heartbeat(id, 100);
         assert!(c.offline_nodes().is_empty());
         c.mark_offline(id);
@@ -524,14 +524,31 @@ mod tests {
 
     #[test]
     fn endpoints_enter_netmap() {
-        let mut c = setup();
-        let id = register_node(&mut c, 1);
+        let (mut c, ak) = setup();
+        let id = register_node(&mut c, &ak, 1);
         c.set_endpoints(id, vec!["203.0.113.1:41641".into()]);
         let snap = c.netmap_snapshot();
         assert_eq!(snap[0].endpoints, vec!["203.0.113.1:41641"]);
     }
 
     // ==================== 持久化（REQ-037） ====================
+
+    #[test]
+    fn expired_key_rejected_at_admission() {
+        // REQ-043：过期内嵌 key，注册时（admission）拒绝；挑战恢复路径不受影响
+        let now = unix_seconds();
+        let expired = format!("lrk-lab-{}-{}", now - 1, "A".repeat(52));
+        let mut c = Coordinator::new([0x77; 32], [0x5a; 32]);
+        c.add_auth_key(&expired, AuthKeyPolicy::Reusable);
+        assert!(c.has_auth_key(&expired)); // 过期 key 可配置（inert），admission 时拒绝
+        let err = c.register(&expired, &pubkey(1), 0x00, vec![]);
+        assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
+        // 非 lrk 格式 → fail-closed 拒绝
+        let mut c = Coordinator::new([0x77; 32], [0x5a; 32]);
+        c.add_auth_key("opaque-key", AuthKeyPolicy::Reusable);
+        let err = c.register("opaque-key", &pubkey(1), 0x00, vec![]);
+        assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
+    }
 
     fn tmp_db(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -545,18 +562,14 @@ mod tests {
 
     #[test]
     fn persist_roundtrip_restores_full_state() {
+        let ak = lrk(86_400);
+
         let path = tmp_db("roundtrip");
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
-        let a = c
-            .register("ak-1", &pubkey(1), 0x01, vec![])
-            .unwrap()
-            .node_id;
+        c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        let a = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap().node_id;
         c.set_endpoints(a, vec!["203.0.113.1:41641".into()]);
-        let b = c
-            .register("ak-1", &pubkey(2), 0x00, vec![])
-            .unwrap()
-            .node_id;
+        let b = c.register(&ak, &pubkey(2), 0x00, vec![]).unwrap().node_id;
         c.request_paths(a, b, 4);
         drop(c);
 
@@ -579,17 +592,19 @@ mod tests {
 
     #[test]
     fn one_time_consumption_survives_restart() {
+        let ak = lrk(86_400);
+
         let path = tmp_db("onetime");
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        c.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
-        c.register("ak-1", &pubkey(1), 0x00, vec![]).unwrap();
-        assert!(!c.has_auth_key("ak-1"));
+        c.add_auth_key(&ak, AuthKeyPolicy::OneTime);
+        c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap();
+        assert!(!c.has_auth_key(&ak));
         drop(c);
 
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        assert!(!c.has_auth_key("ak-1"), "一次性 key 消费必须持久化");
+        assert!(!c.has_auth_key(&ak), "一次性 key 消费必须持久化");
         // 同 key 二次注册被拒（未知公钥 + 无有效 key）
-        let err = c.register("ak-1", &pubkey(2), 0x00, vec![]);
+        let err = c.register(&ak, &pubkey(2), 0x00, vec![]);
         assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
         drop(c);
         let _ = std::fs::remove_file(&path);
@@ -597,44 +612,39 @@ mod tests {
 
     #[test]
     fn consumed_key_not_revived_by_reload() {
+        let ak = lrk(86_400);
+
         // SIGHUP 重载（config 重新 apply）不复活已消费的一次性 key
         let path = tmp_db("reload");
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        c.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
-        c.register("ak-1", &pubkey(1), 0x00, vec![]).unwrap();
+        c.add_auth_key(&ak, AuthKeyPolicy::OneTime);
+        c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap();
         drop(c);
 
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        c.add_auth_key("ak-1", AuthKeyPolicy::OneTime);
-        assert!(!c.has_auth_key("ak-1"), "重载不得复活已消费 key");
+        c.add_auth_key(&ak, AuthKeyPolicy::OneTime);
+        assert!(!c.has_auth_key(&ak), "重载不得复活已消费 key");
         drop(c);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn node_and_path_ids_monotonic_across_restart() {
+        let ak = lrk(86_400);
+
         let path = tmp_db("ids");
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
-        let a = c
-            .register("ak-1", &pubkey(1), 0x00, vec![])
-            .unwrap()
-            .node_id;
-        let b = c
-            .register("ak-1", &pubkey(2), 0x00, vec![])
-            .unwrap()
-            .node_id;
+        c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        let a = c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap().node_id;
+        let b = c.register(&ak, &pubkey(2), 0x00, vec![]).unwrap().node_id;
         let paths = c.request_paths(a, b, 4);
         drop(c);
 
         // 重启后新节点不重用 node_id；新路径不重用 path_id
         // （auth key 为配置权威，重启后须重新 apply——模拟 from_config 的 apply_to）
         let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-        c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
-        let d = c
-            .register("ak-1", &pubkey(3), 0x00, vec![])
-            .unwrap()
-            .node_id;
+        c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        let d = c.register(&ak, &pubkey(3), 0x00, vec![]).unwrap().node_id;
         assert_eq!(d, 3);
         let paths2 = c.request_paths(a, d, 4);
         for (p, _) in &paths2 {
@@ -665,12 +675,14 @@ mod tests {
 
     #[test]
     fn inconsistent_state_fails_closed() {
+        let ak = lrk(86_400);
+
         // next_node_id 与节点表不一致 → 拒绝启动（不猜测重建）
         let path = tmp_db("inconsistent");
         {
             let mut c = Coordinator::open(&path, [0x77; 32], [0x5a; 32]).unwrap();
-            c.add_auth_key("ak-1", AuthKeyPolicy::Reusable);
-            c.register("ak-1", &pubkey(1), 0x00, vec![]).unwrap();
+            c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+            c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap();
             drop(c);
         }
         // 篡改快照：把 next_node_id 改回 1（与已注册 node 1 冲突）

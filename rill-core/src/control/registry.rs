@@ -11,22 +11,18 @@ pub enum AuthKeyPolicy {
     Reusable,
 }
 
-/// auth key 完整生命周期配置（REQ-036）：策略 + 可读标签 + 过期时间
+/// auth key 生命周期配置（REQ-036）：策略 + 可读标签。
+/// 过期时间内嵌在 key 自身（REQ-043，`lrk-<network>-<expiry>-<secret>`），由
+/// Coordinator 注册时解析校验（admission-time），注册表按不透明字符串处理。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthKeySpec {
     pub policy: AuthKeyPolicy,
     pub tag: Option<String>,
-    /// unix 秒；过期后注册返回 InvalidAuthKey
-    pub expires_at: Option<u64>,
 }
 
 impl AuthKeySpec {
     pub fn simple(policy: AuthKeyPolicy) -> Self {
-        Self {
-            policy,
-            tag: None,
-            expires_at: None,
-        }
+        Self { policy, tag: None }
     }
 }
 
@@ -75,13 +71,6 @@ fn route_len_ok(p: &Prefix) -> bool {
     } else {
         p.len >= 32
     }
-}
-
-fn now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 impl Registry {
@@ -160,11 +149,6 @@ impl Registry {
             .auth_keys
             .get(auth_key)
             .ok_or(RegisterError::InvalidAuthKey)?;
-        if let Some(exp) = spec.expires_at {
-            if now_seconds() > exp {
-                return Err(RegisterError::InvalidAuthKey);
-            }
-        }
         if let Some(node_id) = self.pubkeys.get(static_pubkey) {
             let node_id = *node_id;
             let entry = self.entries.get(&node_id).unwrap();
@@ -427,24 +411,6 @@ mod tests {
             .register("ak-r", &key(1), 0, vec!["not-a-cidr".into()], &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::BadRoute);
-    }
-
-    #[test]
-    fn expired_auth_key_rejected() {
-        let mut reg = Registry::new(1);
-        let signer = XorSigner { key: 0x5a };
-        reg.add_auth_key_spec(
-            "ak-exp",
-            AuthKeySpec {
-                policy: AuthKeyPolicy::Reusable,
-                tag: Some("ci".into()),
-                expires_at: Some(1),
-            },
-        );
-        let err = reg
-            .register("ak-exp", &key(1), 0, vec![], &signer)
-            .unwrap_err();
-        assert_eq!(err, RegisterError::InvalidAuthKey);
     }
 
     #[test]
