@@ -19,10 +19,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: rustc version
         id: rustc
-        run: echo "version=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
       # 编译 cache 内容键（失效时机确定，无回退）：Cargo.lock 变更或 rustc 版本变更 → 失效；
       # 源码变更不失效（cargo 指纹保证增量重编正确性）；同键已存在时 save 为 no-op
       - name: Restore cargo cache
+        id: cargo-cache
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -31,7 +32,10 @@ jobs:
           key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
       - name: release build
         run: cargo build --release
+      # GitHub cache 不可覆盖：内容键命中时跳过 save（条目已存在，内容有效）；
+      # 仅在键不存在（首次/失效后）时写入新条目
       - name: Save cargo cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
