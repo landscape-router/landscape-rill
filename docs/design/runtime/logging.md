@@ -1,7 +1,7 @@
 # 日志治理设计（LOGGING）
 
 > daemon 日志的框架、级别、格式、存储与高频事件摘要——运维基线的日志治理部分（REQ-039 / 教训 AO-04）。
-> 版本：v1.1（2026-09-01 修订：§5 限速改为周期计数器摘要模型）｜ 相关需求：REQ-039
+> 版本：v1.2（2026-09-01 修订：§2/§4 配置优先级 CLI > 环境变量 > 默认值）｜ 相关需求：REQ-039
 
 ## 1. 范围与边界
 
@@ -23,7 +23,10 @@
 
 ## 2. 级别配置
 
-- `RUST_LOG` 环境变量（EnvFilter 语义），默认 `info`；`debug` 明细默认关闭
+配置优先级统一为 **CLI 显式 > 环境变量 > 默认值**：
+
+- 级别：`lrill run --log-level <off|error|warn|info|debug>` > `RUST_LOG`（EnvFilter 表达式）> 默认 `info`
+- CLI 显式指定时 `RUST_LOG` 被完全覆盖（含 target 级过滤）；`--log-level` 仅支持简单级别
 - 生效性：级别在 daemon 启动时生效，改动需重启 daemon（无运行时重载）；生效性验证见 tests LOG-01
 
 ## 3. 格式契约
@@ -35,7 +38,7 @@
 ## 4. 存储
 
 - **默认 stderr**：委托 supervisor——systemd 由 journald 捕获（`journalctl -u lrill.service`）、容器由 docker log driver 捕获（`docker logs`）；容量上限由 supervisor 配置
-- **可选文件**：`lrill run --log-file <path>`——tracing-appender 按天轮转（`<prefix>.<YYYY-MM-DD>`），保留最近 7 个文件，非阻塞写入；文件模式同时保留 stderr 输出。文件数量/大小轮转是框架职责，应用不自定义
+- **可选文件**：`lrill run --log-file <path>` > `LRILL_LOG_FILE` > 默认无（优先级同 §2）；tracing-appender 按天轮转（`<prefix>.<YYYY-MM-DD>`），保留最近 7 个文件，非阻塞写入；文件模式同时保留 stderr 输出。文件数量/大小轮转是框架职责，应用不自定义
 
 ## 5. 高频事件周期摘要（AO-04）
 
@@ -59,6 +62,7 @@
 ## 7. 决策记录
 
 - 2026-09-01（REQ-039 merge）：选型 tracing（tokio 生态标准）；存储双轨（委托 supervisor + 可选自写文件轮转）；高频事件改为周期计数器摘要（§5，教训 AO-04）
+- 2026-09-01（§2/§4 修订）：配置优先级统一为 CLI 显式 > 环境变量 > 默认值（`--log-level` > `RUST_LOG`；`--log-file` > `LRILL_LOG_FILE`）
 - 2026-09-01（§5 修订）：否决日志框架层透明限速（Layer 门控 + 聚合上报线程）——丢弃语义破坏排查、全局窗口饿死其他站点、机制复杂；改为调用点显式 `RateCounter`（设计对齐，AGENTS.md Design Alignment）
 - 实现级决定：subscriber 只在 `rilld/src/main.rs` run_daemon 初始化（`rilld/src/logging.rs`）；`rill-core` 保持 I/O 无关，不引入 tracing；库 crate（rill-node / rill-mesh / rill-coord）仅用 tracing facade 宏；`RateCounter` 在 rill-core（纯逻辑）
 - 供应链（cargo audit）与可复现构建部分拆出 REQ-044

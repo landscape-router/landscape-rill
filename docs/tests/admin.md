@@ -53,7 +53,7 @@
 - 关联 REQ：REQ-039
 - 测试层：CLI + docker e2e
 - 状态：`待补充`
-- 说明：`RUST_LOG=debug` 时 debug 级明细（`endpoint report`）出现；默认 `info` 时不出；`RUST_LOG=error` 时 info 级（`registered:`）不出
+- 说明：优先级 CLI > env > 默认——`--log-level debug` 覆盖 `RUST_LOG=error`（debug 明细出现）；仅 `RUST_LOG=error` 时 info 级（`registered:`）不出；默认 `info` 时 `endpoint report`（debug）不出
 
 ## LOG-02 高频事件周期摘要
 
@@ -67,7 +67,7 @@
 - 关联 REQ：REQ-039
 - 测试层：CLI + docker e2e
 - 状态：`待补充`
-- 说明：`lrill run --log-file <path>` 生成按天轮转文件（`<prefix>.<YYYY-MM-DD>`）、保留最多 7 个、stderr 仍输出
+- 说明：`lrill run --log-file <path>` > `LRILL_LOG_FILE` > 默认无；生成按天轮转文件（`<prefix>.<YYYY-MM-DD>`）、保留最多 7 个、stderr 仍输出
 
 #### 验收断言（文件尾部汇总）
 
