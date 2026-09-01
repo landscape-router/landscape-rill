@@ -15,6 +15,13 @@
 - When changes are concentrated in a single small file (≤500 lines) and touch 3+ spots, rewrite the whole file at once instead of applying edit calls one by one.
 - Otherwise, prefer targeted edits to avoid touching unrelated parts.
 
+## Design Alignment
+
+- Directional decisions (mechanism choice, added complexity, conflicts with the codebase's established style) must be confirmed with the user before implementing; do not implement first and get overridden later.
+- Complexity is a misalignment signal: if a small requirement needs heavyweight machinery (background threads, framework magic, hidden global state) to implement, stop and confirm the design direction with the user instead of working around the technical problems on your own.
+- When the user questions the implementation approach, stop and re-align the goal first; do not explain the current approach and continue.
+- Prefer the mechanism the codebase already uses (explicit state machines, I/O-free core, testability). If the natural mechanism for the requirement conflicts with that style, ask the user which direction they want before building.
+
 ## Doc
 
 - Docs must contain version number and last modified time
