@@ -17,8 +17,11 @@ pub enum SessionEvent {
     Revoked { node_id: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
+#[error_id(crate_path = "crate")]
 pub enum SessionError {
+    #[error("invalid session transition")]
+    #[error_id("control.session.invalid_transition")]
     InvalidTransition,
 }
 

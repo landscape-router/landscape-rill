@@ -981,10 +981,12 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "landscape-rill-core",
+ "landscape-rill-macro",
  "rand",
  "redb",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -995,10 +997,22 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "hkdf",
  "hmac",
+ "landscape-rill-macro",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "snow",
+ "thiserror 2.0.20",
  "x25519-dalek",
+]
+
+[[package]]
+name = "landscape-rill-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1008,12 +1022,14 @@ dependencies = [
  "ed25519-dalek",
  "landscape-rill-coord",
  "landscape-rill-core",
+ "landscape-rill-macro",
  "landscape-rill-proto",
  "quick-protobuf",
  "rand",
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "tracing",
@@ -1028,11 +1044,13 @@ dependencies = [
  "futures-util",
  "landscape-rill-coord",
  "landscape-rill-core",
+ "landscape-rill-macro",
  "landscape-rill-mesh",
  "netlink-packet-route",
  "rcgen",
  "rtnetlink",
  "rustls",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tun",

@@ -169,8 +169,11 @@ fn mask_bits(len: u8) -> [u8; 16] {
     mask
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
+#[error_id(crate_path = "crate")]
 pub enum PrefixError {
+    #[error("invalid CIDR prefix")]
+    #[error_id("route.prefix.bad_cidr")]
     BadCidr,
 }
 

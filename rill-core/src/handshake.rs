@@ -35,13 +35,26 @@ pub const MSG1_PAYLOAD_LEN: usize = NODE_ID_LEN + MSG1_BODY_LEN;
 pub const MSG2_PAYLOAD_LEN: usize = MSG2_BODY_LEN;
 pub const MSG3_PAYLOAD_LEN: usize = BINDING_LEN + SALT_LEN + MSG3_BODY_LEN;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error, landscape_rill_macro::ErrorId)]
+#[error_id(crate_path = "crate")]
 pub enum HandshakeError {
+    #[error(transparent)]
+    #[error_id("handshake.noise")]
     Noise(snow::Error),
+    #[error("malformed handshake payload")]
+    #[error_id("handshake.malformed_payload")]
     MalformedPayload,
+    #[error("handshake targeted at wrong node")]
+    #[error_id("handshake.wrong_target")]
     WrongTarget,
+    #[error("invalid identity binding")]
+    #[error_id("handshake.bad_binding")]
     BadBinding,
+    #[error("peer static key mismatch")]
+    #[error_id("handshake.peer_static_mismatch")]
     PeerStaticMismatch,
+    #[error("wrong handshake step")]
+    #[error_id("handshake.wrong_step")]
     WrongStep,
 }
 
@@ -314,13 +327,26 @@ fn rekey_chain(key: &[u8; SESSION_KEY_LEN]) -> [u8; SESSION_KEY_LEN] {
     out
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
+#[error_id(crate_path = "crate")]
 pub enum OpenError {
+    #[error("frame decode error")]
+    #[error_id("handshake.open.decode")]
     Decode,
+    #[error("unsupported frame version")]
+    #[error_id("handshake.open.version")]
     Version,
+    #[error("route mac mismatch")]
+    #[error_id("handshake.open.route_mac")]
     RouteMac,
+    #[error("truncated payload")]
+    #[error_id("handshake.open.truncated_payload")]
     TruncatedPayload,
+    #[error("aead error")]
+    #[error_id("handshake.open.aead")]
     Aead,
+    #[error("replayed frame")]
+    #[error_id("handshake.open.replay")]
     Replay,
 }
 

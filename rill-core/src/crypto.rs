@@ -1,3 +1,4 @@
+use crate::error::{args, ErrorArgs, ErrorId};
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
@@ -157,8 +158,18 @@ pub fn x25519_shared(static_priv: &[u8; 32], peer_pub: &[u8; 32]) -> [u8; 32] {
         .to_bytes()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("aead error")]
 pub struct AeadError;
+
+impl ErrorId for AeadError {
+    fn error_id(&self) -> &'static str {
+        "crypto.aead"
+    }
+    fn error_args(&self) -> ErrorArgs {
+        args(&[])
+    }
+}
 
 #[cfg(test)]
 mod tests {

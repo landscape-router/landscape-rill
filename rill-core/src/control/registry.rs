@@ -37,13 +37,22 @@ pub struct NodeEntry {
     pub identity_binding: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
+#[error_id(crate_path = "crate")]
 pub enum RegisterError {
+    #[error("invalid auth key")]
+    #[error_id("control.register.invalid_auth_key")]
     InvalidAuthKey,
+    #[error("static pubkey mismatch")]
+    #[error_id("control.register.pubkey_mismatch")]
     PubkeyMismatch,
     /// 公告前缀不在白名单 / 违反前缀长度边界（CONTROL_PLANE §3.8，REQ-038）
+    #[error("announced route not allowed")]
+    #[error_id("control.register.route_not_allowed")]
     RouteNotAllowed,
     /// 公告前缀格式非法
+    #[error("malformed route announcement")]
+    #[error_id("control.register.bad_route")]
     BadRoute,
 }
 

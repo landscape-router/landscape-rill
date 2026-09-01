@@ -1,0 +1,13 @@
+[package]
+name = "landscape-rill-macro"
+version.workspace = true
+edition.workspace = true
+description = "derive macros for landscape-rill: ErrorId (stable error ids for i18n)"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
