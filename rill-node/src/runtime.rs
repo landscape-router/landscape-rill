@@ -12,12 +12,14 @@ use futures_util::StreamExt;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
 use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
+use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
 use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
 use landscape_rill_mesh::data::{IncomingEvent, MeshData, PathEntry};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 pub const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 pub const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(300);
@@ -134,6 +136,10 @@ pub struct Node {
     last_handshake_attempt: HashMap<u32, Instant>,
     /// 近期写入 land0 的组播包指纹（(src,dst,len) → 时间）；LAN 侧再读到 = 回环，跳过泛洪
     recent_multicast_writes: HashMap<(IpAddr, IpAddr, usize), Instant>,
+    /// per-peer 握手拒绝计数（LOGGING §5：周期摘要；仅已知 peer，防伪造 node_id 膨胀）
+    rejected_stats: HashMap<u32, RateCounter>,
+    /// 控制面连接失败计数（LOGGING §5：周期摘要替代逐条输出，退避逻辑不变）
+    connect_failed: RateCounter,
 }
 
 impl Node {
@@ -172,6 +178,8 @@ impl Node {
             path_requested: HashSet::new(),
             last_handshake_attempt: HashMap::new(),
             recent_multicast_writes: HashMap::new(),
+            rejected_stats: HashMap::new(),
+            connect_failed: RateCounter::new(RATE_SUMMARY_PERIOD),
         })
     }
 
@@ -223,8 +231,19 @@ impl Node {
         leg.coordinator_port = port;
         let session = ControlSession::connect(&host, port, &ca, &leg, self.node_id).await?;
         self.control = Some(session);
-        eprintln!("[node] control connected to {}:{}", host, port);
+        info!("[node] control connected to {}:{}", host, port);
         Ok(())
+    }
+
+    /// 握手拒绝计数（LOGGING §5）：仅已知 peer 记 per-peer，防伪造 node_id 膨胀
+    fn note_rejected(&mut self, peer: u32) {
+        if self.netmap_peers.contains(&peer) {
+            let rc = self
+                .rejected_stats
+                .entry(peer)
+                .or_insert_with(|| RateCounter::new(RATE_SUMMARY_PERIOD));
+            rc.tick();
+        }
     }
 
     /// 处理一个控制面事件（阻塞读；Err = 断线，调用方清 control 并重连）
@@ -256,23 +275,20 @@ impl Node {
                 None
             }
             IncomingEvent::Established { peer } => {
-                eprintln!("[node] session established with {}", peer);
+                info!("[node] session established with {}", peer);
                 self.peer_heartbeats.insert(peer, 0);
                 None
             }
-            IncomingEvent::Rejected { peer, reason } => {
-                eprintln!("[node] handshake rejected by {}: {:?}", peer, reason);
+            IncomingEvent::Rejected { peer, .. } => {
+                self.note_rejected(peer);
                 None
             }
             IncomingEvent::Responded { .. } => None,
             IncomingEvent::Relayed { to } => {
-                eprintln!("[node] relayed frame to {}", to);
+                info!("[node] relayed frame to {}", to);
                 None
             }
-            IncomingEvent::Dropped { reason } => {
-                eprintln!("[node] frame dropped: {:?}", reason);
-                None
-            }
+            IncomingEvent::Dropped { .. } => None,
         }
     }
 
@@ -301,7 +317,7 @@ impl Node {
                 .engine
                 .lookup_best(&info.dst, &|e| matches!(e.via, RouteVia::Mesh(_)))
             else {
-                eprintln!("[node] no mesh route for {}", info.dst);
+                warn!("[node] no mesh route for {}", info.dst);
                 return LanOutcome::Dropped;
             };
             (entry.via.clone(), entry.prefix)
@@ -339,7 +355,7 @@ impl Node {
                             LanOutcome::Handshaking { peer }
                         }
                         Err(e) => {
-                            eprintln!("[node] lan packet: handshake initiate failed: {:?}", e);
+                            warn!("[node] lan packet: handshake initiate failed: {:?}", e);
                             LanOutcome::Dropped
                         }
                         Ok(None) => LanOutcome::Handshaking { peer },
@@ -414,6 +430,41 @@ impl Node {
                 session.rekey(now);
             }
         }
+        self.pump_fail_summaries(now);
+    }
+
+    /// 高频失败事件 → 周期摘要（LOGGING §5）：事件只计数，每周期 ≤1 条，0 不输出
+    fn pump_fail_summaries(&mut self, now: Instant) {
+        if let Some(n) = self.connect_failed.poll(now) {
+            if n > 0 {
+                warn!("[node] control connect failed: {n} in last 1s");
+            }
+        }
+        if let Some((per_peer, global)) = self.mesh.poll_drop_stats() {
+            let total: u64 = global + per_peer.iter().map(|(_, n)| n).sum::<u64>();
+            if total > 0 {
+                let detail = if per_peer.is_empty() {
+                    " (unattributed)".to_string()
+                } else {
+                    format!(" (peer {per_peer:?}, unattributed {global})")
+                };
+                warn!("[node] frame dropped: {total} in last 1s{detail}");
+            }
+        }
+        if !self.rejected_stats.is_empty() {
+            let mut rejected: Vec<(u32, u64)> = Vec::new();
+            for (peer, rc) in self.rejected_stats.iter_mut() {
+                if let Some(n) = rc.poll(now) {
+                    if n > 0 {
+                        rejected.push((*peer, n));
+                    }
+                }
+            }
+            self.rejected_stats.retain(|_, rc| rc.has_pending());
+            if !rejected.is_empty() {
+                warn!("[node] handshake rejected: {rejected:?} in last 1s");
+            }
+        }
     }
 
     /// 主循环：控制面事件 / 数据面事件 / tun 入包 / 定时器（v1 单线程）
@@ -422,11 +473,9 @@ impl Node {
             if self.control.is_none() {
                 match self.connect_control().await {
                     Ok(()) => self.reconnect_backoff = RECONNECT_INITIAL_BACKOFF,
-                    Err(e) => {
-                        eprintln!(
-                            "[node] control connect failed: {} (retry in {:?})",
-                            e, self.reconnect_backoff
-                        );
+                    Err(_) => {
+                        // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持
+                        self.connect_failed.tick();
                         tokio::time::sleep(self.reconnect_backoff).await;
                         self.reconnect_backoff =
                             (self.reconnect_backoff * 2).min(RECONNECT_MAX_BACKOFF);
@@ -483,12 +532,12 @@ impl Node {
     fn handle_mesh_event(&mut self, ev: IncomingEvent) -> Option<Vec<u8>> {
         match ev {
             IncomingEvent::Established { peer } => {
-                eprintln!("[node] session established with {}", peer);
+                info!("[node] session established with {}", peer);
                 self.peer_heartbeats.insert(peer, 0);
                 None
             }
-            IncomingEvent::Rejected { peer, reason } => {
-                eprintln!("[node] handshake rejected by {}: {:?}", peer, reason);
+            IncomingEvent::Rejected { peer, .. } => {
+                self.note_rejected(peer);
                 None
             }
             IncomingEvent::Data { from, payload } => {
@@ -505,13 +554,10 @@ impl Node {
             }
             IncomingEvent::Responded { .. } => None,
             IncomingEvent::Relayed { to } => {
-                eprintln!("[node] relayed frame to {}", to);
+                info!("[node] relayed frame to {}", to);
                 None
             }
-            IncomingEvent::Dropped { reason } => {
-                eprintln!("[node] frame dropped: {:?}", reason);
-                None
-            }
+            IncomingEvent::Dropped { .. } => None,
         }
     }
 
@@ -528,7 +574,7 @@ impl Node {
                 self.node_id = Some(node_id);
                 self.network_id = network_id;
                 self.mesh.set_self_node_id(node_id);
-                eprintln!(
+                info!(
                     "[node] registered: node_id={} network_id={}",
                     node_id, network_id
                 );
@@ -560,7 +606,7 @@ impl Node {
                         if eps.is_empty() {
                             eps.push(addr.to_string());
                         }
-                        eprintln!("[node] endpoint report: {:?}", eps);
+                        debug!("[node] endpoint report: {:?}", eps);
                         let report = control.endpoint_report_envelope(eps);
                         let _ = control.send_envelope(&report).await;
                     }
@@ -577,7 +623,7 @@ impl Node {
                     }
                 }
                 self.apply_netmap(&netmap);
-                eprintln!(
+                info!(
                     "[node] netmap v{}: {} entries, {} routes, endpoints: {:?}",
                     netmap.version,
                     netmap.entries.len(),
@@ -664,7 +710,7 @@ impl Node {
                     self.pending_path_requests
                         .retain(|d| *d != destination_node_id);
                 }
-                eprintln!(
+                debug!(
                     "[node] paths to {} (src {}) {:?} (kp: {:?})",
                     destination_node_id,
                     source_node_id,
@@ -683,7 +729,7 @@ impl Node {
                 path_id,
             } => {
                 self.mesh.withdraw_path(destination_node_id, path_id);
-                eprintln!(
+                debug!(
                     "[node] path withdrawn {} -> {}",
                     destination_node_id, path_id
                 );

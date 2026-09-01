@@ -8,6 +8,7 @@ use landscape_rill_core::crypto::{derive_key_dst, derive_key_path, KEY_DST_LEN};
 use landscape_rill_core::route::Prefix;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use tracing::error;
 
 pub const BROADCAST_KEY_LEN: usize = 32;
 /// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
@@ -177,7 +178,7 @@ impl Coordinator {
             return;
         };
         if let Err(e) = store.save(&self.snapshot()) {
-            eprintln!("[coord] persist failed (state not durable): {e}");
+            error!("[coord] persist failed (state not durable): {e}");
         }
     }
 

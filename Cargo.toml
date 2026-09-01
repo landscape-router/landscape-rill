@@ -58,6 +58,12 @@ clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
+# --- Logging (LOGGING) ---
+tracing = "0.1.41"
+tracing-core = "0.1.33"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-appender = "0.2.3"
+
 # --- Test helpers ---
 rcgen = "0.14.8"
 

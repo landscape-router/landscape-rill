@@ -22,6 +22,7 @@ use landscape_rill_coord::config::{
     generate_auth_key, is_expired, parse_auth_key, parse_duration, validate_network, CoordConfig,
     AUTH_KEY_DEFAULT_TTL_SECS,
 };
+use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_mesh::control::{
     read_envelope, server_tls_stream, ConnectionState, CoordinatorServer,
 };
@@ -32,8 +33,12 @@ use serde::{Deserialize, Deserializer, Serializer};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tracing::{error, info, warn};
+
+mod logging;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/landscape/overlay.json";
 const UNIT_NAME: &str = "lrill.service";
@@ -57,7 +62,12 @@ enum Command {
     /// 从 signing_seed(hex) 生成 Ed25519 公钥(hex)，供节点配置信任锚
     Pubkey { seed: String },
     /// 前台运行 daemon（缺省配置 /etc/landscape/overlay.json）
-    Run { config: Option<PathBuf> },
+    Run {
+        config: Option<PathBuf>,
+        /// 追加文件日志（按天轮转 + 保留 7 个，LOGGING §4）；缺省仅 stderr
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+    },
     /// 生成 auth key（lrk-<network>-<expiry>-<base32>，输出仅 stdout，不落日志；
     /// 默认有效期 24h，--ttl 0 永不过期；REQ-036/REQ-043）
     Authkey {
@@ -195,7 +205,10 @@ async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error +
     let mut listener = TcpListener::bind(config.listen_addr.parse::<SocketAddr>()?).await?;
     let server = Arc::new(Mutex::new(CoordinatorServer::from_config(&config)?));
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-    eprintln!(
+    // 高频失败 → 周期摘要（LOGGING §5）：事件只计数，每周期 ≤1 条，0 不输出
+    let mut accept_failed = RateCounter::new(RATE_SUMMARY_PERIOD);
+    let mut summary = tokio::time::interval(RATE_SUMMARY_PERIOD);
+    info!(
         "[coord] listening on {} (network={}, reload=SIGHUP)",
         listener.local_addr()?,
         config.network
@@ -204,21 +217,34 @@ async fn run_coord(config_path: &Path) -> Result<(), Box<dyn std::error::Error +
         tokio::select! {
             // 注意：首次 poll 才注册信号监听，首个连接也走同一 select（无提前 await 窗口）
             _ = hangup.recv() => {
-                eprintln!("[coord] SIGHUP received");
+                info!("[coord] SIGHUP received");
                 match load_coord(config_path) {
                     Ok(new_cfg) => {
                         server.lock().await.apply_config(&new_cfg);
-                        eprintln!("[coord] config reloaded (SIGHUP)");
+                        info!("[coord] config reloaded (SIGHUP)");
                     }
-                    Err(e) => eprintln!("[coord] reload failed, keeping old config: {e}"),
+                    Err(e) => error!("[coord] reload failed, keeping old config: {e}"),
+                }
+            }
+            _ = summary.tick() => {
+                if let Some(n) = accept_failed.poll(Instant::now()) {
+                    if n > 0 {
+                        warn!("[coord] accept failed: {n} in last 1s");
+                    }
+                }
+                let mut guard = server.lock().await;
+                if let Some(n) = guard.register_rejected.poll(Instant::now()) {
+                    if n > 0 {
+                        warn!("[coord] register rejected: {n} in last 1s");
+                    }
                 }
             }
             next = accept_next(&mut listener, &cert, &key) => {
-                // 单连接 TLS 错误不得杀死 coordinator（恶意/畸形握手 → 记日志继续监听）
+                // 单连接 TLS 错误不得杀死 coordinator（恶意/畸形握手 → 计数摘要后继续监听）
                 let tls = match next {
                     Ok(t) => t,
-                    Err(e) => {
-                        eprintln!("[coord] accept failed: {e}");
+                    Err(_) => {
+                        accept_failed.tick();
                         continue;
                     }
                 };
@@ -377,14 +403,20 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(Command::Up) => cmd_up().map_err(Into::into),
         Some(Command::Down) => cmd_down().map_err(Into::into),
         Some(Command::Status) => cmd_status().map_err(Into::into),
-        None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH)),
-        Some(Command::Run { config }) => {
-            run_daemon(&config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)))
-        }
+        None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH), None),
+        Some(Command::Run { config, log_file }) => run_daemon(
+            &config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)),
+            log_file.as_deref(),
+        ),
     }
 }
 
-fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_daemon(
+    path: &Path,
+    log_file: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 仅 daemon 初始化日志框架（LOGGING §1）；CLI 子命令直接 stdout/stderr
+    logging::init_logging(log_file)?;
     let text = std::fs::read_to_string(path)
         .map_err(|e| std::io::Error::new(e.kind(), format!("config {}: {}", path.display(), e)))?;
     let file: FileConfig = serde_json::from_str(&text)
@@ -399,7 +431,7 @@ fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync
             let path = config_path.clone();
             tokio::spawn(async move {
                 if let Err(e) = run_coord(&path).await {
-                    eprintln!("[coord] fatal: {}", e);
+                    error!("[coord] fatal: {}", e);
                 }
             });
         }
@@ -418,7 +450,7 @@ fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync
             ca_cert_path,
         ) = node_fields
         else {
-            eprintln!("[node] 无 node 角色字段，仅运行 coordinator");
+            info!("[node] 无 node 角色字段，仅运行 coordinator");
             std::future::pending::<()>().await;
             return Ok(());
         };
@@ -439,17 +471,12 @@ fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync
             )
         })?;
         // REQ-043：auth key 过期 → 告警不阻断（已注册节点仍可走挑战恢复路径，
-        // 硬拒绝会卡死重连）；格式非法同样只告警（coordinator 是最终裁决）
+        // 硬拒绝会卡死重连）；格式非法同样只告警（coordinator 是最终裁决）。
+        // auth key 不进日志（LOGGING §6，REQ-036/AO-01/AO-02）
         if is_expired(&config.auth_key, unix_now()) {
-            eprintln!(
-                "[node] warning: auth key 已过期（{}），新注册将被拒；已注册节点仍可经挑战恢复",
-                config.auth_key
-            );
+            warn!("[node] auth key 已过期，新注册将被拒；已注册节点仍可经挑战恢复");
         } else if parse_auth_key(&config.auth_key).is_err() {
-            eprintln!(
-                "[node] warning: auth key 格式无法解析（{}），注册将失败",
-                config.auth_key
-            );
+            warn!("[node] auth key 格式无法解析，注册将失败");
         }
         let opts = NodeOptions {
             tun: file.tun.as_ref().map(|t| TunConfig {
@@ -466,7 +493,7 @@ fn run_daemon(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync
             }),
             ..NodeOptions::default()
         };
-        eprintln!(
+        info!(
             "[node] starting (coordinator={}, tun={})",
             config.coordinator_url,
             opts.tun

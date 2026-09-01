@@ -2,6 +2,7 @@ use crate::framing;
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
 use landscape_rill_core::control::session::{ClientSession, SessionState};
+use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead, MessageWrite, Writer};
 use std::borrow::Cow;
@@ -10,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tracing::error;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const CHALLENGE_NONCE_LEN: usize = 16;
@@ -274,6 +276,8 @@ pub fn netmap_push_message(coordinator: &Coordinator) -> NetmapPush<'static> {
 
 pub struct CoordinatorServer {
     pub coordinator: Coordinator,
+    /// 注册拒绝计数（LOGGING §5：周期摘要；run_coord 周期取走打印）
+    pub register_rejected: RateCounter,
 }
 
 /// 单连接挑战状态（重连认证，CONTROL_PLANE §3.9）
@@ -315,6 +319,7 @@ impl CoordinatorServer {
     pub fn new(master_key: [u8; 32], signing_seed: [u8; 32]) -> Self {
         Self {
             coordinator: Coordinator::new(master_key, signing_seed),
+            register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
         }
     }
 
@@ -329,7 +334,10 @@ impl CoordinatorServer {
             }
             None => Coordinator::new(cfg.master_key, cfg.signing_seed),
         };
-        let mut server = Self { coordinator };
+        let mut server = Self {
+            coordinator,
+            register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
+        };
         cfg.apply_to(&mut server.coordinator);
         Ok(server)
     }
@@ -451,7 +459,8 @@ impl CoordinatorServer {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[coord] register rejected: {:?}", e);
+                        // 逐条输出 → 周期摘要（LOGGING §5；run_coord 打印）
+                        self.register_rejected.tick();
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             format!("{:?}", e),
@@ -829,7 +838,7 @@ impl ControlSession {
                 let owned = match PathResponseOwned::try_from(body) {
                     Ok(o) => o,
                     Err(e) => {
-                        eprintln!("[node] PATH parse failed: {:?}", e);
+                        error!("[node] PATH parse failed: {:?}", e);
                         return Err(decoding_err(e));
                     }
                 };

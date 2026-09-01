@@ -6,6 +6,7 @@ use landscape_rill_core::handshake::{
     HandshakeContext, HandshakeError, HandshakeInitiator, HandshakeResponder, Session,
     MSG1_PAYLOAD_LEN, MSG2_PAYLOAD_LEN, MSG3_PAYLOAD_LEN,
 };
+use landscape_rill_core::rate::RateCounter;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -18,6 +19,8 @@ pub const FLOOD_BUCKET_RATE_PER_SEC: f64 = 16.0;
 pub const FLOOD_SEEN_TTL: Duration = Duration::from_secs(30);
 /// 主路径健康 miss 阈值：累计达此值 → 快速切换备用路径（CONTROL_PLANE §3.11）
 pub const PATH_HEALTH_MISS_LIMIT: u32 = 3;
+/// 丢帧摘要周期（LOGGING §5）：事件只计数不逐条输出，每周期最多 1 条摘要
+pub const DROP_STATS_PERIOD: Duration = landscape_rill_core::rate::RATE_SUMMARY_PERIOD;
 
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -83,6 +86,10 @@ pub struct MeshData {
     endpoint_health: HashMap<(u32, SocketAddr), u32>,
     /// 上次对该发送目标实际使用的端点（miss 定位用——黑洞端点无法从收包侧感知）
     last_sent_endpoint: HashMap<u32, SocketAddr>,
+    /// per-peer 丢帧计数（LOGGING §5：周期摘要；仅已知 peer，防伪造 node_id 膨胀）
+    drop_stats: HashMap<u32, RateCounter>,
+    /// 全局丢帧计数（未知节点/畸形包，无 peer 可归因）
+    drop_stats_global: RateCounter,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -228,6 +235,8 @@ impl MeshData {
             ingress_hop: HashMap::new(),
             endpoint_health: HashMap::new(),
             last_sent_endpoint: HashMap::new(),
+            drop_stats: HashMap::new(),
+            drop_stats_global: RateCounter::new(DROP_STATS_PERIOD),
         })
     }
 
@@ -729,6 +738,7 @@ impl MeshData {
 
     /// 收帧处理：relay 路径校验 → 按包类型分发（握手/数据/心跳/广播）。
     /// 入站路径记录 + 逐路径活性在分发前更新（帧实际到达的上一跳 = UDP 发送者归属）。
+    /// 丢帧统计在入口收口（LOGGING §5）：relay 无法归因时从帧头补解析。
     pub async fn handle_incoming(&mut self) -> std::io::Result<IncomingEvent> {
         let (from_addr, frame) = self.recv_frame().await?;
         match self.relay(&frame).await {
@@ -738,7 +748,12 @@ impl MeshData {
                     self.note_endpoint_ok(ingress, from_addr);
                 }
                 self.apply_ingress_health(from);
-                Ok(self.dispatch_delivered(from, &frame).await)
+                let ev = self.dispatch_delivered(from, &frame).await;
+                // dispatch 路径丢帧同样收口计数（from 已过 route_mac 校验，归因可信）
+                if matches!(ev, IncomingEvent::Dropped { .. }) {
+                    self.note_drop(Some(from));
+                }
+                Ok(ev)
             }
             RelayOutcome::Flooded { frame, from, .. } => {
                 if let Some(ingress) = self.endpoint_owner(from_addr) {
@@ -746,11 +761,58 @@ impl MeshData {
                     self.note_endpoint_ok(ingress, from_addr);
                 }
                 self.apply_ingress_health(from);
-                Ok(self.dispatch_delivered(from, &frame).await)
+                let ev = self.dispatch_delivered(from, &frame).await;
+                if matches!(ev, IncomingEvent::Dropped { .. }) {
+                    self.note_drop(Some(from));
+                }
+                Ok(ev)
             }
             RelayOutcome::Forwarded { to } => Ok(IncomingEvent::Relayed { to }),
-            RelayOutcome::Dropped { reason } => Ok(IncomingEvent::Dropped { reason }),
+            RelayOutcome::Dropped { reason } => {
+                // 帧头可解析 → 归因源节点（伪造 node_id 不落 per-peer，进全局桶）
+                let from = MeshFrameHeader::decode(&frame).ok().map(|h| h.from_node_id);
+                self.note_drop(from);
+                Ok(IncomingEvent::Dropped { reason })
+            }
         }
+    }
+
+    /// 丢帧计数（LOGGING §5）：仅已知 peer 记 per-peer，未知/畸形包记全局桶
+    fn note_drop(&mut self, from: Option<u32>) {
+        match from {
+            Some(f) if self.is_known_peer(f) => {
+                let rc = self
+                    .drop_stats
+                    .entry(f)
+                    .or_insert_with(|| RateCounter::new(DROP_STATS_PERIOD));
+                rc.tick();
+            }
+            _ => self.drop_stats_global.tick(),
+        }
+    }
+
+    /// 已知 peer = 持有转发密钥或已建会话（netmap/keydist 收敛后）；伪造 node_id 不在表内
+    fn is_known_peer(&self, peer: u32) -> bool {
+        self.key_dst_table.contains_key(&peer) || self.sessions.contains_key(&peer)
+    }
+
+    /// 取走本周期丢帧摘要（LOGGING §5；pump_timers 周期调用，0 不输出由调用方决定）
+    pub fn poll_drop_stats(&mut self) -> Option<(Vec<(u32, u64)>, u64)> {
+        let now = Instant::now();
+        let mut per_peer = Vec::new();
+        for (peer, rc) in self.drop_stats.iter_mut() {
+            if let Some(n) = rc.poll(now) {
+                if n > 0 {
+                    per_peer.push((*peer, n));
+                }
+            }
+        }
+        self.drop_stats.retain(|_, rc| rc.has_pending());
+        let global = self.drop_stats_global.poll(now).unwrap_or(0);
+        if per_peer.is_empty() && global == 0 {
+            return None;
+        }
+        Some((per_peer, global))
     }
 
     async fn dispatch_delivered(&mut self, from: u32, frame: &[u8]) -> IncomingEvent {
