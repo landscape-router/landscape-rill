@@ -9,7 +9,7 @@
 | workflow | 内容 | 触发 | required |
 |---|---|---|---|
 | `check.yml` | fmt / clippy(`-D warnings`) / `cargo test --workspace` / cargo audit / `ci/check-docs.sh` | PR + push | 是 |
-| `e2e-mesh.yml` | `e2e/run_e2e.sh` 五场景 matrix 并行（每场景一 job，`fail-fast=false`）：direct（coord + node-a/b，IPv4+IPv6 ping）、relay（a—b—c 线形经 b 中继）、persist（REQ-037）、log（REQ-039）、reload（REQ-038 SIGHUP 重载），`MESH_E2E_SCENARIO` 取矩阵值 | PR + push main + workflow_dispatch | 否 |
+| `e2e-mesh.yml` | `build` job 编译一次 + 编译 cache（`~/.cargo` + `target`，`actions/cache`）→ `mesh` job 五场景 matrix 并行（`needs: build` 恢复 cache 后 cargo 秒级命中，每场景一 job，`fail-fast=false`）：direct（coord + node-a/b，IPv4+IPv6 ping）、relay（a—b—c 线形经 b 中继）、persist（REQ-037）、log（REQ-039）、reload（REQ-038 SIGHUP 重载），`MESH_E2E_SCENARIO` 取矩阵值 | PR + push main + workflow_dispatch | 否 |
 | `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
 
 - 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）

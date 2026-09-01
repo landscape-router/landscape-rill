@@ -1,7 +1,7 @@
 # mesh docker e2e：direct（coord + node-a/node-b，IPv4 + IPv6 ping）+ relay（a—b—c 线形，经 b 中继）
 # + persist（coord 持久化重启恢复，REQ-037）+ log（日志治理，REQ-039）+ reload（SIGHUP 重载，REQ-038）
-# matrix 并行（每场景一 job，fail-fast=false 互不牵连）；公共仓库分钟不限量，隔离优先。
-# PR 也触发但不设 required（低频成本换 mesh 改动提前断裂发现）；场景目录约定见 docs/ci/README.md §1
+# build job 编译一次 → 编译 cache（~/.cargo + target）→ matrix 场景 job 恢复 cache 后 cargo 秒级命中，
+# 各 job 不再重复全量编译。PR 也触发但不设 required；场景目录约定见 docs/ci/README.md §1
 name: e2e-mesh
 
 on:
@@ -11,7 +11,32 @@ on:
   workflow_dispatch:
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore cargo cache (previous run)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ hashFiles('**/Cargo.lock') }}-
+      - name: release build
+        run: cargo build --release
+      - name: Save cargo cache (this run)
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
+
   mesh:
+    needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -20,7 +45,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Restore cargo cache (build job)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.sha }}
       - name: mesh e2e (${{ matrix.scenario }})
         env:
           # runner 的 /etc/resolv.conf 仅 systemd-resolved stub，容器内不可达，须显式公共 DNS
