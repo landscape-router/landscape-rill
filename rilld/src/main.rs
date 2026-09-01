@@ -64,9 +64,12 @@ enum Command {
     /// 前台运行 daemon（缺省配置 /etc/landscape/overlay.json）
     Run {
         config: Option<PathBuf>,
-        /// 追加文件日志（按天轮转 + 保留 7 个，LOGGING §4）；缺省仅 stderr
+        /// 追加文件日志（按天轮转 + 保留 7 个，LOGGING §4）；优先级 --log-file > LRILL_LOG_FILE > 默认仅 stderr
         #[arg(long)]
         log_file: Option<PathBuf>,
+        /// 日志级别（LOGGING §2）；优先级 --log-level > RUST_LOG > 默认 info
+        #[arg(long)]
+        log_level: Option<LogLevel>,
     },
     /// 生成 auth key（lrk-<network>-<expiry>-<base32>，输出仅 stdout，不落日志；
     /// 默认有效期 24h，--ttl 0 永不过期；REQ-036/REQ-043）
@@ -84,6 +87,29 @@ enum Command {
     Down,
     /// 查询 systemd 服务状态
     Status,
+}
+
+/// CLI 日志级别（LOGGING §2；显式指定时覆盖 RUST_LOG）
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LogLevel {
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LogLevel {
+    fn as_filter(self) -> tracing_subscriber::filter::LevelFilter {
+        use tracing_subscriber::filter::LevelFilter;
+        match self {
+            LogLevel::Off => LevelFilter::OFF,
+            LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Debug => LevelFilter::DEBUG,
+        }
+    }
 }
 
 // ============================================================================
@@ -403,20 +429,26 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(Command::Up) => cmd_up().map_err(Into::into),
         Some(Command::Down) => cmd_down().map_err(Into::into),
         Some(Command::Status) => cmd_status().map_err(Into::into),
-        None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH), None),
-        Some(Command::Run { config, log_file }) => run_daemon(
+        None => run_daemon(&PathBuf::from(DEFAULT_CONFIG_PATH), None, None),
+        Some(Command::Run {
+            config,
+            log_file,
+            log_level,
+        }) => run_daemon(
             &config.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH)),
-            log_file.as_deref(),
+            log_file,
+            log_level.map(LogLevel::as_filter),
         ),
     }
 }
 
 fn run_daemon(
     path: &Path,
-    log_file: Option<&Path>,
+    log_file: Option<PathBuf>,
+    log_level: Option<tracing_subscriber::filter::LevelFilter>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 仅 daemon 初始化日志框架（LOGGING §1）；CLI 子命令直接 stdout/stderr
-    logging::init_logging(log_file)?;
+    logging::init_logging(log_level, log_file)?;
     let text = std::fs::read_to_string(path)
         .map_err(|e| std::io::Error::new(e.kind(), format!("config {}: {}", path.display(), e)))?;
     let file: FileConfig = serde_json::from_str(&text)
