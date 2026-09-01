@@ -519,15 +519,17 @@ async fn forward_through_relay() {
 
     let frame = frame_from(1, 3, b"payload", 64, 1);
     relay.socket.send_to(&frame, relay_addr).await.unwrap();
-    let (_, recv) = relay.recv_frame().await.unwrap();
-    assert_eq!(relay.relay(&recv).await, RelayOutcome::Forwarded { to: 3 });
-    let (_, recv2) = b.recv_frame().await.unwrap();
+    let (_, mut recv) = relay.recv_frame().await.unwrap();
+    assert_eq!(
+        relay.relay(&mut recv).await,
+        RelayOutcome::Forwarded { to: 3 }
+    );
+    let (_, mut recv2) = b.recv_frame().await.unwrap();
     assert_eq!(recv2[3], 63);
-    let delivered = b.relay(&recv2).await;
+    let delivered = b.relay(&mut recv2).await;
     match delivered {
-        RelayOutcome::Delivered { frame, from } => {
+        RelayOutcome::Delivered { from } => {
             assert_eq!(from, 1);
-            assert_eq!(frame.len(), recv2.len());
         }
         other => panic!("expected delivered, got {:?}", other),
     }
@@ -542,7 +544,7 @@ async fn tampered_frame_dropped() {
     let mut frame = frame_from(1, 3, b"payload", 64, 1);
     frame[8] ^= 0x01;
     assert_eq!(
-        relay.relay(&frame).await,
+        relay.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::BadRouteMac
         }
@@ -695,8 +697,8 @@ async fn v2_frame_forwarded_through_relay_path() {
     assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION2);
     a.send_to_node_hop(2, first_hop, &frame).await.unwrap();
     // R 校验 key_path 并转发到 B
-    let (_, rcv4) = r.recv_frame().await.unwrap();
-    assert_eq!(r.relay(&rcv4).await, RelayOutcome::Forwarded { to: 2 });
+    let (_, mut rcv4) = r.recv_frame().await.unwrap();
+    assert_eq!(r.relay(&mut rcv4).await, RelayOutcome::Forwarded { to: 2 });
     // B 收帧解密
     match b.handle_incoming().await.unwrap() {
         IncomingEvent::Data { from, payload } => {
@@ -928,9 +930,9 @@ async fn ttl_expired_dropped() {
         .await
         .unwrap();
     relay.set_key_dst(3, node_key(3));
-    let frame = frame_from(1, 3, b"payload", 0, 1);
+    let mut frame = frame_from(1, 3, b"payload", 0, 1);
     assert_eq!(
-        relay.relay(&frame).await,
+        relay.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::TtlExpired
         }
@@ -943,9 +945,9 @@ async fn no_endpoint_dropped() {
         .await
         .unwrap();
     relay.set_key_dst(3, node_key(3));
-    let frame = frame_from(1, 3, b"payload", 64, 1);
+    let mut frame = frame_from(1, 3, b"payload", 64, 1);
     assert_eq!(
-        relay.relay(&frame).await,
+        relay.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::NoEndpoint
         }
@@ -958,7 +960,7 @@ async fn short_frame_dropped() {
         .await
         .unwrap();
     assert_eq!(
-        relay.relay(&[0u8; 10]).await,
+        relay.relay(&mut [0u8; 10]).await,
         RelayOutcome::Dropped {
             reason: DropReason::Short
         }
@@ -971,8 +973,8 @@ async fn delivered_to_self() {
         .await
         .unwrap();
     node.set_key_dst(3, node_key(3));
-    let frame = frame_from(1, 3, b"payload", 64, 1);
-    match node.relay(&frame).await {
+    let mut frame = frame_from(1, 3, b"payload", 64, 1);
+    match node.relay(&mut frame).await {
         RelayOutcome::Delivered { from, .. } => assert_eq!(from, 1),
         other => panic!("expected delivered, got {:?}", other),
     }
@@ -987,7 +989,7 @@ async fn bad_version_dropped() {
     let mut frame = frame_from(1, 3, b"payload", 64, 1);
     frame[0] = 0x03; // 非法版本（0x01=v1，0x02=v2）
     assert_eq!(
-        relay.relay(&frame).await,
+        relay.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::BadVersion
         }
@@ -1003,7 +1005,7 @@ async fn v2_frame_shorter_than_header_rejected() {
     let mut short = frame[..HEADER_LEN].to_vec(); // 34B
     short[0] = VERSION2; // v2 帧头要求 42B
     assert_eq!(
-        relay.relay(&short).await,
+        relay.relay(&mut short).await,
         RelayOutcome::Dropped {
             reason: DropReason::Short
         }
@@ -1079,12 +1081,14 @@ async fn broadcast_replay_dropped() {
     // relay 去重（30s）只挡短期重复；重放窗口挡去重过期后的旧帧重注入
     let mut nodes = broadcast_setup(&[1, 2]).await;
     let frame = nodes[0].build_broadcast_frame(b"payload").unwrap();
+    let mut buf = BytesMut::from(&frame[..]);
     assert!(matches!(
-        nodes[1].handle_broadcast_frame(1, &frame),
+        nodes[1].handle_broadcast_frame(1, &mut buf),
         IncomingEvent::Broadcast { from: 1, .. }
     ));
+    let mut buf2 = BytesMut::from(&frame[..]);
     assert_eq!(
-        nodes[1].handle_broadcast_frame(1, &frame),
+        nodes[1].handle_broadcast_frame(1, &mut buf2),
         IncomingEvent::Dropped {
             reason: DropReason::Replay
         }
@@ -1094,9 +1098,9 @@ async fn broadcast_replay_dropped() {
 #[tokio::test]
 async fn broadcast_relay_floods_to_all_except_source() {
     let mut nodes = broadcast_setup(&[1, 2, 3]).await;
-    let frame = nodes[0].build_broadcast_frame(b"hello all").unwrap();
+    let mut frame = nodes[0].build_broadcast_frame(b"hello all").unwrap();
     nodes[0].send_to_node(2, &frame).await.unwrap();
-    let outcome = nodes[1].relay(&frame).await;
+    let outcome = nodes[1].relay(&mut frame).await;
     match outcome {
         RelayOutcome::Flooded {
             from, forwarded, ..
@@ -1118,9 +1122,9 @@ async fn broadcast_relay_floods_to_all_except_source() {
 #[tokio::test]
 async fn broadcast_relay_no_echo_to_source() {
     let mut nodes = broadcast_setup(&[1, 2, 3]).await;
-    let frame = nodes[0].build_broadcast_frame(b"hello").unwrap();
+    let mut frame = nodes[0].build_broadcast_frame(b"hello").unwrap();
     nodes[0].send_to_node(2, &frame).await.unwrap();
-    let outcome = nodes[1].relay(&frame).await;
+    let outcome = nodes[1].relay(&mut frame).await;
     match outcome {
         RelayOutcome::Flooded { forwarded, .. } => assert!(!forwarded.contains(&1)),
         other => panic!("expected flood, got {:?}", other),
@@ -1130,15 +1134,15 @@ async fn broadcast_relay_no_echo_to_source() {
 #[tokio::test]
 async fn broadcast_relay_dedup_drops_repeat() {
     let mut nodes = broadcast_setup(&[1, 2]).await;
-    let frame = nodes[0].build_broadcast_frame(b"hello").unwrap();
+    let mut frame = nodes[0].build_broadcast_frame(b"hello").unwrap();
     nodes[0].send_to_node(2, &frame).await.unwrap();
     assert!(matches!(
-        nodes[1].relay(&frame).await,
+        nodes[1].relay(&mut frame).await,
         RelayOutcome::Flooded { .. }
     ));
     nodes[0].send_to_node(2, &frame).await.unwrap();
     assert_eq!(
-        nodes[1].relay(&frame).await,
+        nodes[1].relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::Duplicate
         }
@@ -1148,9 +1152,9 @@ async fn broadcast_relay_dedup_drops_repeat() {
 #[tokio::test]
 async fn broadcast_self_origin_dropped() {
     let mut nodes = broadcast_setup(&[1, 2]).await;
-    let frame = nodes[0].build_broadcast_frame(b"loop").unwrap();
+    let mut frame = nodes[0].build_broadcast_frame(b"loop").unwrap();
     assert_eq!(
-        nodes[0].relay(&frame).await,
+        nodes[0].relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::Duplicate
         }
@@ -1167,7 +1171,7 @@ async fn broadcast_ttl_zero_dropped() {
         .unwrap();
     b.set_broadcast_key(broadcast_key());
     assert_eq!(
-        b.relay(&frame).await,
+        b.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::TtlExpired
         }
@@ -1188,9 +1192,9 @@ async fn broadcast_wrong_type_dropped() {
         from_node_id: 1,
         ..Default::default()
     };
-    let frame = build_frame(&header, &[0x24; 32], &[0x24; 32], 0, b"x").unwrap();
+    let mut frame = build_frame(&header, &[0x24; 32], &[0x24; 32], 0, b"x").unwrap();
     assert_eq!(
-        b.relay(&frame).await,
+        b.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::UnsupportedType
         }
@@ -1203,7 +1207,7 @@ async fn broadcast_tampered_route_mac_dropped() {
     let mut frame = nodes[0].build_broadcast_frame(b"x").unwrap();
     frame[8] ^= 0x01;
     assert_eq!(
-        nodes[1].relay(&frame).await,
+        nodes[1].relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::BadRouteMac
         }
@@ -1213,12 +1217,12 @@ async fn broadcast_tampered_route_mac_dropped() {
 #[tokio::test]
 async fn broadcast_no_key_dropped() {
     let mut nodes = broadcast_setup(&[1, 2]).await;
-    let frame = nodes[0].build_broadcast_frame(b"x").unwrap();
+    let mut frame = nodes[0].build_broadcast_frame(b"x").unwrap();
     let mut no_key = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
         .await
         .unwrap();
     assert_eq!(
-        no_key.relay(&frame).await,
+        no_key.relay(&mut frame).await,
         RelayOutcome::Dropped {
             reason: DropReason::NoKeyDst
         }

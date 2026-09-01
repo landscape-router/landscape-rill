@@ -47,14 +47,18 @@ impl MeshData {
     }
 
     /// 广播帧解密（FRAME_HEADER §2.6）：route_mac + AEAD 均用 broadcast_key，
-    /// 按源节点的独立重放窗口拦截重放。
-    pub(super) fn handle_broadcast_frame(&mut self, from: u32, frame: &[u8]) -> IncomingEvent {
+    /// 按源节点的独立重放窗口拦截重放。就地解密，明文 freeze 零拷贝出帧（REQ-053）。
+    pub(super) fn handle_broadcast_frame(
+        &mut self,
+        from: u32,
+        frame: &mut BytesMut,
+    ) -> IncomingEvent {
         let Some(bkey) = self.broadcast_key else {
             return IncomingEvent::Dropped {
                 reason: DropReason::NoKeyDst,
             };
         };
-        let Some(header) = MeshFrameHeader::decode(frame).ok() else {
+        let Some(header) = MeshFrameHeader::decode(&frame[..]).ok() else {
             return IncomingEvent::Dropped {
                 reason: DropReason::Short,
             };
@@ -65,11 +69,14 @@ impl MeshData {
                 reason: DropReason::Replay,
             };
         }
-        match open_frame(frame, &bkey, &bkey, 0) {
-            Ok((_, payload)) => IncomingEvent::Broadcast {
-                from,
-                payload: Bytes::from(payload),
-            },
+        match open_frame_in_place(frame, &bkey, &bkey, 0) {
+            Ok((h, payload)) => {
+                let pt_len = payload.len();
+                let hlen = header_len(h.version);
+                let _ = frame.split_to(hlen);
+                let payload = frame.split_to(pt_len).freeze();
+                IncomingEvent::Broadcast { from, payload }
+            }
             Err(landscape_rill_core::frame::OpenError::RouteMac) => IncomingEvent::Dropped {
                 reason: DropReason::BadRouteMac,
             },
@@ -81,11 +88,12 @@ impl MeshData {
 
     /// 广播帧泛洪路径（FRAME_HEADER §2.6）：
     /// version（已验）→ type=广播 → broadcast_key 存在 → route_mac（bkey）→
-    /// (from, seq) 去重（30s）→ ttl>0 → 自交付 + ttl-1 泛洪（除自己与源，出口令牌桶限速）。
+    /// (from, seq) 去重（30s）→ ttl>0 → 原地 ttl-1 泛洪（除自己与源，出口令牌桶限速）；
+    /// 自交付由 handle_frame 就地解密（REQ-053：整程零拷贝）。
     pub(super) async fn relay_broadcast(
         &mut self,
         header: &MeshFrameHeader,
-        frame: &[u8],
+        frame: &mut [u8],
     ) -> RelayOutcome {
         if header.packet_type != packet_type::BROADCAST {
             return RelayOutcome::Dropped {
@@ -126,15 +134,15 @@ impl MeshData {
             .insert((header.from_node_id, header.seq), Instant::now());
         let mut forwarded = Vec::new();
         if self.flood_bucket.take() {
-            let mut out = frame.to_vec();
-            decrement_ttl(&mut out);
+            // 原地 TTL 递减后直接从接收缓冲泛洪（REQ-053：转发零拷贝）
+            decrement_ttl(frame);
             for (id, addrs) in &self.endpoint_table {
                 if *id == self.self_node_id || *id == header.from_node_id {
                     continue;
                 }
                 let mut ok = false;
                 for ep in addrs {
-                    if self.wan_send(&out, *ep).await.is_ok() {
+                    if self.wan_send(&frame[..], *ep).await.is_ok() {
                         ok = true;
                         break;
                     }
@@ -145,7 +153,6 @@ impl MeshData {
             }
         }
         RelayOutcome::Flooded {
-            frame: frame.to_vec(),
             from: header.from_node_id,
             forwarded,
         }

@@ -4,7 +4,7 @@
 use super::*;
 
 impl MeshData {
-    pub async fn relay(&mut self, frame: &[u8]) -> RelayOutcome {
+    pub async fn relay(&mut self, frame: &mut [u8]) -> RelayOutcome {
         if frame.len() < HEADER_LEN {
             return RelayOutcome::Dropped {
                 reason: DropReason::Short,
@@ -25,9 +25,8 @@ impl MeshData {
         }
         if header.to_node_id == BROADCAST_NODE_ID {
             return self.relay_broadcast(&header, frame).await;
-        }
-        // 路由密钥按帧头版本选择：v2 = 该 path_id 的 key_path（路径级授权，
-        // CONTROL_PLANE §3.11.5——转发节点必须持路径授权才能校验/转发）
+        } // 路由密钥按帧头版本选择：v2 = 该 path_id 的 key_path（路径级授权，
+          // CONTROL_PLANE §3.11.5——转发节点必须持路径授权才能校验/转发）
         let route_key = if header.version == VERSION2 {
             match self.key_path_table.get(&header.path_id) {
                 Some(k) => *k,
@@ -55,7 +54,6 @@ impl MeshData {
         }
         if header.to_node_id == self.self_node_id {
             return RelayOutcome::Delivered {
-                frame: frame.to_vec(),
                 from: header.from_node_id,
             };
         }
@@ -83,9 +81,10 @@ impl MeshData {
                 reason: DropReason::NoEndpoint,
             };
         };
-        let mut out = frame.to_vec();
-        decrement_ttl(&mut out);
-        match self.wan_send(&out, endpoint).await {
+        // 原地 TTL 递减后直接从接收缓冲发出（REQ-053：转发零拷贝；
+        // ttl 不参与认证，自交付解密不受影响）
+        decrement_ttl(frame);
+        match self.wan_send(&frame[..], endpoint).await {
             Ok(_) => RelayOutcome::Forwarded {
                 to: header.to_node_id,
             },

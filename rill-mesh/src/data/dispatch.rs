@@ -10,13 +10,13 @@ impl MeshData {
     /// 入站路径记录 + 逐路径活性在分发前更新（帧实际到达的上一跳 = UDP 发送者归属）。
     /// 丢帧统计在入口收口（LOGGING §5）：relay 无法归因时从帧头补解析。
     pub async fn handle_incoming(&mut self) -> std::io::Result<IncomingEvent> {
-        let (from_addr, packet) = self.recv_frame().await?;
-        let first = packet.first().copied();
+        let (from_addr, mut frame) = self.recv_frame().await?;
+        let first = frame.first().copied();
         if matches!(first, Some(b) if (0x01..=0x0F).contains(&b)) {
             // 34B 帧路径（version 值域 0x01..=0x0F，FRAME_HEADER §2.1）
-            self.handle_frame(from_addr, &packet).await
-        } else if packet.len() >= 4 && packet[..4] == crate::probe::PROBE_MAGIC {
-            self.handle_probe(from_addr, &packet).await
+            self.handle_frame(from_addr, &mut frame).await
+        } else if frame.len() >= 4 && frame[..4] == crate::probe::PROBE_MAGIC {
+            self.handle_probe(from_addr, &frame).await
         } else {
             // 非帧非 probe → 丢弃（解析 fail-closed，CN-02）
             self.note_drop(None);
@@ -95,33 +95,34 @@ impl MeshData {
         }
     }
 
-    /// 帧路径（原 relay 入口逻辑，分派后调用）
+    /// 帧路径（原 relay 入口逻辑，分派后调用）。帧留在接收缓冲中：
+    /// 转发原地递减 TTL、送达就地解密后 freeze 载荷（REQ-053 零拷贝）。
     async fn handle_frame(
         &mut self,
         from_addr: SocketAddr,
-        frame: &[u8],
+        frame: &mut BytesMut,
     ) -> std::io::Result<IncomingEvent> {
         match self.relay(frame).await {
-            RelayOutcome::Delivered { frame, from } => {
+            RelayOutcome::Delivered { from } => {
                 if let Some(ingress) = self.endpoint_owner(from_addr) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
                 }
                 self.apply_ingress_health(from);
-                let ev = self.dispatch_delivered(from, &frame).await;
+                let ev = self.dispatch_delivered(from, frame).await;
                 // dispatch 路径丢帧同样收口计数（from 已过 route_mac 校验，归因可信）
                 if matches!(ev, IncomingEvent::Dropped { .. }) {
                     self.note_drop(Some(from));
                 }
                 Ok(ev)
             }
-            RelayOutcome::Flooded { frame, from, .. } => {
+            RelayOutcome::Flooded { from, .. } => {
                 if let Some(ingress) = self.endpoint_owner(from_addr) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
                 }
                 self.apply_ingress_health(from);
-                let ev = self.dispatch_delivered(from, &frame).await;
+                let ev = self.dispatch_delivered(from, frame).await;
                 if matches!(ev, IncomingEvent::Dropped { .. }) {
                     self.note_drop(Some(from));
                 }
@@ -175,19 +176,21 @@ impl MeshData {
         Some((per_peer, global))
     }
 
-    async fn dispatch_delivered(&mut self, from: u32, frame: &[u8]) -> IncomingEvent {
-        let Some(header) = MeshFrameHeader::decode(frame).ok() else {
-            return IncomingEvent::Dropped {
-                reason: DropReason::Short,
-            };
-        };
-        let Some(payload) = frame_payload(frame) else {
+    /// 送达分发：握手路径借用解析；数据/心跳/广播路径就地解密，
+    /// 明文 freeze 成 Bytes 零拷贝出帧（REQ-053）。
+    async fn dispatch_delivered(&mut self, from: u32, frame: &mut BytesMut) -> IncomingEvent {
+        let Some(header) = MeshFrameHeader::decode(&frame[..]).ok() else {
             return IncomingEvent::Dropped {
                 reason: DropReason::Short,
             };
         };
         match header.packet_type {
-            packet_type::HANDSHAKE => self.handle_handshake(from, payload).await,
+            packet_type::HANDSHAKE => match frame_payload(&frame[..]) {
+                Some(payload) => self.handle_handshake(from, payload).await,
+                None => IncomingEvent::Dropped {
+                    reason: DropReason::Short,
+                },
+            },
             packet_type::UNICAST => self.handle_session_frame(from, frame, false),
             packet_type::HEARTBEAT => self.handle_session_frame(from, frame, true),
             packet_type::BROADCAST => self.handle_broadcast_frame(from, frame),

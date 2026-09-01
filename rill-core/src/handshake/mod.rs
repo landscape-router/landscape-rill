@@ -10,7 +10,9 @@
 pub mod error;
 pub use error::{HandshakeError, OpenError};
 
-use crate::frame::{open_frame, MeshFrameHeader, OpenError as FrameOpenError, ReplayWindow};
+use crate::frame::{
+    open_frame, open_frame_in_place, MeshFrameHeader, OpenError as FrameOpenError, ReplayWindow,
+};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use snow::{Builder, HandshakeState};
@@ -376,6 +378,47 @@ impl Session {
                     Ok((h, p)) => {
                         if old.window.check_and_mark(h.seq) {
                             Ok((h, p))
+                        } else {
+                            Err(OpenError::Replay)
+                        }
+                    }
+                    Err(_) => Err(OpenError::Aead),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// in-place 解密收尾（REQ-053）：明文写回 frame 载荷区，返回 (帧头, 明文长度)。
+    /// 与 open() 语义一致（含 rekey 双窗口兜底）；AEAD 失败不改动缓冲（先验 tag 后解密）。
+    pub fn open_in_place(
+        &mut self,
+        frame: &mut [u8],
+        key_dst: &[u8],
+        now: Instant,
+    ) -> Result<(MeshFrameHeader, usize), OpenError> {
+        match open_frame_in_place(frame, key_dst, &self.keys.rx_key, self.keys.salt) {
+            Ok((h, p)) => {
+                let pt_len = p.len();
+                if self.rx_window.check_and_mark(h.seq) {
+                    Ok((h, pt_len))
+                } else {
+                    Err(OpenError::Replay)
+                }
+            }
+            Err(FrameOpenError::Aead(_)) => {
+                let Some(old) = &mut self.old_rx else {
+                    return Err(OpenError::Aead);
+                };
+                if now >= old.expires_at {
+                    self.old_rx = None;
+                    return Err(OpenError::Aead);
+                }
+                match open_frame_in_place(frame, key_dst, &old.key, self.keys.salt) {
+                    Ok((h, p)) => {
+                        let pt_len = p.len();
+                        if old.window.check_and_mark(h.seq) {
+                            Ok((h, pt_len))
                         } else {
                             Err(OpenError::Replay)
                         }

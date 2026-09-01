@@ -1,8 +1,8 @@
 use bytes::{Bytes, BytesMut};
 use landscape_rill_core::frame::{
-    build_frame, build_handshake_frame, decrement_ttl, frame_payload, open_frame, packet_type,
-    MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, HEADER_LEN_V2, TAG_LEN, VERSION,
-    VERSION2,
+    build_frame, build_handshake_frame, decrement_ttl, frame_payload, header_len,
+    open_frame_in_place, packet_type, MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN,
+    HEADER_LEN_V2, TAG_LEN, VERSION, VERSION2,
 };
 use landscape_rill_core::handshake::{
     HandshakeContext, HandshakeError, HandshakeInitiator, HandshakeResponder, Session,
@@ -116,13 +116,12 @@ pub enum RelayOutcome {
     Forwarded {
         to: u32,
     },
+    /// 送达本节点：帧留在调用方的接收缓冲中（零拷贝），由 dispatch 就地解密
     Delivered {
-        frame: Vec<u8>,
         from: u32,
     },
-    /// 广播帧：自交付 + 泛洪转发（FRAME_HEADER §2.6）
+    /// 广播帧：已泛洪转发；自交付同 Delivered（FRAME_HEADER §2.6）
     Flooded {
-        frame: Vec<u8>,
         from: u32,
         forwarded: Vec<u32>,
     },
@@ -333,9 +332,10 @@ impl MeshData {
             .and_then(|p| p.hops.first().copied())
     }
 
-    /// WAN 接收原语（REQ-053）：BytesMut 跨包复用，freeze 出 Bytes 零拷贝移交下游。
+    /// WAN 接收原语（REQ-053）：BytesMut 跨包复用，返回缓冲切片（未 freeze），
+    /// 转发 TTL 递减与就地解密在 freeze 前完成（零拷贝扇出）。
     /// 超长报文（≥ MAX_FRAME）被内核截断 → 丢弃并计全局桶。
-    pub async fn recv_frame(&mut self) -> std::io::Result<(SocketAddr, Bytes)> {
+    pub async fn recv_frame(&mut self) -> std::io::Result<(SocketAddr, BytesMut)> {
         self.recv_buf.reserve(MAX_FRAME);
         let (n, from) = self.socket.recv_buf_from(&mut self.recv_buf).await?;
         if n >= MAX_FRAME {
@@ -346,8 +346,7 @@ impl MeshData {
                 "frame exceeds MAX_FRAME",
             ));
         }
-        let frame = self.recv_buf.split_to(n).freeze();
-        Ok((from, frame))
+        Ok((from, self.recv_buf.split_to(n)))
     }
 
     /// WAN 发送原语（REQ-053 函数级接缝）：数据面全部 socket 发送收口于此，

@@ -307,6 +307,39 @@ fn session_payload_tamper_rejected() {
 }
 
 #[test]
+fn session_open_in_place_parity_and_buffer_intact_on_failure() {
+    let (init_keys, resp_keys) = run_handshake();
+    let init_session = Session::new(1, init_keys);
+    let key_dst = derive_key_dst(&KEY_DST, 2);
+    let now = Instant::now();
+
+    // 对拍：同一帧分别在两个等价会话上 open / open_in_place
+    let frame = make_session_frame(init_session.keys(), 0, b"in-place");
+    let mut a_sess = Session::new(2, resp_keys);
+    let mut b_sess = Session::new(2, resp_keys);
+    let (h, vec_payload) = a_sess.open(&frame, &key_dst, now).unwrap();
+    let mut buf = frame.clone();
+    let (h2, pt_len) = b_sess.open_in_place(&mut buf, &key_dst, now).unwrap();
+    let hlen = crate::frame::header_len(h2.version);
+    assert_eq!(h, h2);
+    assert_eq!(vec_payload, &buf[hlen..hlen + pt_len]);
+    // 帧头区不受解密影响
+    assert_eq!(&buf[..hlen], &frame[..hlen]);
+
+    // AEAD 失败（篡改）→ 缓冲保持密文字节（先验 tag 后解密的契约，old_rx 兜底依赖）
+    let mut bad = make_session_frame(init_session.keys(), 5, b"tamper");
+    let n = bad.len();
+    bad[n - 1] ^= 0xff;
+    let tampered = bad.clone();
+    let mut c_sess = Session::new(2, resp_keys);
+    assert_eq!(
+        c_sess.open_in_place(&mut bad, &key_dst, now).unwrap_err(),
+        OpenError::Aead
+    );
+    assert_eq!(bad, tampered);
+}
+
+#[test]
 fn rekey_dual_window_semantics() {
     let (init_keys, resp_keys) = run_handshake();
     let mut init_session = Session::new(1, init_keys);

@@ -324,20 +324,16 @@ impl MeshData {
         matches!(self.send_to_node_hop(to, hop, &frame).await, Ok(true))
     }
 
-    /// AEAD 解密收尾：已建会话的 UNICAST/HEARTBEAT 帧统一走这里
+    /// AEAD 解密收尾：已建会话的 UNICAST/HEARTBEAT 帧统一走这里。
+    /// 就地解密（REQ-053）：明文写回接收缓冲，freeze 成 Bytes 零拷贝出帧。
     /// 路由密钥按帧头版本选择：v1 = key_dst（默认路径）；v2 = 该 path_id 的 key_path
     pub(super) fn handle_session_frame(
         &mut self,
         from: u32,
-        frame: &[u8],
+        frame: &mut BytesMut,
         heartbeat: bool,
     ) -> IncomingEvent {
-        let Some(session) = self.sessions.get_mut(&from) else {
-            return IncomingEvent::Dropped {
-                reason: DropReason::NoSession,
-            };
-        };
-        let Some(header) = MeshFrameHeader::decode(frame).ok() else {
+        let Some(header) = MeshFrameHeader::decode(&frame[..]).ok() else {
             return IncomingEvent::Dropped {
                 reason: DropReason::Short,
             };
@@ -361,9 +357,14 @@ impl MeshData {
                 }
             }
         };
-        match session.open(frame, &route_key, Instant::now()) {
-            Ok((_, payload)) => {
-                if heartbeat && !payload.is_empty() {
+        let Some(session) = self.sessions.get_mut(&from) else {
+            return IncomingEvent::Dropped {
+                reason: DropReason::NoSession,
+            };
+        };
+        match session.open_in_place(frame, &route_key, Instant::now()) {
+            Ok((h, pt_len)) => {
+                if heartbeat && pt_len != 0 {
                     return IncomingEvent::Dropped {
                         reason: DropReason::Aead,
                     };
@@ -371,10 +372,11 @@ impl MeshData {
                 if heartbeat {
                     IncomingEvent::Heartbeat { from }
                 } else {
-                    IncomingEvent::Data {
-                        from,
-                        payload: Bytes::from(payload),
-                    }
+                    // 帧头区切离丢弃，明文区 freeze 零拷贝交付（REQ-053）
+                    let hlen = header_len(h.version);
+                    let _ = frame.split_to(hlen);
+                    let payload = frame.split_to(pt_len).freeze();
+                    IncomingEvent::Data { from, payload }
                 }
             }
             Err(landscape_rill_core::handshake::OpenError::Replay) => IncomingEvent::Dropped {
