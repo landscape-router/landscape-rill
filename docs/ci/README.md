@@ -13,7 +13,7 @@
 | `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
 
 - 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）
-- **含 cargo audit**（REQ-044 供应链审计部分落地；依赖最小化与可复现构建随 REQ-044 剩余部分推迟至 release 阶段）
+- **含 cargo audit**（REQ-044 供应链审计部分落地；依赖最小化随 REQ-044 剩余部分推迟至 release 阶段；可复现构建拆出 REQ-050）
 - **e2e-mesh 编译 cache 失效时机（确定性，无回退）**：内容键 `cargo-<os>-<rustc 版本>-<ISO 周 %G-%V>-<Cargo.lock hash>`——`Cargo.lock` 变更、rustc stable 升级或**周旋转**（键内 ISO 周变化，缓存寿命严格 ≤7 天，即使持续访问）→ 键变 → 旧 cache 永久失效（全量重编一次，时机可预期）；源码变更不失效（cargo 指纹保证增量重编正确性）；同键条目已存在时 save 为 no-op；旋转产生的旧条目由 GitHub 内置规则回收（7 天未访问淘汰 + 仓库总量 10GB 超限 LRU）
 - e2e 不设 required（成本高，低频/手动路径）
 

@@ -96,6 +96,12 @@
 | REQ-042 | ADM-06 | 部分覆盖 | e2e/Dockerfile、e2e/run_e2e.sh、rilld/src/main.rs |
 | REQ-043 | CTL-17 | 已覆盖 | rill-coord/src/config.rs、rill-coord/src/coordinator.rs、rilld/src/main.rs |
 | REQ-044 | — | 📌 proposed（无验收场景） | — |
+| REQ-045 | — | 📌 proposed（无验收场景） | — |
+| REQ-046 | — | 📌 proposed（无验收场景） | — |
+| REQ-047 | — | 📌 proposed（无验收场景） | — |
+| REQ-048 | — | 📌 proposed（无验收场景） | — |
+| REQ-049 | — | 📌 proposed（无验收场景） | — |
+| REQ-050 | — | 📌 proposed（无验收场景） | — |
 
 ## 5. 维护规则
 
