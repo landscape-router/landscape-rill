@@ -19,8 +19,7 @@
 
 use clap::{Parser, Subcommand};
 use landscape_rill_coord::authkey::{
-    generate_auth_key, is_expired, parse_auth_key, parse_duration, validate_network,
-    AUTH_KEY_DEFAULT_TTL_SECS,
+    generate_auth_key, is_expired, parse_auth_key, validate_network, AUTH_KEY_DEFAULT_TTL_SECS,
 };
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_core::error::format_chain;
@@ -91,8 +90,8 @@ enum Command {
         #[arg(long)]
         network: String,
         /// 有效期：<num><s|m|h|d>（如 30m/12h/7d），0 = 永不过期；默认 24h
-        #[arg(long)]
-        ttl: Option<String>,
+        #[arg(long, value_parser = parse_duration_arg)]
+        ttl: Option<u64>,
     },
     /// 安装并启动 systemd 服务（无 systemd 环境报错提示 `lrill run`）
     Up,
@@ -110,6 +109,12 @@ enum LogLevel {
     Warn,
     Info,
     Debug,
+}
+
+/// `--ttl` 的 clap value_parser（复用 authkey 解析，错误信息面向 CLI）
+fn parse_duration_arg(s: &str) -> Result<u64, String> {
+    landscape_rill_coord::authkey::parse_duration(s)
+        .map_err(|_| "expected <num><s|m|h|d> (e.g. 30m/12h/7d), or 0 = never expires".to_string())
 }
 
 impl LogLevel {
@@ -428,13 +433,7 @@ fn main() -> BoxResult<()> {
             validate_network(&network).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
             })?;
-            let ttl_secs = match ttl {
-                Some(v) => parse_duration(&v).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-                })?,
-                None => AUTH_KEY_DEFAULT_TTL_SECS,
-            };
-            let key = generate_auth_key(&network, ttl_secs)?;
+            let key = generate_auth_key(&network, ttl.unwrap_or(AUTH_KEY_DEFAULT_TTL_SECS))?;
             println!("{key}");
             Ok(())
         }

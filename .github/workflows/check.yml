@@ -22,6 +22,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: unit tests
         run: cargo test --workspace
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
       - name: cargo audit
         run: cargo audit
       - name: docs consistency
