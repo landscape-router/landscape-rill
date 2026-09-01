@@ -180,11 +180,19 @@ pub fn build_frame(
     h.len = (payload.len() + TAG_LEN) as u16;
     let (ai, ai_len) = h.auth_input();
     h.route_mac = crypto::route_mac(key_dst, &ai[..ai_len]);
-    let ciphertext = crypto::seal(session_key, salt, h.seq as u64, &ai[..ai_len], payload)?;
     let hlen = header_len(h.version);
-    let mut out = vec![0u8; hlen + ciphertext.len()];
+    // 单缓冲组装（REQ-053）：头+载荷一次分配，载荷拷入后原地加密
+    let mut out = vec![0u8; hlen + payload.len() + TAG_LEN];
     h.encode(&mut out);
-    out[hlen..].copy_from_slice(&ciphertext);
+    out[hlen..hlen + payload.len()].copy_from_slice(payload);
+    crypto::seal_in_place(
+        session_key,
+        salt,
+        h.seq as u64,
+        &ai[..ai_len],
+        &mut out[hlen..],
+        payload.len(),
+    )?;
     Ok(out)
 }
 
@@ -228,12 +236,12 @@ pub fn decrement_ttl(frame: &mut [u8]) {
     }
 }
 
-pub fn open_frame(
+/// open_frame / open_frame_in_place 共享的帧校验（REQ-053）：
+/// 解码帧头 + 版本/route_mac/长度校验，返回载荷区间 [hlen, hlen+len)。
+fn validate_frame(
     frame: &[u8],
     key_dst: &[u8],
-    session_key: &[u8; 32],
-    salt: u32,
-) -> Result<(MeshFrameHeader, Vec<u8>), OpenError> {
+) -> Result<(MeshFrameHeader, usize, usize), OpenError> {
     if frame.is_empty() {
         return Err(OpenError::Decode(DecodeError::Truncated));
     }
@@ -246,16 +254,48 @@ pub fn open_frame(
         return Err(OpenError::RouteMac);
     }
     let hlen = header_len(header.version);
-    let expected = hlen + header.len as usize;
-    if frame.len() < expected {
+    let end = hlen + header.len as usize;
+    if frame.len() < end {
         return Err(OpenError::TruncatedPayload);
     }
+    Ok((header, hlen, end))
+}
+
+/// 原地解密入口（REQ-053）：在 frame 缓冲上直接解密，载荷借用返回（零拷贝）。
+pub fn open_frame_in_place<'a>(
+    frame: &'a mut [u8],
+    key_dst: &[u8],
+    session_key: &[u8; 32],
+    salt: u32,
+) -> Result<(MeshFrameHeader, &'a mut [u8]), OpenError> {
+    let (header, hlen, end) = validate_frame(frame, key_dst)?;
+    let (ai, ai_len) = header.auth_input();
+    let pt_len = crypto::open_in_place(
+        session_key,
+        salt,
+        header.seq as u64,
+        &ai[..ai_len],
+        &mut frame[hlen..end],
+        end - hlen,
+    )
+    .map_err(OpenError::Aead)?;
+    Ok((header, &mut frame[hlen..hlen + pt_len]))
+}
+
+pub fn open_frame(
+    frame: &[u8],
+    key_dst: &[u8],
+    session_key: &[u8; 32],
+    salt: u32,
+) -> Result<(MeshFrameHeader, Vec<u8>), OpenError> {
+    let (header, hlen, end) = validate_frame(frame, key_dst)?;
+    let (ai, ai_len) = header.auth_input();
     let payload = crypto::open(
         session_key,
         salt,
         header.seq as u64,
         &ai[..ai_len],
-        &frame[hlen..expected],
+        &frame[hlen..end],
     )
     .map_err(OpenError::Aead)?;
     Ok((header, payload))
@@ -651,5 +691,67 @@ mod tests {
         assert_eq!(frame[3], 0x29);
         let mut empty: [u8; 0] = [];
         decrement_ttl(&mut empty);
+    }
+
+    // ---- crypto in-place 对拍与帧级零拷贝入口（REQ-053）----
+
+    #[test]
+    fn seal_in_place_parity_with_vec_api() {
+        let pt = b"parity payload";
+        let ct_vec = crypto::seal(&SESSION, SALT, 42, b"aad", pt).unwrap();
+        let mut buf = vec![0u8; pt.len() + crypto::TAG_LEN + 8];
+        buf[..pt.len()].copy_from_slice(pt);
+        let n = crypto::seal_in_place(&SESSION, SALT, 42, b"aad", &mut buf, pt.len()).unwrap();
+        assert_eq!(n, ct_vec.len());
+        assert_eq!(&buf[..n], &ct_vec[..]);
+        // 缓冲不足 → 错误而非 panic
+        let mut tight = vec![0u8; pt.len() + crypto::TAG_LEN];
+        assert!(
+            crypto::seal_in_place(&SESSION, SALT, 42, b"aad", &mut tight, pt.len() + 1).is_err()
+        );
+    }
+
+    #[test]
+    fn open_in_place_parity_with_vec_api() {
+        let pt = b"parity payload";
+        let ct = crypto::seal(&SESSION, SALT, 7, b"aad", pt).unwrap();
+        let mut buf = ct.clone();
+        let n = crypto::open_in_place(&SESSION, SALT, 7, b"aad", &mut buf, ct.len()).unwrap();
+        assert_eq!(n, pt.len());
+        assert_eq!(&buf[..n], &pt[..]);
+        assert_eq!(crypto::open(&SESSION, SALT, 7, b"aad", &ct).unwrap(), pt);
+        // 篡改 → 拒绝
+        let mut bad = ct.clone();
+        let ct_len = bad.len();
+        bad[ct_len - 1] ^= 0xff;
+        assert!(crypto::open_in_place(&SESSION, SALT, 7, b"aad", &mut bad, ct_len).is_err());
+    }
+
+    #[test]
+    fn open_frame_in_place_parity_with_open_frame() {
+        let payload = b"in-place hello";
+        let frame = build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, payload).unwrap();
+        let (h, pt) = open_frame(&frame, &KEY_DST, &SESSION, SALT).unwrap();
+        let mut buf = frame.clone();
+        let (h2, pt2) = open_frame_in_place(&mut buf, &KEY_DST, &SESSION, SALT).unwrap();
+        assert_eq!(h, h2);
+        assert_eq!(pt, pt2);
+        assert_eq!(pt2, payload);
+        // v2 同样
+        let f2 = build_frame(&sample_v2_header(), &KEY_PATH, &SESSION, SALT, payload).unwrap();
+        let mut b2 = f2.clone();
+        let (_, p2) = open_frame_in_place(&mut b2, &KEY_PATH, &SESSION, SALT).unwrap();
+        assert_eq!(p2, payload);
+    }
+
+    #[test]
+    fn open_frame_in_place_rejects_bad_key() {
+        let payload = b"x";
+        let frame = build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, payload).unwrap();
+        let mut buf = frame;
+        assert_eq!(
+            open_frame_in_place(&mut buf, &[0x66; 32], &SESSION, SALT).unwrap_err(),
+            OpenError::RouteMac
+        );
     }
 }

@@ -109,6 +109,51 @@ pub fn route_mac(key_dst: &[u8], auth_input: &[u8]) -> [u8; 16] {
     out
 }
 
+/// 原地加密（REQ-053）：加密 `buf[..pt_len]`，tag 追加写入其后 TAG_LEN 字节。
+/// 要求 `buf.len() >= pt_len + TAG_LEN`，返回密文总长。
+pub fn seal_in_place(
+    session_key: &[u8; 32],
+    salt: u32,
+    counter: u64,
+    aad: &[u8],
+    buf: &mut [u8],
+    pt_len: usize,
+) -> Result<usize, AeadError> {
+    if buf.len() < pt_len || buf.len() - pt_len < TAG_LEN {
+        return Err(AeadError);
+    }
+    let cipher = ChaCha20Poly1305::new_from_slice(session_key).unwrap();
+    let (msg, tag_buf) = buf.split_at_mut(pt_len);
+    let tag = cipher
+        .encrypt_inout_detached(&Nonce::from(nonce(salt, counter)), aad, msg.into())
+        .map_err(|_| AeadError)?;
+    tag_buf[..TAG_LEN].copy_from_slice(tag.as_slice());
+    Ok(pt_len + TAG_LEN)
+}
+
+/// 原地解密（REQ-053）：密文在 `buf[..ct_len]`（尾 TAG_LEN 字节为 tag），
+/// 明文就地写回，返回明文长度。
+pub fn open_in_place(
+    session_key: &[u8; 32],
+    salt: u32,
+    counter: u64,
+    aad: &[u8],
+    buf: &mut [u8],
+    ct_len: usize,
+) -> Result<usize, AeadError> {
+    if buf.len() < ct_len || ct_len < TAG_LEN {
+        return Err(AeadError);
+    }
+    let pt_len = ct_len - TAG_LEN;
+    let cipher = ChaCha20Poly1305::new_from_slice(session_key).unwrap();
+    let (msg, rest) = buf.split_at_mut(pt_len);
+    let tag = chacha20poly1305::Tag::try_from(&rest[..TAG_LEN]).expect("tag len checked");
+    cipher
+        .decrypt_inout_detached(&Nonce::from(nonce(salt, counter)), aad, msg.into(), &tag)
+        .map_err(|_| AeadError)?;
+    Ok(pt_len)
+}
+
 pub fn seal(
     session_key: &[u8; 32],
     salt: u32,
@@ -116,12 +161,10 @@ pub fn seal(
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
-    let cipher = ChaCha20Poly1305::new_from_slice(session_key).unwrap();
-    let mut buffer = plaintext.to_vec();
-    cipher
-        .encrypt_in_place(&Nonce::from(nonce(salt, counter)), aad, &mut buffer)
-        .map_err(|_| AeadError)?;
-    Ok(buffer)
+    let mut out = vec![0u8; plaintext.len() + TAG_LEN];
+    out[..plaintext.len()].copy_from_slice(plaintext);
+    seal_in_place(session_key, salt, counter, aad, &mut out, plaintext.len())?;
+    Ok(out)
 }
 
 pub fn open(
@@ -131,12 +174,10 @@ pub fn open(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, AeadError> {
-    let cipher = ChaCha20Poly1305::new_from_slice(session_key).unwrap();
-    let mut buffer = ciphertext.to_vec();
-    cipher
-        .decrypt_in_place(&Nonce::from(nonce(salt, counter)), aad, &mut buffer)
-        .map_err(|_| AeadError)?;
-    Ok(buffer)
+    let mut out = ciphertext.to_vec();
+    let n = open_in_place(session_key, salt, counter, aad, &mut out, ciphertext.len())?;
+    out.truncate(n);
+    Ok(out)
 }
 
 pub fn nonce(salt: u32, counter: u64) -> [u8; NONCE_LEN] {
