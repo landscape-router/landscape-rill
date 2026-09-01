@@ -30,9 +30,13 @@ proposed（提出：日期 + 动机 + 验收草案）
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
 | [REQ-039](./REQ-039.md) | 需求 | 📌 proposed | P1 | 08-15 | — |
+| [REQ-046](./REQ-046-probe-mandatory-ratelimit.md) | 需求 | 📌 proposed | P1 | 09-01 | — |
+| [REQ-047](./REQ-047-control-plane-ratelimit.md) | 需求 | 📌 proposed | P1 | 09-01 | — |
 | [REQ-040](./REQ-040.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
 | [REQ-041](./REQ-041.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
 | [REQ-045](./REQ-045-acl-policy.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
+| [REQ-048](./REQ-048-batch-revoke-rotation.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
+| [REQ-049](./REQ-049-coordinator-transparency.md) | 需求 | 📌 proposed | P3 | 09-01 | — |
 | [REQ-001](./REQ-001.md) | 决策 | ✅ merged | — | 08-13 | FRAME_HEADER §2 |
 | [REQ-002](./REQ-002.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §2.1/§3.1 |
 | [REQ-003](./REQ-003.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §3.1/§2.1 |
