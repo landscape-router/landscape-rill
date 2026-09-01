@@ -2353,4 +2353,29 @@ mod tests {
         nodes[0].flood_bucket = TokenBucket::new(0.0, 0);
         assert_eq!(nodes[0].flood(b"x").await, 0);
     }
+
+    #[tokio::test]
+    async fn drop_stats_attribution_and_summary_filter() {
+        // LOG-02：丢帧计数归因（仅已知 peer 记 per-peer，未知/伪造 node_id 落全局桶）
+        // + 摘要输出过滤（0 不输出、无计数时 poll 返回 None）
+        let mut m = MeshData::bind("127.0.0.1:0".parse().unwrap(), 7)
+            .await
+            .unwrap();
+        // peer 1 注入 key_dst（已知 peer）；999 不在表内（伪造 node_id）
+        m.set_key_dst(1, node_key(1));
+        m.note_drop(Some(1));
+        m.note_drop(Some(1));
+        m.note_drop(Some(999));
+        m.note_drop(None);
+        // RateCounter 周期末出报告：等待一个周期后再 poll
+        std::thread::sleep(DROP_STATS_PERIOD + Duration::from_millis(10));
+
+        let (per_peer, global) = m.poll_drop_stats().expect("本周期有计数");
+        assert_eq!(per_peer, vec![(1u32, 2u64)]);
+        assert_eq!(global, 2);
+        // 下一周期无丢帧 → poll 返回 Some(0) 被过滤 → None（0 不输出）
+        assert!(m.poll_drop_stats().is_none());
+        // 过期清零后旧 per-peer 桶从表内剔除（has_pending 为 false → retain 清理）
+        assert!(m.drop_stats.is_empty());
+    }
 }

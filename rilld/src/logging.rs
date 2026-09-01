@@ -49,9 +49,11 @@ pub fn init_logging(
 ) -> Result<(), String> {
     let filter = select_filter(log_level, std::env::var("RUST_LOG").ok());
     let log_file = select_log_file(log_file);
-    // 默认 stderr（systemd/journald、容器/docker log driver 捕获）；文件模式追加输出
-    let fmt = tracing_subscriber::fmt::layer().with_ansi(false);
-    let fmt: Box<dyn Layer<Registry> + Send + Sync> = match log_file.as_deref() {
+    // 默认 stderr（systemd/journald、容器/docker log driver 捕获）；文件模式双写（文件层 + stderr 层）
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(io::stderr);
+    let file_layer = match log_file.as_deref() {
         Some(path) => {
             let dir = path.parent().unwrap_or_else(|| Path::new("."));
             let prefix = path
@@ -67,11 +69,24 @@ pub fn init_logging(
             let (writer, guard) = tracing_appender::non_blocking(appender);
             // guard 必须存活到进程结束；daemon 常驻，直接泄漏
             Box::leak(Box::new(guard));
-            Box::new(fmt.with_writer(writer))
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer),
+            )
         }
-        None => Box::new(fmt.with_writer(io::stderr)),
+        None => None,
     };
-    Registry::default().with(fmt).with(filter).init();
+    // 双写：文件层（有 --log-file 时）叠加 stderr 层；否则仅 stderr
+    match file_layer {
+        Some(file) => {
+            let combined = file.and_then(stderr_layer);
+            Registry::default().with(combined).with(filter).init();
+        }
+        None => {
+            Registry::default().with(stderr_layer).with(filter).init();
+        }
+    }
     Ok(())
 }
 
