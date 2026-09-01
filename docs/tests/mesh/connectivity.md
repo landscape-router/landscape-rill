@@ -8,7 +8,7 @@
 - 关联 REQ：REQ-007
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rill-coord/src/echo.rs、rilld/src/main.rs
+- 证据：e2e/run_e2e.sh、rill-coord/src/echo.rs、rilld/src/coord_run.rs
 - 说明：coordinator UDP 数据面端口（默认与 TCP 同端口）回显 seen 地址（STUN 式）；节点周期 PING（to=0 标记）→ PONG 载荷 seen 地址 → 候选端点补充 + EndpointReport 重报（e2e `echo confirmed`）；候选端点集合 = 本地接口 ∪ 回显地址 ∪ 中继地址
 
 ## CON-02 端点上报与传播
@@ -40,7 +40,7 @@
 - 关联 REQ：REQ-007
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rilld/src/main.rs、rill-coord/src/coordinator/
+- 证据：e2e/run_e2e.sh、rilld/src/coord_run.rs、rill-coord/src/coordinator/
 - 说明：relay 列表构建（coordinator 周期向各网 relay 能力节点端点发 PING 测 RTT → 排序写入 relay_list 随 netmap 下发 + PathService relay 顺序 = 挂靠优先级）；自愿节点 opt-in（能力位 relay=0x01）纳入；coordinator 兼任 echo/RTT 探测方（e2e `relay rtt` 日志 + 节点 `relay candidates`）；独立 relay 部署（层③）协议零改动，挂账
 
 ## CON-06 中继故障切换

@@ -64,5 +64,5 @@
 - 2026-09-01（REQ-039 merge）：选型 tracing（tokio 生态标准）；存储双轨（委托 supervisor + 可选自写文件轮转）；高频事件改为周期计数器摘要（§5，教训 AO-04）
 - 2026-09-01（§2/§4 修订）：配置优先级统一为 CLI 显式 > 环境变量 > 默认值（`--log-level` > `RUST_LOG`；`--log-file` > `LRILL_LOG_FILE`）；同日该约定提升为通用约定（CONTROL_PLANE §3.12），配置文件路径纳入（`run [config]` > `LRILL_CONFIG` > 默认）
 - 2026-09-01（§5 修订）：否决日志框架层透明限速（Layer 门控 + 聚合上报线程）——丢弃语义破坏排查、全局窗口饿死其他站点、机制复杂；改为调用点显式 `RateCounter`（设计对齐，AGENTS.md Design Alignment）
-- 实现级决定：subscriber 只在 `rilld/src/main.rs` run_daemon 初始化（`rilld/src/logging.rs`）；`rill-core` 保持 I/O 无关，不引入 tracing；库 crate（rill-node / rill-mesh / rill-coord）仅用 tracing facade 宏；`RateCounter` 在 rill-core（纯逻辑）
+- 实现级决定：subscriber 只在 `rilld/src/node_run.rs` run_daemon 初始化（`rilld/src/logging.rs`）；`rill-core` 保持 I/O 无关，不引入 tracing；库 crate（rill-node / rill-mesh / rill-coord）仅用 tracing facade 宏；`RateCounter` 在 rill-core（纯逻辑）
 - 供应链（cargo audit）与可复现构建部分拆出 REQ-044

@@ -57,7 +57,7 @@
 | REQ-004 | CTL-01 | 已覆盖 | rill-mesh/src/control/、e2e/run_e2e.sh |
 | REQ-005 | E2E-05 | 待补充 | — |
 | REQ-006 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
-| REQ-007 | CON-01 ~ CON-06 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/probe/、rill-core/src/probe.rs、rill-coord/src/echo.rs、rilld/src/main.rs |
+| REQ-007 | CON-01 ~ CON-06 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/probe/、rill-core/src/probe.rs、rill-coord/src/echo.rs、rilld/src/coord_run.rs |
 | REQ-008 | CTL-10 / CTL-11 | 部分覆盖 | CTL-10：rill-core/src/control/registry.rs、rill-coord/src/coordinator/（CTL-11 待实现） |
 | REQ-009 | RTE-07 | 待补充 | — |
 | REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/tenancy/、rill-coord/src/domain.rs、rill-coord/src/coordinator/ |
