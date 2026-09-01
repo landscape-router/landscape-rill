@@ -18,10 +18,11 @@
 //! 生效走 CoordinatorServer::from_config/apply_config 库 API；本文件只是薄调用层。
 
 use clap::{Parser, Subcommand};
-use landscape_rill_coord::config::{
-    generate_auth_key, is_expired, parse_auth_key, parse_duration, validate_network, CoordConfig,
+use landscape_rill_coord::authkey::{
+    generate_auth_key, is_expired, parse_auth_key, parse_duration, validate_network,
     AUTH_KEY_DEFAULT_TTL_SECS,
 };
+use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_mesh::control::{

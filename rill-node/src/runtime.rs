@@ -911,7 +911,7 @@ mod tests {
     /// 与 start_coord 共享的 key（测试专用；生成一次全局复用，24h 有效）
     fn auth_test_key() -> String {
         static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        KEY.get_or_init(|| landscape_rill_coord::config::generate_auth_key("lab", 86_400).unwrap())
+        KEY.get_or_init(|| landscape_rill_coord::authkey::generate_auth_key("lab", 86_400).unwrap())
             .clone()
     }
 

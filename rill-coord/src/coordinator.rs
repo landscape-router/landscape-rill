@@ -1,17 +1,26 @@
+//! coordinator 权威角色门面（CONTROL_PLANE）
+//!
+//! 域拆分（子结构提取，2026-09-01）：registry（admission，rill-core）/ signer /
+//! [liveness]（活性）/ [directory]（目录）/ [keys]（密钥）/ [path_service]（路径）/
+//! [store]（持久化）。本文件只做**跨域编排**（register/revoke/netmap_snapshot/
+//! sync_relays）与持久化 glue（snapshot/restore/persist）；单域逻辑在各域文件。
+
+use crate::directory::Directory;
+use crate::keys::KeyManager;
+use crate::liveness::Liveness;
 use crate::path_service::{PathCandidate, PathEvent, PathService};
 use crate::signer::Ed25519Signer;
 use crate::store::{CoordState, CoordStore, StoreError, STATE_SCHEMA};
 use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, Registry,
 };
-use landscape_rill_core::crypto::{derive_key_dst, derive_key_path, KEY_DST_LEN};
+use landscape_rill_core::crypto::KEY_DST_LEN;
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::route::Prefix;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::error;
 
-pub const BROADCAST_KEY_LEN: usize = 32;
 /// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
 pub const CAPABILITY_RELAY: u32 = 0x01;
 
@@ -34,7 +43,7 @@ pub struct KeyDistData {
     pub to_node_id: u32,
     pub key: [u8; KEY_DST_LEN],
     pub key_version: u32,
-    pub broadcast_key: [u8; BROADCAST_KEY_LEN],
+    pub broadcast_key: [u8; KEY_DST_LEN],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,17 +62,11 @@ pub struct NodeInfo {
 pub struct Coordinator {
     registry: Registry,
     signer: Ed25519Signer,
-    master_key: [u8; 32],
-    netmap_version: u64,
-    key_version: u32,
-    last_seen: HashMap<u32, u64>,
-    endpoints: HashMap<u32, Vec<String>>,
-    relay_list: Vec<String>,
-    offline: Vec<u32>,
+    liveness: Liveness,
+    directory: Directory,
+    keys: KeyManager,
     /// 路径服务（v1.5，CONTROL_PLANE §3.11）
     paths: PathService,
-    /// 节点协议版本（v2 路径能力协商，netmap 带出）
-    protocol_versions: HashMap<u32, u32>,
     /// 持久化存储（REQ-037）；None = 纯内存（重启丢失注册）
     store: Option<CoordStore>,
 }
@@ -73,15 +76,10 @@ impl Coordinator {
         let mut coord = Self {
             registry: Registry::new(0x0000_0001),
             signer: Ed25519Signer::new(signing_seed),
-            master_key,
-            netmap_version: 0,
-            key_version: 1,
-            last_seen: HashMap::new(),
-            endpoints: HashMap::new(),
-            relay_list: Vec::new(),
-            offline: Vec::new(),
+            liveness: Liveness::new(),
+            directory: Directory::new(),
+            keys: KeyManager::new(master_key),
             paths: PathService::new(),
-            protocol_versions: HashMap::new(),
             store: None,
         };
         coord.sync_relays();
@@ -142,9 +140,11 @@ impl Coordinator {
             state.next_node_id,
             state.consumed_one_time_keys.clone(),
         );
-        self.netmap_version = state.netmap_version;
-        self.key_version = state.key_version;
-        self.endpoints = state.endpoints.iter().cloned().collect();
+        self.directory.restore(
+            state.netmap_version,
+            state.endpoints.iter().cloned().collect(),
+        );
+        self.keys.restore_version(state.key_version);
         self.paths.restore(path_map, state.path_seq);
         Ok(())
     }
@@ -154,7 +154,8 @@ impl Coordinator {
         let mut nodes: Vec<NodeEntry> = self.registry.entries().cloned().collect();
         nodes.sort_by_key(|n| n.node_id);
         let mut endpoints: Vec<(u32, Vec<String>)> = self
-            .endpoints
+            .directory
+            .endpoints_all()
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
@@ -165,8 +166,8 @@ impl Coordinator {
             next_node_id: self.registry.next_node_id(),
             nodes,
             consumed_one_time_keys: self.registry.consumed_one_time_keys().to_vec(),
-            netmap_version: self.netmap_version,
-            key_version: self.key_version,
+            netmap_version: self.directory.netmap_version(),
+            key_version: self.keys.version(),
             endpoints,
             path_map,
             path_seq,
@@ -198,11 +199,11 @@ impl Coordinator {
     }
 
     pub fn set_protocol_version(&mut self, node_id: u32, version: u32) {
-        self.protocol_versions.insert(node_id, version);
+        self.directory.set_protocol_version(node_id, version);
     }
 
     pub fn protocol_version(&self, node_id: u32) -> u32 {
-        self.protocol_versions.get(&node_id).copied().unwrap_or(1)
+        self.directory.protocol_version(node_id)
     }
 
     pub fn add_auth_key(&mut self, key: &str, policy: AuthKeyPolicy) {
@@ -250,7 +251,7 @@ impl Coordinator {
         // 过期时间内嵌在 key 自身（REQ-043）：admission 时解析校验；
         // 解析失败 = 非法 key（fail-closed）。格式知识在 rill-coord，注册表按不透明字符串处理。
         let parsed =
-            crate::config::parse_auth_key(auth_key).map_err(|_| RegisterError::InvalidAuthKey)?;
+            crate::authkey::parse_auth_key(auth_key).map_err(|_| RegisterError::InvalidAuthKey)?;
         if parsed.1 != 0 && unix_seconds() > parsed.1 {
             return Err(RegisterError::InvalidAuthKey);
         }
@@ -259,8 +260,8 @@ impl Coordinator {
                 .register(auth_key, static_pubkey, capabilities, routes, &self.signer)?;
         let node_id = match outcome {
             landscape_rill_core::control::registry::RegisterOutcome::NewNode(id) => {
-                self.netmap_version += 1;
-                self.sync_relays(); // relay 候选随新节点注册更新（relay 位 opt-in）
+                self.directory.bump_netmap(); // relay 候选随新节点注册更新（relay 位 opt-in）
+                self.sync_relays();
                 id
             }
             landscape_rill_core::control::registry::RegisterOutcome::Existing(id) => id,
@@ -277,15 +278,14 @@ impl Coordinator {
     pub fn key_dist(&self, node_id: u32) -> Option<KeyDistData> {
         self.registry.entry(node_id).map(|_| KeyDistData {
             to_node_id: node_id,
-            key: derive_key_dst(&self.master_key, node_id),
-            key_version: self.key_version,
-            broadcast_key: derive_key_dst(&self.master_key, 0xFFFF_FFFF),
+            key: self.keys.key_for(node_id),
+            key_version: self.keys.version(),
+            broadcast_key: self.keys.broadcast_key(),
         })
     }
 
     pub fn set_endpoints(&mut self, node_id: u32, endpoints: Vec<String>) {
-        self.endpoints.insert(node_id, endpoints);
-        self.netmap_version += 1;
+        self.directory.set_endpoints(node_id, endpoints);
         self.persist();
     }
 
@@ -304,7 +304,7 @@ impl Coordinator {
             .request(source, dest, max, now)
             .iter()
             .map(|c| {
-                let key_path = derive_key_path(&self.master_key, c.path_id, c.path_epoch);
+                let key_path = self.keys.key_path_for(c.path_id, c.path_epoch);
                 (c.clone(), key_path)
             })
             .collect();
@@ -320,16 +320,14 @@ impl Coordinator {
 
     /// PathUpdate 推送用：按路径重新派生 key_path（只发路径参与者）
     pub fn key_path_for(&self, path_id: u64, path_epoch: u32) -> [u8; KEY_DST_LEN] {
-        derive_key_path(&self.master_key, path_id, path_epoch)
+        self.keys.key_path_for(path_id, path_epoch)
     }
 
     pub fn set_relay_list(&mut self, relay_list: Vec<String>) {
-        self.relay_list = relay_list;
-        self.netmap_version += 1;
+        self.directory.set_relay_list(relay_list);
     }
 
     pub fn netmap_snapshot(&self) -> Vec<NodeInfo> {
-        let offline: Vec<u32> = self.offline.clone();
         self.registry
             .entries()
             .map(|e: &NodeEntry| NodeInfo {
@@ -338,61 +336,56 @@ impl Coordinator {
                 static_pubkey: e.static_pubkey,
                 capabilities: e.capabilities,
                 routes: e.routes.clone(),
-                endpoints: self.endpoints.get(&e.node_id).cloned().unwrap_or_default(),
-                offline: offline.contains(&e.node_id),
-                protocol_version: self.protocol_version(e.node_id),
+                endpoints: self.directory.endpoints_of(e.node_id).to_vec(),
+                offline: self.liveness.is_offline(e.node_id),
+                protocol_version: self.directory.protocol_version(e.node_id),
             })
             .collect()
     }
 
     pub fn netmap_version(&self) -> u64 {
-        self.netmap_version
+        self.directory.netmap_version()
     }
 
     pub fn relay_list(&self) -> &[String] {
-        &self.relay_list
+        self.directory.relay_list()
     }
 
     pub fn heartbeat(&mut self, node_id: u32, now: u64) {
-        self.last_seen.insert(node_id, now);
-        self.offline.retain(|id| *id != node_id);
+        self.liveness.heartbeat(node_id, now);
     }
 
     pub fn mark_offline(&mut self, node_id: u32) {
-        if self.registry.entry(node_id).is_some() && !self.offline.contains(&node_id) {
-            self.offline.push(node_id);
-            self.netmap_version += 1;
+        if self.registry.entry(node_id).is_some() && self.liveness.mark_offline(node_id) {
+            self.directory.bump_netmap();
         }
     }
 
     pub fn offline_nodes(&self) -> &[u32] {
-        &self.offline
+        self.liveness.offline_nodes()
     }
 
     pub fn revoke(&mut self, node_id: u32) {
         if self.registry.entry(node_id).is_some() {
             self.registry.revoke(node_id);
-            self.last_seen.remove(&node_id);
-            self.endpoints.remove(&node_id);
-            self.offline.retain(|id| *id != node_id);
-            self.protocol_versions.remove(&node_id);
+            self.liveness.remove(node_id);
+            self.directory.remove_node(node_id);
             // 路径联动：撤销所有涉及该节点的路径（源/目的/中继）
             self.paths.withdraw_node(node_id);
-            self.key_version += 1;
-            self.netmap_version += 1;
+            self.keys.bump_version();
+            self.directory.bump_netmap();
             self.sync_relays();
             self.persist();
         }
     }
 
     pub fn rotate_master_key(&mut self, new_master_key: [u8; 32]) {
-        self.master_key = new_master_key;
-        self.key_version += 1;
+        self.keys.rotate(new_master_key);
         self.persist();
     }
 
     pub fn key_version(&self) -> u32 {
-        self.key_version
+        self.keys.version()
     }
 
     /// 按静态公钥定位已注册节点（重连挑战路径：auth key 失效 + 公钥已知 → 发起挑战）
@@ -413,6 +406,7 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authkey::generate_auth_key;
 
     fn pubkey(seed: u8) -> [u8; 32] {
         [seed; 32]
@@ -420,7 +414,7 @@ mod tests {
 
     /// lrk 格式 auth key（REQ-043 起注册校验要求可解析 + 未过期）
     fn lrk(ttl_secs: u64) -> String {
-        crate::config::generate_auth_key("lab", ttl_secs).unwrap()
+        generate_auth_key("lab", ttl_secs).unwrap()
     }
 
     fn setup() -> (Coordinator, String) {
@@ -471,19 +465,6 @@ mod tests {
     }
 
     #[test]
-    fn key_dist_deterministic_per_node() {
-        let (mut c, ak) = setup();
-        let id = register_node(&mut c, &ak, 1);
-        let k1 = c.key_dist(id).unwrap();
-        let k2 = c.key_dist(id).unwrap();
-        assert_eq!(k1, k2);
-        assert_ne!(k1.key, derive_key_dst(&[0x77; 32], 2));
-        assert_eq!(k1.key_version, 1);
-        assert_eq!(k1.to_node_id, id);
-        assert_eq!(k1.broadcast_key, derive_key_dst(&[0x77; 32], 0xFFFF_FFFF));
-    }
-
-    #[test]
     fn key_dist_unknown_node_none() {
         let (c, _ak) = setup();
         assert!(c.key_dist(99).is_none());
@@ -514,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_and_offline() {
+    fn heartbeat_and_offline_enters_netmap() {
         let (mut c, ak) = setup();
         let id = register_node(&mut c, &ak, 1);
         c.heartbeat(id, 100);

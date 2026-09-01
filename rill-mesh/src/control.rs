@@ -909,7 +909,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let master = [0x11; 32];
         let seed = [0x22; 32];
-        let ak_loop = landscape_rill_coord::config::generate_auth_key("lab", 3600).unwrap();
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
         let ak_server = ak_loop.clone();
         let server = tokio::spawn(async move {
             let mut listener = listener;
