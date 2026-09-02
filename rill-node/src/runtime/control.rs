@@ -13,6 +13,7 @@ impl Node {
                 self.node_id = Some(node_id);
                 self.network_id = network_id;
                 self.mesh.set_self_node_id(node_id);
+                self.reconnect.on_registered();
                 info!(
                     "[node] registered: node_id={} network_id={}",
                     node_id, network_id

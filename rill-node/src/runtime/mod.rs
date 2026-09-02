@@ -28,9 +28,7 @@ use tracing::{debug, info, warn};
 pub mod control;
 pub mod lan;
 pub mod probe;
-
-pub const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-pub const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(300);
+pub mod reconnect;
 pub const DATA_HEARTBEAT_MISSES: u32 = 3;
 /// 握手重试间隔：上次尝试无响应视为该路径 miss（UDP 黑洞探活）
 pub const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -135,7 +133,7 @@ pub struct Node {
     last_control_heartbeat: Instant,
     last_data_heartbeat: Instant,
     next_rekey: Instant,
-    reconnect_backoff: Duration,
+    reconnect: reconnect::ReconnectPolicy,
     peer_heartbeats: HashMap<u32, u32>,
     /// netmap 发现 v2 peer 后待发的路径请求（v1.5，CONTROL_PLANE §3.11）
     pending_path_requests: Vec<u32>,
@@ -209,7 +207,7 @@ impl Node {
             last_control_heartbeat: Instant::now(),
             last_data_heartbeat: Instant::now(),
             next_rekey,
-            reconnect_backoff: RECONNECT_INITIAL_BACKOFF,
+            reconnect: reconnect::ReconnectPolicy::new(),
             peer_heartbeats: HashMap::new(),
             pending_path_requests: Vec::new(),
             path_requested: HashSet::new(),
@@ -457,16 +455,21 @@ impl Node {
     pub async fn run(mut self) {
         loop {
             if self.control.is_none() {
-                match self.connect_control().await {
-                    Ok(()) => self.reconnect_backoff = RECONNECT_INITIAL_BACKOFF,
-                    Err(_) => {
-                        // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持
-                        self.connect_failed.tick();
-                        tokio::time::sleep(self.reconnect_backoff).await;
-                        self.reconnect_backoff =
-                            (self.reconnect_backoff * 2).min(RECONNECT_MAX_BACKOFF);
-                        continue;
+                let wait = match self.connect_control().await {
+                    Ok(()) => {
+                        self.reconnect.on_connect();
+                        None
                     }
+                    Err(e) => {
+                        debug!("[node] connect_control error: {}", e);
+                        Some(self.reconnect.on_disconnect())
+                    }
+                };
+                if let Some(wait) = wait {
+                    // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持
+                    self.connect_failed.tick();
+                    self.sleep_with_timers(wait).await;
+                    continue;
                 }
             }
             let control_ready = self.control.is_some();
@@ -484,7 +487,13 @@ impl Node {
                 ev = control_read, if control_ready => {
                     match ev {
                         Ok(ev) => { let _ = self.handle_control_event(ev).await; }
-                        Err(_) => { self.control = None; }
+                        Err(_) => {
+                            // 断线同样走退避（REQ-056）：连上即断不再热循环
+                            self.control = None;
+                            let wait = self.reconnect.on_disconnect();
+                            self.sleep_with_timers(wait).await;
+                            continue;
+                        }
                     }
                 }
                 pkt = tun_read, if tun_ready => {
@@ -496,6 +505,17 @@ impl Node {
                     self.pump_timers().await;
                 }
             }
+        }
+    }
+
+    /// 分片退避等待（REQ-056）：100ms 片轮转 pump_timers——失败摘要持续输出，
+    /// 数据面定时器（rekey/probe）在控制面退避期间不停摆
+    async fn sleep_with_timers(&mut self, mut remaining: Duration) {
+        while remaining > Duration::ZERO {
+            let slice = remaining.min(Duration::from_millis(100));
+            tokio::time::sleep(slice).await;
+            remaining = remaining.saturating_sub(slice);
+            self.pump_timers().await;
         }
     }
 
