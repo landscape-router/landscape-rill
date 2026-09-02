@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057 / REQ-059 / REQ-060
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060
 
-**版本：v0.11（2026-09-02 修订：REQ-059——§3.13 预认证最小解析与资源分配后置时机纪律）**
+**版本：v0.12（2026-09-02 修订：REQ-058——§3.1/§3.5 吊销与身份比对的键规范化硬规则）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -112,6 +112,8 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 
 **幂等**：相同 `auth_key + static_pubkey` 重复注册返回相同 `node_id` 与绑定。
 
+**键规范化（REQ-058，KC-06）**：身份比对与条目索引一律以**规范形式**为键——注册表双键 = `node_id`（4B 定长）与**原始公钥字节**（`[u8; 32]`，全字节相等语义，定长数组键无编码变化空间）；`identity_binding`（签名编码字节）**不参与任何索引/比对/去重键**，仅作为可验证载荷（验签锚定 `node_id || 原始公钥字节`，重签不影响条目识别）。延伸约束：联邦 v2 条目识别键不得含签名字节（§7 重签后识别必须稳定）；ACL v2 subject/object 键同理（§3.10）；未来任何证书/签名结构参与索引前先规范化或以内容摘要为键。对抗验证：SEC-30
+
 **身份发放前置（REQ-060）**：新注册（NewNode）与幂等恢复（Existing）一律先经 §3.9 挑战取得持有证明，验证通过后才发放 node_id/绑定并执行准入副作用（白名单校验、node_id 分配、binding 签发、一次性 key 消费）——**无持有证明不发身份，无例外**。闭合成员间横向冒用：auth key（成员资格）+ 公开 pubkey + 配置猜测不再构成身份；公钥抢注（squatting）同被阻断。
 
 ### 3.2 NetmapPush（全网拓扑）
@@ -145,6 +147,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 
 - coordinator 吊销节点：下发 Revoke + netmap 移除 + **触发全网 key 轮换**（§5.5）
 - 节点本地维护吊销列表（node_id 集合），拒绝与吊销节点的握手/流量
+- **吊销键规范化（REQ-058，KC-06）**：吊销索引键 = `node_id`（4B 定长，天然规范）——吊销按 node_id 生效，**与绑定/签名的编码形式无关**；禁止引入"按签名/证书编码字节识别条目"的机制（可变编码经重签/重编码即绕过黑名单——外部同类协议的公开缺陷模式）。对抗验证：SEC-30
 
 ### 3.6 LeaderRedirect（主重定向，Raft 期）
 
@@ -519,6 +522,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 - **多网络隔离落档（2026-09-01，REQ-010，§1.5 实现）**：①**CoordConfig 形态**：`networks: [{ name, master_key, auth_keys, announce_whitelist }]` 列表（breaking，仓库未发布）；扁平 `network/master_key/auth_keys/announce_whitelist` 移除；storage_path/signing_seed/TLS 共享；②**network_id = FNV-1a(name)**（确定性散列，0 保留）：跨重启/重载稳定（配置顺序变化不漂移），碰撞在配置加载时 fail-closed 拒绝；③**NetworkDomain**（rill-coord/src/domain.rs）：每网络独立 Registry（auth key 空间/白名单/条目）+ KeyManager（主密钥独立 → `key_dst = KDF(网络主密钥, node_id)`，跨网伪造 route_mac 必失配）+ PathService（relay 集合/PathMap 按网络独立）+ relay_list；**node_id 全局唯一分配**（跨网络不冲突，Directory/Liveness 按 node_id 键控）；④**归域**：auth key 内嵌网络（REQ-043），admission 按 key 网络选域，未知网络 → InvalidAuthKey（fail-closed）；配置层 key 放错网络段 → 拒绝启动；⑤**netmap 隔离**：`netmap_snapshot(network_id)` 过滤 + server 按注册节点网络推送（netmap/relay 列表/key_dst 全量只含本网）；⑥**路径同网门控**：跨网络 PathRequest → 空集（netmap 隔离下源本就看不到异网节点）；⑦**持久化 schema v2**：nodes 按 network_id 归域恢复、consumed tombstone 按 key 内嵌网络分组、key_versions/path_maps/relay_lists 按网络分组；⑧**覆盖层调整（SEC-24）**：跨网绑定注入 e2e 需完整恶意客户端（Noise 握手）且 netmap 隔离已结构性阻断攻击面 → 直接验证生产验签路径 `verify_binding`（集成）+ 跨网握手 prologue 拒绝（线级）
 - **消息限速与准入落档（2026-09-01，REQ-047，§3.13）**：①**连接级限速**（rill-mesh server.rs `ConnectionState.msg_bucket` 20/s 突发 40，桶空断连——handle_message 入口收口，handle_connection 与 rilld 连接循环共用）；②**Register 准入**（`CoordinatorServer.register_limiter` per-源 IP 0.5/s 突发 5 + `register_lockout` 失败锁定 5 次 → 30s×2ⁿ 封顶 1h；源 IP 取 TLS peer addr；成功清零、挑战路径不计失败但锁定期间一律拒绝）；③**心跳超频忽略**（`ConnectionState.last_heartbeat` + `heartbeat_min_interval` 默认 5s——server 字段可配，主机测试 300ms 心跳泵需调小）；④**PathRequest pending 上限**（节点 `pending_path_requests` 256 / rill-coord path_service per-source 1024 饱和丢弃）；⑤**观测**（`rate_limited` RateCounter，run_coord 周期摘要 `control rate-limited`——SEC-20 e2e 证据）；错误措辞统一 InvalidAuthKey 原已闭环（coordinator register admission 全映射）
 - **预认证解析纪律落档（2026-09-02，REQ-059，§3.13）**：入口实现已满足两级定头纪律（framing 4B 长度上限 1 MiB 先于任何分配校验；Envelope 仅 msg_type + 不透明 body），规则由隐式升级为显式；fuzz 语料（随机/截断/变形 envelope 与消息体）断言不 panic、错误经 `Result` 返回（SEC-08）；lessons CN-05 闭环
+- **键规范化落档（2026-09-02，REQ-058，§3.1/§3.5）**：①注册表双键 = `entries: HashMap<node_id, NodeEntry>` + `pubkeys: HashMap<[u8; 32], u32>`（原始字节全等语义，定长数组键无编码空间）；②`identity_binding` 仅存于条目并随 netmap 下发，验签路径锚定 `node_id || 原始公钥字节`——binding 字节不参与任何索引/比对；③吊销 = 双键同删（§5.5），节点侧吊销列表 = `HashSet<node_id>`；④单测钉死（SEC-30）：pubkey 单字节翻转查无、换 signer 重签 binding 不改变身份解析与幂等判定、吊销后按 node_id 生效；lessons KC-06 闭环（复核触发点常驻：联邦 v2 / ACL v2 设计时逐条对照）
 
 ## 9. 与数据面文档的对照（闭合验证）
 

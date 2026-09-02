@@ -50,7 +50,7 @@
 | [KC-03](./keys-config/KC-03-dns-resolution-backpressure.md) | 密钥配置 | 域名解析无背压 | ✅ 已落档 |
 | [KC-04](./keys-config/KC-04-config-silently-ignored.md) | 密钥配置 | 配置静默失效 | ✅ 已落档 |
 | [KC-05](./keys-config/KC-05-peer-metadata-config-injection.md) | 密钥配置 | 协商元数据写入本地配置未转义 | **需补**：配置生成实现时转义+回读验证 |
-| [KC-06](./keys-config/KC-06-noncanonical-revocation-key.md) | 密钥配置 | 吊销/比对键未规范化 | **需补**：REQ-058 合并时显式入 CONTROL_PLANE |
+| [KC-06](./keys-config/KC-06-noncanonical-revocation-key.md) | 密钥配置 | 吊销/比对键未规范化 | 已补：REQ-058 合并（CONTROL_PLANE §3.5/§3.1 + SEC-30） |
 | [AO-01](./admin-ops/AO-01-default-credentials.md) | 管理面 | 硬编码默认凭据 | ✅ 已落档 |
 | [AO-02](./admin-ops/AO-02-client-side-config-storage.md) | 管理面 | 关键配置存客户端本地存储 | ✅ 已落档 |
 | [AO-03](./admin-ops/AO-03-admin-api-privesc.md) | 管理面 | 管理接口越权 | **需补**：授权模型 + 越权测试 |

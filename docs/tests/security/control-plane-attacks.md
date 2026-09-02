@@ -86,6 +86,14 @@
 - 证据：rill-mesh/src/control/server.rs、rill-node/src/runtime/、rill-coord/src/path_service.rs
 - 说明：连接级令牌桶（20/s 突发 40，桶空断连单连接隔离）；心跳超频忽略（< 5s 间隔零成本跳过——无快照/LEASE 推送，租约语义不变）；PathRequest pending 上限（节点 256 / coordinator per-source 1024 饱和丢弃，取走后恢复）；单测 `conn_message_flood_disconnects` / `heartbeat_overspeed_ignored` / `path_request_pending_capped` / `pending_events_capped_per_source`
 
+## SEC-30 吊销键规范化对抗（重编码绑定绕过）
+
+- 关联 REQ：REQ-058
+- 测试层：单测
+- 状态：`待补充`
+- 证据：—
+- 缺口：吊销后以重编码/变形签名绑定尝试入网 → 拒绝语义不变（吊销按 node_id 生效，与编码无关）；pubkey 单字节翻转查无；换 signer 重签 binding 不影响身份解析与幂等判定
+
 ## 验收断言
 
 - [ ] SEC-12：伪 coordinator 拒绝连接、auth key 不泄露、日志明确报信任锚失败（容器级）
@@ -98,3 +106,4 @@
 - [ ] SEC-19：畸形消息不 panic、单连接隔离（fuzz 待补；限速断连已闭环）
 - [x] SEC-20：错误 auth key 限速锁定且无信息泄露（递增锁定 + 统一措辞 InvalidAuthKey）
 - [x] SEC-29：连接级限速断连、心跳超频忽略、PathRequest pending 上限（REQ-047）
+- [ ] SEC-30：重编码绑定无法绕过吊销（键规范化，REQ-058）

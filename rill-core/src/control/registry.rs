@@ -330,6 +330,51 @@ mod tests {
         assert_eq!(err, RegisterError::PubkeyMismatch);
     }
 
+    // ==================== 键规范化（REQ-058，KC-06，SEC-30） ====================
+
+    /// 身份比对按原始字节（KC-06：定长数组键无编码变化空间，单字节翻转即查无）
+    #[test]
+    fn identity_lookup_uses_raw_pubkey_bytes() {
+        let mut reg = Registry::new(1);
+        let signer = XorSigner { key: 0x5a };
+        reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
+        reg.register("ak-r", &key(1), 0x01, vec![], 1, &signer)
+            .unwrap();
+        assert_eq!(reg.node_id_by_pubkey(&key(1)), Some(1));
+        let mut flipped = key(1);
+        flipped[0] ^= 0x01;
+        assert_eq!(reg.node_id_by_pubkey(&flipped), None);
+        // binding = 签名编码字节，锚定 binding_message = node_id || 原始公钥
+        let entry = reg.entry(1).unwrap();
+        assert_eq!(
+            entry.identity_binding,
+            signer.sign(&binding_message(1, &key(1)))
+        );
+    }
+
+    /// binding 字节不是条目键（KC-06：重签后识别必须稳定）——换 signer 重签
+    /// 不影响身份解析与幂等判定；吊销按 node_id 生效，与绑定编码无关
+    #[test]
+    fn binding_bytes_not_a_registry_key() {
+        let mut reg = Registry::new(1);
+        let s1 = XorSigner { key: 0x5a };
+        reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
+        reg.register("ak-r", &key(1), 0x01, vec![], 1, &s1).unwrap();
+        let binding_v1 = reg.entry(1).unwrap().identity_binding.clone();
+
+        // 模拟重签/编码变化：不同 signer → 不同 binding 字节，同 pubkey
+        let s2 = XorSigner { key: 0xa5 };
+        assert_ne!(s2.sign(&binding_message(1, &key(1))), binding_v1);
+        let idem = reg.register("ak-r", &key(1), 0x01, vec![], 1, &s2).unwrap();
+        assert_eq!(idem, RegisterOutcome::Existing(1));
+        assert_eq!(reg.node_id_by_pubkey(&key(1)), Some(1));
+
+        // 吊销按 node_id 生效：原/重编码绑定一律查无（无挑战、无注册路径）
+        reg.revoke(1);
+        assert_eq!(reg.node_id_by_pubkey(&key(1)), None);
+        assert!(reg.entry(1).is_none());
+    }
+
     #[test]
     fn invalid_auth_key_rejected() {
         let mut reg = Registry::new(1);
