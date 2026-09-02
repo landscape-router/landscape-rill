@@ -201,14 +201,18 @@ impl Node {
             }
             peer_endpoints.insert(entry.node_id, addrs.clone());
             self.mesh.set_endpoints(entry.node_id, addrs);
-            for route in &entry.routes {
-                if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(route) {
-                    self.engine.insert(RouteEntry {
-                        prefix,
-                        source: RouteSource::Mesh,
-                        via: RouteVia::Mesh(entry.node_id),
-                        metric: None,
-                    });
+            // 离线条目（CTL-11）：路由不进路由表（可达性撤销）——对端身份/端点/
+            // 密钥照常维护，节点回在线后随 netmap 刷新自动恢复路由
+            if !entry.offline {
+                for route in &entry.routes {
+                    if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(route) {
+                        self.engine.insert(RouteEntry {
+                            prefix,
+                            source: RouteSource::Mesh,
+                            via: RouteVia::Mesh(entry.node_id),
+                            metric: None,
+                        });
+                    }
                 }
             }
             // v2 peer（protocol_version >= 2）：请求候选路径（v1.5，CONTROL_PLANE §3.11）

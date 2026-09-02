@@ -1,5 +1,6 @@
 use super::*;
 use crate::authkey::generate_auth_key;
+use crate::liveness::LEASE_EXPIRY_SECS;
 
 fn pubkey(seed: u8) -> [u8; 32] {
     [seed; 32]
@@ -117,9 +118,56 @@ fn heartbeat_and_offline_enters_netmap() {
     assert_eq!(c.offline_nodes(), &[1]);
     let nid = c.network_id_of(id).unwrap();
     assert!(c.netmap_snapshot(nid)[0].offline);
-    c.heartbeat(id, 200);
+    assert!(c.heartbeat(id, 200), "恢复转移返回 true");
     assert!(c.offline_nodes().is_empty());
     assert!(!c.netmap_snapshot(nid)[0].offline);
+}
+
+/// CTL-11：租约超时 → 离线扫描撤销其公告路由（netmap 版本递增）；
+/// 恢复心跳 → 回在线、路由随 netmap 恢复；他人公告不受影响
+#[test]
+fn offline_sweep_withdraws_routes_and_restores() {
+    let (mut c, ak) = setup();
+    c.set_announce_whitelist("lab", vec![Prefix::parse("10.0.0.0/8").unwrap()]);
+    let a = c
+        .register(&ak, &pubkey(1), 0x01, vec!["10.60.0.0/24".into()])
+        .unwrap()
+        .node_id;
+    let b = c
+        .register(&ak, &pubkey(2), 0x01, vec!["10.61.0.0/24".into()])
+        .unwrap()
+        .node_id;
+    let nid = c.network_id_of(a).unwrap();
+    c.heartbeat(a, 100);
+    c.heartbeat(b, 101);
+    let routes_of = |c: &Coordinator, id: u32| {
+        c.netmap_snapshot(nid)
+            .into_iter()
+            .find(|e| e.node_id == id)
+            .unwrap()
+    };
+    assert!(!routes_of(&c, a).routes.is_empty());
+
+    // b 的下一次心跳触发扫描：a 租约超时 → 离线 + 版本递增 + 路由撤销
+    let v1 = c.netmap_version();
+    c.heartbeat(b, 100 + LEASE_EXPIRY_SECS + 1);
+    assert!(c.netmap_version() > v1, "离线转移递增 netmap 版本");
+    let a_entry = routes_of(&c, a);
+    assert!(a_entry.offline, "租约超时 → 可达性标记为离线");
+    assert_eq!(
+        a_entry.routes,
+        vec!["10.60.0.0/24".to_string()],
+        "快照保持注册表镜像；撤销由节点侧按 offline 标记执行（CTL-11）"
+    );
+    assert!(!routes_of(&c, b).offline, "他人公告不受影响");
+
+    // a 恢复心跳 → 回在线（版本递增）、路由恢复
+    let v2 = c.netmap_version();
+    c.heartbeat(a, 100 + LEASE_EXPIRY_SECS + 2);
+    assert!(c.netmap_version() > v2, "恢复转移递增 netmap 版本");
+    let a_entry = routes_of(&c, a);
+    assert!(!a_entry.offline);
+    assert_eq!(a_entry.routes, vec!["10.60.0.0/24".to_string()]);
 }
 
 #[test]

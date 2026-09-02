@@ -593,8 +593,19 @@ impl Coordinator {
             .unwrap_or(&[])
     }
 
-    pub fn heartbeat(&mut self, node_id: u32, now: u64) {
+    pub fn heartbeat(&mut self, node_id: u32, now: u64) -> bool {
+        // 离线扫描（CTL-11）：挂在本调用（每次心跳/注册完成处理）上——事件驱动，
+        // 无后台任务。租约超时者标记离线、恢复者清除，转移发生即递增 netmap
+        // 版本（下一次心跳推送即携带撤销/恢复后的路由）。返回是否发生该节点的
+        // 离线 → 在线恢复转移
+        let was_offline = self.liveness.is_offline(node_id);
         self.liveness.heartbeat(node_id, now);
+        let newly_offline = self.liveness.sweep(now);
+        let transitioned = was_offline || !newly_offline.is_empty();
+        if transitioned {
+            self.directory.bump_netmap();
+        }
+        was_offline
     }
 
     pub fn mark_offline(&mut self, node_id: u32) {

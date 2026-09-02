@@ -89,6 +89,7 @@ pub fn netmap_push_message(coordinator: &Coordinator, network_id: u32) -> Netmap
             capabilities: info.capabilities,
             routes: info.routes.into_iter().map(Cow::Owned).collect(),
             protocol_version: info.protocol_version,
+            offline: info.offline,
         })
         .collect();
     NetmapPush {

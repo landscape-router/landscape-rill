@@ -128,6 +128,8 @@ pub struct NetmapNode {
     pub routes: Vec<String>,
     /// 协议版本（v2 路径能力协商）
     pub protocol_version: u32,
+    /// 可达性标记（CTL-11）：租约超时 = true，节点路由表据此撤销其公告
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,6 +277,7 @@ impl ControlSession {
                             capabilities: e.capabilities,
                             routes: e.routes.iter().map(|s| s.to_string()).collect(),
                             protocol_version: e.protocol_version,
+                            offline: e.offline,
                         }
                     })
                     .collect();

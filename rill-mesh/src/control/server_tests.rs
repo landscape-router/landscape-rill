@@ -84,6 +84,10 @@ async fn register_over_tls_loopback() {
     let push = NetmapPush::from_reader(&mut reader2, &body2).unwrap();
     assert_eq!(push.entries.len(), 1);
     assert_eq!(push.entries[0].node_id, 1);
+    assert!(
+        !push.entries[0].offline,
+        "在线节点可达性标记为 false（CTL-11 wire 贯通）"
+    );
     drop(server);
 }
 

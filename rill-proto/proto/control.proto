@@ -69,6 +69,7 @@ message NetmapEntry {
   uint32 capabilities = 5;
   repeated string routes = 6;   // 前缀公告（CIDR，§3.8）
   uint32 protocol_version = 7;  // 协议版本（v2 路径服务协商；v1 节点 = 1）
+  bool offline = 8;             // 可达性标记（CTL-11）：租约超时 = true，节点侧路由表据此撤销其公告
 }
 
 message NetmapPush {
