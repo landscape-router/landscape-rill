@@ -32,6 +32,8 @@ elif [ "$SCENARIO" = "tenancy" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/tenancy/docker-compose.yaml"
 elif [ "$SCENARIO" = "probe" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/probe/docker-compose.yaml"
+elif [ "$SCENARIO" = "recover" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/recover/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
@@ -173,6 +175,33 @@ EOF
   gen_node_config node-d.json "$NODE_D_KEY" "10.45.0.1/24" "fd00:5::1/64" '["10.45.0.0/24", "fd00:5::/64"]' "$NODE_C_AUTHKEY"
 fi
 
+if [ "$SCENARIO" = "recover" ]; then
+  # 恢复场景（REQ-056/057）：node-a 一次性 key——首个 REGISTER_RESPONSE 被
+  # coord env 注入丢弃（注册已消费）→ 退避 ≥1s 重连 → 挑战恢复原 node_id；
+  # node-b 保持 reusable（late 后启动，正常注册）
+  cat > "$BUILD_DIR/coord.json" <<EOF
+{
+  "coord": {
+    "listen_addr": "0.0.0.0:8443",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "networks": [
+      {
+        "name": "lab",
+        "master_key": "$MASTER_KEY",
+        "auth_keys": [
+          { "key": "$NODE_A_AUTHKEY", "policy": "onetime" },
+          { "key": "$NODE_B_AUTHKEY", "policy": "reusable" }
+        ],
+        "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
+      }
+    ]
+  }
+}
+EOF
+fi
+
 if [ "$SCENARIO" = "reload" ]; then
   # reload 场景（REQ-038）：初始只配置 node-a/b 的 auth key；node-c/d 复用 K_C（生成但不入配置），
   # 场景内按阶段修改 coord.json + SIGHUP 断言增量生效/失败保旧
@@ -287,7 +316,7 @@ fi
 
 echo "==> 5/6 构建并启动"
 $COMPOSE build -q
-if [ "$SCENARIO" = "persist" ] || [ "$SCENARIO" = "reload" ] || [ "$SCENARIO" = "tenancy" ]; then
+if [ "$SCENARIO" = "persist" ] || [ "$SCENARIO" = "reload" ] || [ "$SCENARIO" = "tenancy" ] || [ "$SCENARIO" = "recover" ]; then
   # compose build 默认跳过 profile 门控服务（persist/reload/tenancy 的 late 节点）——
   # 须显式带 profile 构建，否则后续 up 会复用旧镜像（证书/二进制陈旧导致 BadSignature）
   $COMPOSE --profile late build -q
