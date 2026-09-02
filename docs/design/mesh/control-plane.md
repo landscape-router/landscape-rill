@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060
 
-**版本：v0.12（2026-09-02 修订：REQ-058——§3.1/§3.5 吊销与身份比对的键规范化硬规则）**
+**版本：v0.13（2026-09-02 修订：REQ-051——§3.14 coord 只读状态端点；REQ-052——§3.15 节点遥测上报）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -339,6 +339,40 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 1. **认证前最小解析**：TLS 建立前零应用字节解析（TLS 记录层属协议本体，rustls 处理）；TLS 之上仅两级定头解析——4B 长度前缀（上限 1 MiB，超限 fail-closed）+ Envelope 定头（`msg_type` 判别值 + 不透明 `body` 字节）；**消息体 protobuf 反序列化发生在该消息的准入闸门之后**（连接级桶 → REGISTER 的锁定/per-源限速 → decode）
 2. **资源分配后置**：逐连接状态 = 固定小状态（读缓冲 + 限速桶 + 挑战槽 + 心跳时间戳），容量与连接数同阶有界；**持久状态**（注册表/binding/一次性 key 消费 tombstone/netmap 版本）全部后置到注册或挑战通过之后（REQ-060：消费后置于 PoP）；认证失败路径零持久分配
 3. **fuzz 验收**：长度前缀 / Envelope 定头 / 预认证闸门序列纳入鲁棒性 fuzz 语料——畸形与随机输入不 panic、错误只能经 `Result` 返回（SEC-08 闭环）
+
+### 3.14 coord 只读状态端点（REQ-051）
+
+coordinator 的**观察面**（§3.12 管理面写路径不变，WebUI 写边界不变 REQ-040）：进程内只读 HTTPS JSON 端点，仅 `GET /status`，无写路由。
+
+- **传输**：独立 `status.listen_addr`（默认 `127.0.0.1:8444`，loopback 缺省 = 本机运维查询）；复用 coord TLS 证书（rustls），明文 HTTP 连接在 TLS 握手层被拒；HTTP 层用 axum（依赖取向：观察面属运维基线，接受 axum/hyper 依赖——REQ-044 依赖最小化张力明示豁免；手写解析反引入 REQ-059 式攻击面）
+- **认证（day one，教训 CP-01/KC-02）**：
+  - 管理密码 Bearer（`Authorization: Bearer <password>`），常数时间比较
+  - 配置**只存 PBKDF2-HMAC-SHA256**（`pbkdf2-sha256$<iter>$<salt_hex>$<hash_hex>`，盐 ≥16B、iter 下限校验），明文密码禁止落盘
+  - 认证失败按源限速（复用 `SourceRateLimiter`），超限 429；成功不限
+  - `status` 段启用而无有效密码哈希 → **拒绝启动**（fail-closed，同 ADM-01）
+- **密码轮换**：改配置 + SIGHUP 增量生效（ADM-03 同机制），热更新不重启；旧密码即刻 401
+- **内容**（admin 全网视图，多网络全量）：
+  1. 网络概览：网络名/network_id、节点数（在线/离线/总）、netmap_version、relay 列表（RTT 排序）、announce 白名单
+  2. 节点表：node_id、公钥指纹、capabilities、公告前缀、最近端点、在线状态 + last_seen age、协议版本、构建版本（REQ-052）
+  3. auth key 台账：前缀脱敏、归域 network、policy、tag、一次性消费状态、剩余有效期
+  4. 安全计数器：注册拒绝/限速摘要、echo 限速摘要
+  5. coord 自身：监听地址、存储模式（纯内存/redb 路径）、uptime、重载结果历史
+  6. 节点遥测快照（REQ-052 聚合，§3.15）
+  - **红线**：密钥材料（master_key/signing_seed/TLS 私钥）一律不输出，只显示"已配置 + 指纹"
+- **实现取向**：查询逻辑 = rill-coord 内 I/O-free 快照方法（`StatusView`，单测覆盖多网络/离线/已消费分支），HTTP 层薄（路由 + 认证中间件）
+
+### 3.15 节点遥测上报（REQ-052）
+
+coordinator 权威地知道"注册了谁"，遥测补齐"数据面实际怎么走"——控制面心跳空载荷是零成本搭载通道；聚合视图为路径服务（§3.11 PathMap）预积累可达性矩阵数据源。
+
+- **通道**：搭载现有 Heartbeat（§3.4，10s 周期），不新建连接/消息族；payload 为 **optional 扩展字段**（旧节点空载荷照常工作，proto 向后兼容）；计数器为**区间值**（上报即清零，LOG-02 语义）
+- **内容**：
+  1. per-peer 收发帧数 + 字节数（区间增量）
+  2. 丢帧归因计数（BadRouteMac/会话错误/未知 node_id——节点侧 drop 计数器现成）
+  3. 直连确认对（对端 node_id + 端点 + RTT——probe 发送时间簿记，PONG 算 RTT）
+  4. `RegisterRequest.version` 字段（lrill 构建版本；hostname/os/protocol_version 已有）
+- **coord 侧**：聚合为最新快照（latest-wins，只保留最新，不承诺时序存储），经 §3.14 状态端点展示
+- **边界**：尽力而为——不重传、不确认；coord 视图允许短暂陈旧（与 netmap 一致性无关，不影响控制面行为）；不上报负载内容、路由表全量；tun 状态等扩展字段留待按需追加（proto optional）
 
 ## 4. 状态模型（Raft 兼容核心）
 

@@ -1,14 +1,13 @@
 # REQ-051 coord 只读状态端点（HTTPS + 管理密码）
 
-> 类型：需求 ｜ 状态：📌 proposed ｜ 优先级：P2 ｜ 依赖：REQ-038 ｜ 提出：2026-09-01
+> 类型：需求 ｜ 状态：✅ merged ｜ 提出：2026-09-01 ｜ 合并：2026-09-02
+> 去向：CONTROL_PLANE §3.14 ｜ 验收场景：ADM-07 ｜ lessons：CP-01（RPC 无认证泄漏）、KC-02（密钥明文落盘）、AO-02（WebUI 不持持久配置）
 
 ## 动机
 
 coordinator 是中心化权威（CONTROL_PLANE §1），但运行态只能翻日志：节点表/在线状态/auth key 台账/安全计数器均无即时视图。REQ-038 已定稿"配置与执行分离"（配置文件唯一权威 + 库 API 执行面 + SIGHUP 重载），本需求补齐**观察面**：coord 进程内开只读 HTTPS JSON 端点。写操作不进端点（仍走配置文件 + SIGHUP），WebUI 写边界不变（REQ-040）。
 
-## 决策摘要
-
-- **传输**：复用 coord 现有 TLS 证书（rustls）的 HTTPS 只读端点；独立 `status_listen_addr`（配置缺省 `127.0.0.1`）；仅 GET，无写路由
+- **传输**：复用 coord TLS 证书的 HTTPS 只读端点；独立 `status.listen_addr`；仅 GET /status，无写路由；HTTP 层 axum（运维基线豁免 REQ-044 张力）
 - **认证**（day one，教训 CP-01）：
   - 管理密码 Bearer（`Authorization: Bearer <password>`）
   - 配置存 PBKDF2-HMAC-SHA256（盐 + 哈希，复用现有 sha2/hmac，零新依赖）；明文密码禁止落盘（教训 KC-02）
@@ -24,18 +23,5 @@ coordinator 是中心化权威（CONTROL_PLANE §1），但运行态只能翻日
   - 红线：密钥材料（master_key/signing_seed/TLS 私钥）一律不输出，只显示"已配置 + 指纹"
 - **实现取向**：HTTP 层引入 axum/hyper（与 REQ-044 依赖最小化挂账的张力明示：接受该依赖，观察面属运维基线）；查询逻辑为 rill-coord 内 I/O-free 快照方法（单测覆盖），HTTP 层保持薄
 
-## 验收标准（草案）
-
-- 无密码/错密码 → 401；同源高频错密码 → 429（限速生效）
-- SIGHUP 轮换密码后：旧密码 401、新密码 200（重载不中断在途连接）
-- https 可达；同端口明文 HTTP 请求被拒
-- 快照方法与 coord 内存状态一致（单测：多网络/离线节点/一次性 key 已消费各分支）
-- 配置 `status` 段启用但密码缺失/格式非法 → 拒绝启动（fail-closed）
-- docker e2e：curl 断言（无密码 401 / 正确密码 200 + 视图字段存在 / 轮换后旧拒新通）
-
-## 关联
-
-- 前置（已 merged）：REQ-038（配置与执行分离、SIGHUP 重载）
-- 相邻：REQ-040（WebUI 写边界不变）、REQ-039（日志周期摘要互补——端点为即时快照）
-- 展示增强：REQ-052（节点遥测上报，端点数据源之一）
-- 教训对照：CP-01（RPC 无认证泄漏）、KC-02（密钥明文落盘）、AO-02（WebUI 不持持久配置）
+- **CONTROL_PLANE §3.14**：端点行为权威描述（认证/限速/轮换/内容/红线）
+- 验收场景：ADM-07（[tests/admin.md](../tests/admin.md)）
