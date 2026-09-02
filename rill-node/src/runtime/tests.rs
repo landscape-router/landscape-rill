@@ -314,3 +314,65 @@ fn config_rejects_missing_trust_anchors() {
     c.ca_cert_path = "".into();
     assert!(c.validate().is_err());
 }
+
+// ==================== probe 发送侧限速/退避（CN-01，REQ-046） ====================
+
+/// 无协调器节点：pump_probes 只依赖 node_id + 端点表，控制面不需要
+async fn bare_node(seed: u8) -> Node {
+    let mut n = Node::new(
+        node_config("https://coord.test:8443", "/tmp/x.pem", seed, vec![]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    n.node_id = Some(seed as u32);
+    n
+}
+
+/// 全局发送令牌桶（CN-01）：候选端点再多，单轮发送量 ≤ 突发容量
+#[tokio::test]
+async fn probe_send_bucket_bounds_burst() {
+    let mut a = bare_node(1).await;
+    let eps: Vec<SocketAddr> = (20000..20040)
+        .map(|p| format!("127.0.0.1:{p}").parse().unwrap())
+        .collect();
+    a.mesh.set_endpoints(2, eps);
+    // 越过 PROBE_PERIOD 的合成时刻驱动（last_probe 初始化为 now）
+    a.pump_probes(Instant::now() + probe::PROBE_PERIOD * 2)
+        .await;
+    assert_eq!(
+        a.mesh.probe_pending_len(),
+        probe::PROBE_SEND_CAPACITY as usize,
+        "桶容量耗尽后不再发送"
+    );
+}
+
+/// 指数退避（CN-01）：无响应端点 miss 翻倍退避；PONG 确认即清零
+#[tokio::test]
+async fn probe_backoff_exponential_and_reset() {
+    let mut a = bare_node(1).await;
+    let ep: SocketAddr = "127.0.0.1:20300".parse().unwrap();
+    a.mesh.set_endpoint(2, ep);
+    let t0 = Instant::now() + probe::PROBE_PERIOD * 2;
+    a.pump_probes(t0).await;
+    assert_eq!(a.mesh.probe_pending_len(), 1);
+
+    // 无 PONG → 下一周期在途探测转为退避（miss=1 → 60s），退避期内不发
+    let t1 = t0 + probe::PROBE_PERIOD;
+    a.pump_probes(t1).await;
+    assert_eq!(a.mesh.probe_pending_len(), 0, "退避期内不发");
+    let (_, due1) = *a.probe_backoff.get(&ep).unwrap();
+    assert_eq!(due1, t1 + probe::PROBE_PERIOD * 2);
+
+    // 到期恢复发送 → 再无响应 → miss=2 → 120s
+    a.pump_probes(due1).await;
+    assert_eq!(a.mesh.probe_pending_len(), 1);
+    let t3 = due1 + probe::PROBE_PERIOD;
+    a.pump_probes(t3).await;
+    let (miss3, due3) = *a.probe_backoff.get(&ep).unwrap();
+    assert_eq!((miss3, due3), (2, t3 + probe::PROBE_PERIOD * 4));
+
+    // PONG 确认 → 退避清零（下周期可立即探测）
+    a.handle_probe_pong(2, ep, Vec::new()).await;
+    assert!(!a.probe_backoff.contains_key(&ep));
+}

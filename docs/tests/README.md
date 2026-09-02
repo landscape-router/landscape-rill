@@ -36,7 +36,7 @@
 |---|---|---|
 | mesh 帧头/握手/广播 | [mesh/frame.md](./mesh/frame.md) | `FRM-01` ~ `FRM-11` |
 | mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-17` |
-| mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-09` |
+| mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-10` |
 | ts2021 接入 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-10` |
 | dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
 | 路由引擎 | [routing.md](./routing.md) | `RTE-01` ~ `RTE-08` |
@@ -97,7 +97,7 @@
 | REQ-043 | CTL-17 | 已覆盖 | rill-coord/src/config/、rill-coord/src/coordinator/、rilld/src/main.rs |
 | REQ-044 | — | 📌 proposed（无验收场景） | — |
 | REQ-045 | — | 📌 proposed（无验收场景） | — |
-| REQ-046 | — | 📌 proposed（无验收场景） | — |
+| REQ-046 | SEC-07 / SEC-26 / CON-10 | 已覆盖 | rill-node/src/runtime/、rill-mesh/src/data/、rill-core/src/rate.rs、rill-core/src/probe.rs、e2e/run_e2e.sh（probe 场景） |
 | REQ-047 | — | 📌 proposed（无验收场景） | — |
 | REQ-048 | — | 📌 proposed（无验收场景） | — |
 | REQ-049 | — | 📌 proposed（无验收场景） | — |

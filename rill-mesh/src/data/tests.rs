@@ -467,6 +467,52 @@ async fn probe_ping_foreign_target_not_replied() {
     assert!(r.is_err(), "收到预期外的回复帧");
 }
 
+/// PONG 生成按源限速（SEC-26/REQ-046）：同源 PING 超突发容量后不再回 PONG
+#[tokio::test]
+async fn pong_generation_rate_limited_per_source() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+        .await
+        .unwrap();
+    let b_addr = b.local_addr().unwrap();
+    // 容量 20：前 20 个 PING 各回一个 PONG（a 消费 PONG，nonce 不积压）
+    for _ in 0..PONG_CAPACITY {
+        assert!(a.send_probe_ping(b_addr, 1, 2).await.is_some());
+        let _ = b.handle_incoming().await.unwrap();
+        let _ = a.handle_incoming().await.unwrap();
+    }
+    // 第 21 个 PING：事件仍上报，但 PONG 被限速 → a 侧 200ms 无包
+    assert!(a.send_probe_ping(b_addr, 1, 2).await.is_some());
+    assert!(matches!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::ProbePing { from: 1 }
+    ));
+    let r = tokio::time::timeout(std::time::Duration::from_millis(200), a.handle_incoming()).await;
+    assert!(r.is_err(), "PONG 应被按源限速抑制");
+}
+
+/// 在途 probe 并发上限（CN-01/REQ-046）：pending 达上限拒绝新发送，drain 后恢复
+#[tokio::test]
+async fn probe_pending_cap_rejects_new_sends() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let target: std::net::SocketAddr = "127.0.0.1:20999".parse().unwrap();
+    for _ in 0..PROBE_MAX_PENDING {
+        assert!(a.send_probe_ping(target, 1, 2).await.is_some());
+    }
+    assert_eq!(a.probe_pending_len(), PROBE_MAX_PENDING);
+    assert!(
+        a.send_probe_ping(target, 1, 2).await.is_none(),
+        "超并发上限应拒绝"
+    );
+    // 周期 drain（退避推进用）后恢复可发
+    assert_eq!(a.take_pending_probes().len(), PROBE_MAX_PENDING);
+    assert!(a.send_probe_ping(target, 1, 2).await.is_some());
+}
+
 #[tokio::test]
 async fn unsupported_type_dropped() {
     let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)

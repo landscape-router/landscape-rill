@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
 use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
-use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
+use landscape_rill_core::rate::{RateCounter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
 use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
 use landscape_rill_mesh::data::{IncomingEvent, MeshData, PathEntry};
@@ -151,6 +151,10 @@ pub struct Node {
     echo_target: Option<(String, u16)>,
     /// 上次 probe 周期时刻（echo + 互探 + relay 探测，PROBE_PERIOD）
     last_probe: Instant,
+    /// probe 发送令牌桶（CN-01 强制限速，REQ-046）：桶空本轮不发
+    probe_send_bucket: TokenBucket,
+    /// 每端点探退避：端点 → (连续 miss, 下次允许探测时刻)；PONG 确认即清除
+    probe_backoff: HashMap<SocketAddr, (u32, Instant)>,
     /// 挂靠中继（netmap relay_list 权威全量替换）
     pub(crate) relays: Vec<RelayEntry>,
     /// netmap 端点缓存（apply_relay_endpoints 用：direct ++ 确认 relay 追加）
@@ -202,6 +206,11 @@ impl Node {
             connect_failed: RateCounter::new(RATE_SUMMARY_PERIOD),
             echo_target,
             last_probe: Instant::now(),
+            probe_send_bucket: TokenBucket::new(
+                probe::PROBE_SEND_RATE_PER_SEC,
+                probe::PROBE_SEND_CAPACITY,
+            ),
+            probe_backoff: HashMap::new(),
             relays: Vec::new(),
             peer_endpoints: HashMap::new(),
             echoed_endpoints: Vec::new(),

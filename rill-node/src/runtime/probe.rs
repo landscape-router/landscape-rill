@@ -1,5 +1,5 @@
 //! probe 引擎（CONNECTIVITY §2/§4/§5）：echo 探测、互探、
-//! 中继挂靠确认与 v1 回退端点表
+//! 中继挂靠确认与 v1 回退端点表；发送侧强制限速 + 指数退避（CN-01/REQ-046）
 
 use super::*;
 
@@ -14,17 +14,24 @@ pub(crate) struct RelayEntry {
 
 /// probe 周期（CONNECTIVITY §2：探测 30s + 网络变更触发；v1 仅周期）
 pub(crate) const PROBE_PERIOD: Duration = Duration::from_secs(30);
+/// probe 发送限速（CN-01 强制）：全局令牌桶，桶空本轮不发（探测量必须有上界）
+pub(crate) const PROBE_SEND_RATE_PER_SEC: f64 = 10.0;
+pub(crate) const PROBE_SEND_CAPACITY: u32 = 20;
+/// 指数退避上限：`PROBE_PERIOD × 2^miss`，封顶对齐 RECONNECT_MAX_BACKOFF
+pub(crate) const PROBE_MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 impl Node {
     /// probe 响应处理（CONNECTIVITY §2/§4/§5）：
     /// - 载荷非空 = coordinator 回显 seen 地址 → 候选端点补充 + 重报
     /// - 载荷空 = 互探确认（端点可达性恢复）/ 中继挂靠确认（v1 回退端点追加）
+    /// - 任何 PONG = 该端点有响应 → 发送侧退避清零
     pub(super) async fn handle_probe_pong(
         &mut self,
         _from: u32,
         endpoint: SocketAddr,
         payload: Vec<u8>,
     ) {
+        self.probe_backoff.remove(&endpoint);
         if !payload.is_empty() {
             let Ok(addr) = String::from_utf8(payload).map(|s| s.parse::<SocketAddr>()) else {
                 return;
@@ -75,15 +82,38 @@ impl Node {
         }
     }
 
+    /// 发送闸门（CN-01 强制限速 + 指数退避）：端点未在退避期且全局令牌桶有余 → 允许。
+    /// 并发上限在机制侧收口（MeshData::send_probe_ping，PROBE_MAX_PENDING）
+    fn probe_send_gate(&mut self, endpoint: &SocketAddr, now: Instant) -> bool {
+        if let Some((_, due)) = self.probe_backoff.get(endpoint) {
+            if now < *due {
+                return false;
+            }
+        }
+        self.probe_send_bucket.take()
+    }
+
     /// probe 周期（CONNECTIVITY §2/§4/§5，PROBE_PERIOD）：
     /// ① coordinator UDP 回显（STUN 式：发现 NAT 后公网映射）
     /// ② 对全部 peer 候选端点互探（直连确认，CON-03）
     /// ③ 未确认中继端点探测（挂靠确认，CON-04）
+    /// 所有发送过 probe_send_gate（CN-01）：周期开始先把上轮无响应的在途探测
+    /// 转为端点退避（miss+1 指数退避），失败按退避重试而非并发轰炸
     pub(super) async fn pump_probes(&mut self, now: Instant) {
         if now.duration_since(self.last_probe) < PROBE_PERIOD {
             return;
         }
         self.last_probe = now;
+        // 退避推进：仍 pending = 上轮 PING 无 PONG（发送只发生在本函数，
+        // 周期开始时在途探测必然已等满一个周期）
+        for (_, ep) in self.mesh.take_pending_probes() {
+            let miss = self
+                .probe_backoff
+                .get(&ep)
+                .map_or(1u32, |(m, _)| m.saturating_add(1));
+            let delay = (PROBE_PERIOD * (1u32 << miss.min(4))).min(PROBE_MAX_BACKOFF);
+            self.probe_backoff.insert(ep, (miss, now + delay));
+        }
         let Some(id) = self.node_id else {
             return;
         };
@@ -97,20 +127,28 @@ impl Node {
                 debug!("[node] echo target unresolved: {host}:{port}");
                 return;
             };
-            let _ = self
-                .mesh
-                .send_probe_ping(SocketAddr::new(echo_ip, port), id, 0)
-                .await;
+            let ep = SocketAddr::new(echo_ip, port);
+            if self.probe_send_gate(&ep, now) {
+                let _ = self.mesh.send_probe_ping(ep, id, 0).await;
+            }
         }
         let peers = self.mesh.peer_endpoints();
         for (peer, endpoints) in peers {
             for ep in endpoints {
-                let _ = self.mesh.send_probe_ping(ep, id, peer).await;
+                if self.probe_send_gate(&ep, now) {
+                    let _ = self.mesh.send_probe_ping(ep, id, peer).await;
+                }
             }
         }
-        for relay in self.relays.iter().filter(|r| !r.confirmed) {
-            if let Some(node_id) = relay.node_id {
-                let _ = self.mesh.send_probe_ping(relay.endpoint, id, node_id).await;
+        let unconfirmed: Vec<(u32, SocketAddr)> = self
+            .relays
+            .iter()
+            .filter(|r| !r.confirmed)
+            .filter_map(|r| r.node_id.map(|nid| (nid, r.endpoint)))
+            .collect();
+        for (node_id, ep) in unconfirmed {
+            if self.probe_send_gate(&ep, now) {
+                let _ = self.mesh.send_probe_ping(ep, id, node_id).await;
             }
         }
     }

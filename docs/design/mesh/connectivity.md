@@ -2,7 +2,7 @@
 
 > 端点发现、直连验证、中继兜底——mesh 接入的"DERP 等价物"专题。
 > 34B 帧头的转发语义见 FRAME_HEADER；端点传播进 netmap 见 CONTROL_PLANE §3.2。
-> 版本：v0.3（2026-09-01 修订：probe 体系实现落档——§2/§4/§5/§6 全链路）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028
+> 版本：v0.4（2026-09-01 修订：REQ-046——§4.3 probe 限速升级为强制 + 发送侧指数退避/并发上限、PONG 生成按源限速）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046
 
 ## 1. 问题与目标
 
@@ -64,13 +64,18 @@ probe = magic(4B) + 类型(1B: 请求/响应) + from_node_id(4B) + to_node_id(4B
 - 不经中继转发，直接发送到候选端点（含中继地址本身）
 - 探测仅验证可达性，不携带任何流量
 
-### 4.3 安全（可接受）
+### 4.3 安全（强制限速，REQ-046/CN-01）
+
+probe 无认证为有意设计（会话建立前无认证链可用，§4.2），因此限速**不是可选项而是默认强制**——探测量无上界时行为特征与扫描/攻击无法区分（CN-01：被 IDS/风控误判、正常节点被误伤），且无强制限速时可借 probe 机制做反射放大与行为特征污染。
 
 | 攻击 | 后果 | 防护/边界 |
 |---|---|---|
 | 伪造 probe-response | 诱导错误的直连决策 | 伤害上限为 DoS；真实流量是 AEAD 封装的 34B 帧，攻击者读不了也注入不了 |
-| 伪造 probe 洪泛 | 浪费带宽 | 探测无状态、极小；可选限速 |
+| 伪造 probe 洪泛（驱动响应面） | 反射放大（SEC-26） | **PONG 生成按源限速**（10/s、突发 20，与 §2.2 coordinator 回显同值、同一 `SourceRateLimiter`）；响应 ≈ 请求大小，限速后收敛 |
+| 探测行为被误判攻击（CN-01） | 正常节点被 IDS/风控误伤/封禁 | **发送侧强制限速 + 指数退避 + 并发上限**：全局令牌桶（10/s、突发 20）——单轮探测量 ≤ 突发容量；每端点无响应 miss+1 → 下次探测 `30s × 2^miss`（封顶 300s），PONG 确认即清零；在途 probe 上限 64（超限拒绝新发送，非清空） |
 | 诱导直连到攻击者端点 | 攻击者收到封装帧 | 无法解密（AEAD），无法注入有效流量 |
+
+指数退避推进机制：probe 发送只发生在节点探测周期内，周期开始时仍在途（无 PONG 确认）的探测即视为上轮失败——转入端点退避，失败按退避重试而非并发轰炸。
 
 ## 5. 中继（三层模型）
 
@@ -108,6 +113,7 @@ probe = magic(4B) + 类型(1B: 请求/响应) + from_node_id(4B) + to_node_id(4B
 
 | 日期 | 决策 |
 |---|---|
+| 2026-09-01 | **REQ-046：probe 强制限速/退避（§4.3 "可选限速" → 强制，落实 CN-01）**：①**发送侧三件套**（rill-node runtime/probe.rs）：全局令牌桶 10/s 突发 20（桶空本轮不发）+ 每端点指数退避（周期开始 drain 在途探测，仍 pending = 上轮无响应 → miss+1 → `30s×2^miss` 封顶 300s；PONG 确认清零）+ 在途并发上限 64（rill-mesh `send_probe_ping` 超限拒绝，替换原 1024 清空）；②**PONG 生成按源限速**（SEC-26 节点侧，rill-mesh dispatch `pong_limiter`）：10/s 突发 20，与 coordinator 回显同值；③`EchoLimiter` 泛化为 rill-core `SourceRateLimiter`（echo 与 PONG 共用，后续 REQ-047 Register 按源限速同源复用） |
 | 2026-08-15 | 端点探测 = coordinator UDP 回显（STUN 式，零额外组件）；直连 v1 = 简单互探（专用 probe 小包）+ 中继兜底，不做对称 NAT 打洞；中继 = 三层模型（coordinator 兜底 + 自愿节点 opt-in 扩容 + 独立 relay 可选），全部零协议改动 |
 | 2026-09-01 | **probe 体系实现落档（CON-01/03/04/05/06/08 + SEC-26）**：①**probe 线格式**（rill-core/src/probe.rs）：`magic("LPRB") + type(PING/PONG) + from_node_id + to_node_id + nonce`，`to_node_id=0` = coordinator 回显标记；PONG 可携带载荷（echo 的 seen 地址 "ip:port"）；解析 fail-closed（CN-02）；②**端口分派**（data.rs handle_incoming）：首字节 `0x01..=0x0F` → 34B 帧，magic 匹配 → probe，都不匹配 → 丢弃；③**coordinator UDP 数据面**（rilld run_coord_udp，默认与 TCP 同端口）：echo（按源 IP 令牌桶 10/s 突发 20，SEC-26）+ relay RTT 排序（30s 周期向各网 relay 端点 PING 测 RTT → relay_list 排序随 netmap 下发 + PathService relay 顺序 = 挂靠优先级）；④**节点侧**（runtime pump_probes，30s 周期）：echo（结果并入 EndpointReport 重报）+ 对全部 peer 候选端点互探（PONG 匹配 → 端点活性恢复）+ relay 探测（确认 → `apply_relay_endpoints`：v1 帧端点表 = 直连 ++ 确认中继，miss 轮转回落）；⑤**CON-06 故障切换修复**：心跳 miss 同时落到**实际选用路径**（`last_sent_path`——只 miss 主路径时在用中继死亡会卡死）+ 全候选 miss 耗尽时按 miss 升序选（最不坏优先，收包恢复闭环）；⑥echo 目标 = coordinator_url 推导（host:port 允许主机名，每周期 DNS 解析），可用 `udp_echo_addr` 显式覆盖 |
 | 2026-08-15 | **数据面转发路径实现（legs/mesh/data.rs 落档，FRAME_HEADER §4 语义落地）**：`MeshData` = UDP socket + key_dst 表（KeyDist 应用）+ 端点表（netmap endpoints 应用）；`relay()` 顺序 = 帧头解析 → version 校验 → route_mac 校验（key_dst 按 to_node_id）→ 目标为自己则交付上层 / ttl==0 丢弃 / 查端点表 → **ttl 递减后直接转发，不重签 route_mac**（§3.1 语义验证，测试断言转发后帧仍可校验）；丢弃原因显式化（BadVersion/BadRouteMac/TtlExpired/NoEndpoint/NoKeyDst/Short，fail-closed）；目的节点交付返回给上层（AEAD 解密属会话层，握手后接线）；**回环 UDP 集成测试**：A→relay→B 转发、ttl 递减、篡改/版本/短帧/无端点/无密钥丢弃、送达自身 |

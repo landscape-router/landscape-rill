@@ -9,7 +9,7 @@ use landscape_rill_core::handshake::{
     MSG1_PAYLOAD_LEN, MSG2_PAYLOAD_LEN, MSG3_PAYLOAD_LEN,
 };
 use landscape_rill_core::rate::RateCounter;
-use landscape_rill_core::rate::TokenBucket;
+use landscape_rill_core::rate::{SourceRateLimiter, TokenBucket};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -18,6 +18,12 @@ use tokio::net::UdpSocket;
 /// 广播泛洪令牌桶参数（FRAME_HEADER §2.6）：容量 64、补充 16/s
 pub const FLOOD_BUCKET_CAPACITY: u32 = 64;
 pub const FLOOD_BUCKET_RATE_PER_SEC: f64 = 16.0;
+/// PONG 生成按源限速参数（CONNECTIVITY §4.3，SEC-26/REQ-046）：
+/// 与 coordinator 回显同值（10/s、突发 20）——无认证 PING 的响应面必须有上界
+pub const PONG_RATE_PER_SEC: f64 = 10.0;
+pub const PONG_CAPACITY: u32 = 20;
+/// 在途 probe 并发上限（CN-01/REQ-046）：pending 达上限拒绝新发送（非清空）
+pub const PROBE_MAX_PENDING: usize = 64;
 /// 泛洪去重 seen 集条目存活时长
 pub const FLOOD_SEEN_TTL: Duration = Duration::from_secs(30);
 /// 主路径健康 miss 阈值：累计达此值 → 快速切换备用路径（CONTROL_PLANE §3.11）
@@ -109,6 +115,8 @@ pub struct MeshData {
     drop_stats_global: RateCounter,
     /// 未确认的探针：nonce → (目标节点, 探测端点)；PONG 匹配即移除
     probe_pending: HashMap<u32, (u32, SocketAddr)>,
+    /// PONG 生成按源限速（CONNECTIVITY §4.3，SEC-26）：伪造源灌 PING 的响应面上界
+    pong_limiter: SourceRateLimiter,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -218,6 +226,7 @@ impl MeshData {
             drop_stats: HashMap::new(),
             drop_stats_global: RateCounter::new(DROP_STATS_PERIOD),
             probe_pending: HashMap::new(),
+            pong_limiter: SourceRateLimiter::new(PONG_RATE_PER_SEC, PONG_CAPACITY),
         })
     }
 

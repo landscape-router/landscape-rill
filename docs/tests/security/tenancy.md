@@ -43,13 +43,13 @@
 - 证据：rill-coord/src/coordinator/
 - 说明：白名单按网络分域——A 网白名单不影响 B 网；A 网节点公告 B 网白名单前缀被拒（RouteNotAllowed）；断言测试 `whitelist_isolated_per_network`
 
-## SEC-26 反射放大（coordinator 回显）
+## SEC-26 反射放大（coordinator 回显 + 节点 PONG）
 
-- 关联 REQ：REQ-017
+- 关联 REQ：REQ-017 / REQ-046
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
-- 证据：e2e/run_e2e.sh、rill-coord/src/echo.rs
-- 说明：伪造源地址灌 probe → 按源 IP 令牌桶限速生效（默认 10/s 突发 20；probe 场景宿主灌 200 包 → coord `echo rate-limited` 摘要）；响应 ≈ 请求大小（PONG 仅回显 seen 地址，放大因子 ~1:1）；单测 `limiter_allows_burst_then_blocks`/`echo_rejects_non_echo_or_garbage`
+- 证据：e2e/run_e2e.sh、rill-coord/src/echo.rs、rill-core/src/rate.rs、rill-mesh/src/data/dispatch.rs
+- 说明：伪造源地址灌 probe → 按源 IP 令牌桶限速生效（默认 10/s 突发 20；probe 场景宿主灌 200 包 → coord `echo rate-limited` 摘要）；响应 ≈ 请求大小（PONG 仅回显 seen 地址/空载荷，放大因子 ~1:1）；节点 PONG 生成侧同值按源限速（REQ-046，`pong_limiter`——同源超突发容量后 PONG 被抑制）；单测 `limiter_allows_burst_then_blocks`（rill-core）/`echo_rejects_non_echo_or_garbage`/`pong_generation_rate_limited_per_source`
 
 ## SEC-27 联邦边界（v2 预置断言）
 

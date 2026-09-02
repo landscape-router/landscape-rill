@@ -26,7 +26,8 @@ impl MeshData {
         }
     }
 
-    /// probe 处理（CONNECTIVITY §4）：PING 对己 → 自动回 PONG；PONG → nonce 匹配确认
+    /// probe 处理（CONNECTIVITY §4）：PING 对己 → 按源限速回 PONG（SEC-26）；
+    /// PONG → nonce 匹配确认
     async fn handle_probe(
         &mut self,
         from_addr: SocketAddr,
@@ -40,7 +41,8 @@ impl MeshData {
         };
         match probe.packet_type {
             crate::probe::probe_type::PING => {
-                if probe.to_node_id == self.self_node_id {
+                if probe.to_node_id == self.self_node_id && self.pong_limiter.allow(from_addr.ip())
+                {
                     let reply = crate::probe::ProbePacket::pong(&probe, Vec::new());
                     let _ = self.wan_send(&reply.encode(), from_addr).await;
                 }
@@ -73,15 +75,15 @@ impl MeshData {
     }
 
     /// 向候选端点发送 PING（互探/echo，CONNECTIVITY §4.1）；返回 nonce（PONG 匹配用）。
-    /// pending 超上限清空（防伪造 PONG 洪泛撑爆状态，活跃探测由 runtime 周期重发）。
+    /// 并发上限（CN-01）：pending 达 PROBE_MAX_PENDING 拒绝新发送（runtime 周期重试收敛）。
     pub async fn send_probe_ping(
         &mut self,
         endpoint: SocketAddr,
         from: u32,
         to: u32,
     ) -> Option<u32> {
-        if self.probe_pending.len() >= 1024 {
-            self.probe_pending.clear();
+        if self.probe_pending.len() >= PROBE_MAX_PENDING {
+            return None;
         }
         let nonce = rand::random::<u32>();
         self.probe_pending.insert(nonce, (to, endpoint));
@@ -93,6 +95,17 @@ impl MeshData {
                 None
             }
         }
+    }
+
+    /// 在途 probe 数（并发上限观测，CN-01）
+    pub fn probe_pending_len(&self) -> usize {
+        self.probe_pending.len()
+    }
+
+    /// 取走上轮全部在途探测（目标, 端点）：pump 周期开始调用——
+    /// 剩余 = 上轮无 PONG 确认 → 驱动发送侧指数退避（CN-01/REQ-046）
+    pub fn take_pending_probes(&mut self) -> Vec<(u32, SocketAddr)> {
+        self.probe_pending.drain().map(|(_, v)| v).collect()
     }
 
     /// 帧路径（原 relay 入口逻辑，分派后调用）。帧留在接收缓冲中：
@@ -157,8 +170,10 @@ impl MeshData {
         self.key_dst_table.contains_key(&peer) || self.sessions.contains_key(&peer)
     }
 
-    /// 取走本周期丢帧摘要（LOGGING §5；pump_timers 周期调用，0 不输出由调用方决定）
+    /// 取走本周期丢帧摘要（LOGGING §5；pump_timers 周期调用，0 不输出由调用方决定）；
+    /// 顺带清理 PONG 限速桶表（防伪造源地址洪泛撑爆状态）
     pub fn poll_drop_stats(&mut self) -> Option<(Vec<(u32, u64)>, u64)> {
+        self.pong_limiter.prune();
         let now = Instant::now();
         let mut per_peer = Vec::new();
         for (peer, rc) in self.drop_stats.iter_mut() {

@@ -53,11 +53,11 @@
 
 ## SEC-07 明文注入
 
-- 关联 REQ：REQ-014 / REQ-017
+- 关联 REQ：REQ-014 / REQ-017 / REQ-046
 - 测试层：单测 + 集成
-- 状态：`部分覆盖`
+- 状态：`已覆盖`
 - 证据：rill-mesh/src/framing/、rill-mesh/src/data/
-- 缺口：端口分派不匹配丢弃已覆盖；probe magic 分派未实现（依赖 CON-08）
+- 说明：端口分派（CONNECTIVITY §2.1）：首字节 `0x01..=0x0F` → 34B 帧、probe magic（LPRB）→ probe、都不匹配 → 丢弃（fail-closed，CN-02）；单测 `unknown_protocol_dropped`（CON-08）
 
 ## SEC-08 解析鲁棒性（fail-closed）
 
@@ -99,7 +99,7 @@
 - [ ] SEC-04：重算 route_mac 的篡改帧被目的端 AEAD 拦截（容器级）
 - [x] SEC-05：重放窗口拦截（含 rekey 残留期双窗口）
 - [x] SEC-06：rekey 交叠 5s 窗口语义
-- [ ] SEC-07：非帧/非 probe 字节丢弃（probe 分派待实现）
+- [x] SEC-07：非帧/非 probe 字节丢弃（端口分派 fail-closed，CON-08）
 - [ ] SEC-08：畸形输入不 panic（fuzz 待补）
 - [x] SEC-09：握手重定向拒绝（msg1 目标校验）
 - [x] SEC-10：身份绑定验证拒绝冒充 + prologue 混淆拒绝

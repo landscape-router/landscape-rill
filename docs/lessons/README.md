@@ -34,7 +34,7 @@
 | [RT-01](./routing/RT-01-self-route-loop.md) | 路由 | 公告前缀自指 → 黑洞循环 | ✅ 已落档 |
 | [RT-02](./routing/RT-02-routing-table-mismatch.md) | 路由 | 多路由表错乱误删默认路由 | ✅ 架构规避 |
 | [RT-03](./routing/RT-03-subnet-covers-relay.md) | 路由 | 子网代理覆盖中继端点 → 循环断链 | ✅ 已落档 |
-| [CN-01](./connectivity/CN-01-probe-udp-dos.md) | 连通性 | 探测并发互探被误判 UDP DoS | **需补**：限速升级为强制 |
+| [CN-01](./connectivity/CN-01-probe-udp-dos.md) | 连通性 | 探测并发互探被误判 UDP DoS | ✅ 已落档（REQ-046） |
 | [CN-02](./connectivity/CN-02-punch-parse-panic.md) | 连通性 | 打洞信令解析 panic 复发 | ✅ 已落档 |
 | [CN-03](./connectivity/CN-03-shared-node-no-auth.md) | 连通性 | 共享/中继节点无用户级认证 | ✅ 已落档 |
 | [CN-04](./connectivity/CN-04-policy-all-paths.md) | 连通性 | 策略执行未覆盖中继/打洞/直连全部路径 | ✅ 已落档 |
