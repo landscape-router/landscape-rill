@@ -86,10 +86,9 @@ impl MeshClient {
     }
 
     pub fn challenge_ack(&self, challenge: &Challenge<'_>) -> Vec<u8> {
-        let node_id = match self.session.state() {
-            SessionState::Reconnecting { node_id } => *node_id,
-            _ => 0,
-        };
+        // node_id 取 Challenge 消息携带值（REQ-057）：注册响应丢失的 Fresh 态
+        // 客户端尚不知道自己的 node_id，由服务端解析下发；重连场景与已知值一致
+        let node_id = challenge.node_id;
         let mut eph_pub = [0u8; 32];
         eph_pub.copy_from_slice(challenge.eph_pub.as_ref());
         let tag = landscape_rill_core::control::challenge::compute_tag(
@@ -313,6 +312,7 @@ impl ControlSession {
                     eph_pub: Cow::Borrowed(owned.proto().eph_pub.as_ref()),
                     nonce: Cow::Borrowed(owned.proto().nonce.as_ref()),
                     issued_at: owned.proto().issued_at,
+                    node_id: owned.proto().node_id,
                 };
                 let ack = self.client.challenge_ack(&challenge);
                 Ok(ControlEvent::Challenge { ack })

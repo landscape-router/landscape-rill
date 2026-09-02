@@ -37,14 +37,20 @@ struct ChallengeState {
     eph_priv: [u8; 32],
     nonce: Vec<u8>,
     issued_at: u64,
+    /// 挑战绑定的身份（REQ-057）：发起时由触发 REGISTER 的 pubkey 解析——
+    /// 验证不信任 ACK 自报 node_id，以服务端存储为准（CP-02）
+    node_id: u32,
+    pubkey: [u8; 32],
 }
 
 impl ChallengeState {
-    fn new() -> Self {
+    fn new(node_id: u32, pubkey: [u8; 32]) -> Self {
         Self {
             eph_priv: rand::random::<[u8; 32]>(),
             nonce: rand::random::<[u8; 16]>().to_vec(),
             issued_at: unix_seconds(),
+            node_id,
+            pubkey,
         }
     }
 }
@@ -109,9 +115,16 @@ pub struct CoordinatorServer {
     pub(crate) register_lockout: HashMap<IpAddr, (u32, Instant)>,
     /// 心跳最小间隔（REQ-047，超频忽略）；测试可调（主机测试 300ms 心跳泵）
     pub heartbeat_min_interval: Duration,
+    /// e2e 故障注入（REQ-057）：武装后丢弃首个 REGISTER_RESPONSE——注册已
+    /// 消费、响应不写出并断连（ack 丢失模拟）；仅 run_coord 的 env 开关设置
+    pub(crate) drop_first_register_response: bool,
 }
 
 impl CoordinatorServer {
+    /// 武装 e2e 注入（REQ-057）：丢弃下一个成功的 REGISTER_RESPONSE
+    pub fn arm_drop_first_register_response(&mut self) {
+        self.drop_first_register_response = true;
+    }
     fn default_limiter() -> SourceRateLimiter {
         SourceRateLimiter::new(REGISTER_RATE_PER_SEC, REGISTER_CAPACITY)
     }
@@ -147,6 +160,7 @@ impl CoordinatorServer {
             register_limiter: Self::default_limiter(),
             register_lockout: HashMap::new(),
             heartbeat_min_interval: HEARTBEAT_MIN_INTERVAL,
+            drop_first_register_response: false,
         }
         .with_network("lab", master_key)
     }
@@ -184,6 +198,7 @@ impl CoordinatorServer {
             register_limiter: Self::default_limiter(),
             register_lockout: HashMap::new(),
             heartbeat_min_interval: HEARTBEAT_MIN_INTERVAL,
+            drop_first_register_response: false,
         };
         cfg.apply_to(&mut server.coordinator);
         Ok(server)
@@ -295,6 +310,19 @@ impl CoordinatorServer {
                         }
                         self.coordinator
                             .set_protocol_version(data.node_id, req.protocol_version);
+                        // e2e 故障注入（REQ-057）：注册已消费、响应丢弃并断连——
+                        // 客户端须走退避重连 + 挑战恢复（ack 丢失模拟）
+                        if self.drop_first_register_response {
+                            self.drop_first_register_response = false;
+                            tracing::warn!(
+                                "[coord] e2e injection: first REGISTER_RESPONSE dropped"
+                            );
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                "e2e: first register response dropped",
+                            )
+                            .into());
+                        }
                         let resp = RegisterResponse {
                             node_id: data.node_id,
                             network_id: data.network_id,
@@ -313,11 +341,12 @@ impl CoordinatorServer {
                         state.challenge = None;
                     }
                     Err(landscape_rill_core::control::registry::RegisterError::InvalidAuthKey) => {
-                        // 可能的重连：auth key 失效（一次性已消费）+ 公钥已知 → 挑战认证
-                        // （合法重连路径，不计失败锁定；锁定闸门在其之前已拦截）
+                        // 可能的重连/注册响应丢失恢复：auth key 失效（一次性已消费）
+                        // + 公钥已知 → 挑战认证（合法恢复路径，不计失败锁定；
+                        // 锁定闸门在其之前已拦截）
                         match self.coordinator.node_id_by_pubkey(&pubkey) {
-                            Some(_node_id) => {
-                                let ch = ChallengeState::new();
+                            Some(node_id) => {
+                                let ch = ChallengeState::new(node_id, pubkey);
                                 let msg = Challenge {
                                     eph_pub: Cow::Owned(
                                         x25519_dalek::PublicKey::from(
@@ -328,6 +357,7 @@ impl CoordinatorServer {
                                     ),
                                     nonce: Cow::Borrowed(&ch.nonce),
                                     issued_at: ch.issued_at,
+                                    node_id,
                                 };
                                 write_msg(stream, MsgType::CHALLENGE, &envelope_body(&msg)).await?;
                                 state.challenge = Some(ch);
@@ -357,14 +387,6 @@ impl CoordinatorServer {
             MsgType::CHALLENGE_ACK => {
                 let mut reader = BytesReader::from_bytes(body);
                 let ack = ChallengeAck::from_reader(&mut reader, body)?;
-                let node_id = ack.node_id;
-                let Some(entry_pub) = self.coordinator.static_pubkey_of(node_id) else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "unknown node in challenge ack",
-                    )
-                    .into());
-                };
                 let Some(ch) = state.challenge.as_ref() else {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
@@ -372,6 +394,24 @@ impl CoordinatorServer {
                     )
                     .into());
                 };
+                // 身份以挑战绑定的存储状态为准（REQ-057）：node_id 来自发起时
+                // pubkey 解析，不信任 ACK 自报；条目须仍存在且 pubkey 一致
+                // （吊销/重注册后旧挑战失效）
+                let node_id = ch.node_id;
+                let Some(entry_pub) = self.coordinator.static_pubkey_of(node_id) else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "unknown node in challenge ack",
+                    )
+                    .into());
+                };
+                if entry_pub != ch.pubkey {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "challenge pubkey mismatch",
+                    )
+                    .into());
+                }
                 let ok = landscape_rill_core::control::challenge::verify_tag(
                     &entry_pub,
                     &ch.eph_priv,
@@ -392,7 +432,22 @@ impl CoordinatorServer {
                 }
                 state.registered = Some(node_id);
                 self.coordinator.heartbeat(node_id, unix_seconds());
+                tracing::info!("[coord] challenge ok: node_id={node_id}");
                 let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
+                // 补发 REGISTER_RESPONSE（REQ-057）：注册响应丢失的客户端（Fresh
+                // 态）走既有注册处理链完成完整初始化（handshake ctx 等）；
+                // 重连客户端对同一 node_id 幂等
+                let resp = RegisterResponse {
+                    node_id,
+                    network_id,
+                    identity_binding: Cow::Owned(
+                        self.coordinator
+                            .identity_binding_of(node_id)
+                            .unwrap_or_default(),
+                    ),
+                    leader_redirect: None,
+                };
+                write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp)).await?;
                 self.push_snapshot(stream, network_id).await?;
                 state.challenge = None;
             }
@@ -540,6 +595,7 @@ impl Default for ConnectionState {
 mod tests {
     use super::*;
     use crate::control::client::{MeshClient, MeshLegConfig};
+    use crate::control::codec::envelope_bytes;
     use crate::control::codec::read_envelope;
     use crate::control::tls::{client_tls_stream, server_tls_stream};
     use crate::framing;
@@ -763,5 +819,224 @@ mod tests {
         assert!(r.is_err(), "超频心跳不应产生推送");
         drop(tls);
         let _ = server.await;
+    }
+
+    /// REQ-057：注册响应丢失（等价进程重启）→ Fresh 客户端重发已消费 key →
+    /// 挑战携带 node_id → 按消息 node_id 计算 tag → 验证通过补发
+    /// REGISTER_RESPONSE（同 node_id，完整初始化链）
+    #[tokio::test]
+    async fn register_ack_loss_challenge_recovery() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let master = [0x11; 32];
+        let seed = [0x22; 32];
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
+        let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
+            let mut server = CoordinatorServer::new(master, seed);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            server
+        }));
+        let cert_key = cert;
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            for _ in 0..2 {
+                let mut tls = server_tls_stream(&mut listener, &cert_key, &key)
+                    .await
+                    .unwrap();
+                let mut server = coordinator.lock().await;
+                let _ = server.handle_connection(&mut tls).await;
+            }
+        });
+        let host = addr.ip().to_string();
+
+        // 连接 1：正常注册消费 one-time key；客户端读走响应后丢弃会话
+        let mut tls1 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c1 = MeshClient::new([0x33; 32]);
+        let config = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x33; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls1, &c1.register_request(&config))
+            .await
+            .unwrap();
+        let (mt, _body) = read_envelope(&mut tls1).await.unwrap();
+        assert_eq!(mt, MsgType::REGISTER_RESPONSE);
+        drop(tls1);
+
+        // 连接 2：Fresh 客户端（同静态密钥 = ack 丢失/重启等价）重发同一已消费 key
+        let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c2 = MeshClient::new([0x33; 32]);
+        framing::write_frame(&mut tls2, &c2.register_request(&config))
+            .await
+            .unwrap();
+        let (mt2, body2) = read_envelope(&mut tls2).await.unwrap();
+        assert_eq!(mt2, MsgType::CHALLENGE);
+        let mut reader2 = BytesReader::from_bytes(&body2);
+        let ch = Challenge::from_reader(&mut reader2, &body2).unwrap();
+        assert_eq!(ch.node_id, 1, "挑战必须携带服务端解析的 node_id");
+        let ack = c2.challenge_ack(&ch);
+        framing::write_frame(&mut tls2, &ack).await.unwrap();
+        let (mt3, body3) = read_envelope(&mut tls2).await.unwrap();
+        assert_eq!(mt3, MsgType::REGISTER_RESPONSE, "挑战通过后补发注册响应");
+        let mut reader3 = BytesReader::from_bytes(&body3);
+        let resp = RegisterResponse::from_reader(&mut reader3, &body3).unwrap();
+        assert_eq!(resp.node_id, 1, "恢复保持原 node_id，无新注册");
+        assert_eq!(
+            resp.network_id,
+            landscape_rill_coord::domain::network_id_for("lab")
+        );
+        assert!(!resp.identity_binding.is_empty());
+        drop(tls2);
+        server.await.unwrap();
+    }
+
+    /// REQ-057：坏 tag → 挑战失败断连（持有证明不通过）
+    #[tokio::test]
+    async fn register_ack_loss_challenge_bad_tag_rejected() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
+        let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
+            let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            server
+        }));
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            for _ in 0..2 {
+                let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+                let mut server = coordinator.lock().await;
+                let _ = server.handle_connection(&mut tls).await;
+            }
+        });
+        let host = addr.ip().to_string();
+
+        let mut tls1 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c1 = MeshClient::new([0x33; 32]);
+        let config = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x33; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls1, &c1.register_request(&config))
+            .await
+            .unwrap();
+        let (mt, _) = read_envelope(&mut tls1).await.unwrap();
+        assert_eq!(mt, MsgType::REGISTER_RESPONSE);
+        drop(tls1);
+
+        let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c2 = MeshClient::new([0x33; 32]);
+        framing::write_frame(&mut tls2, &c2.register_request(&config))
+            .await
+            .unwrap();
+        let (mt2, body2) = read_envelope(&mut tls2).await.unwrap();
+        assert_eq!(mt2, MsgType::CHALLENGE);
+        let mut reader2 = BytesReader::from_bytes(&body2);
+        let ch = Challenge::from_reader(&mut reader2, &body2).unwrap();
+        let bad = ChallengeAck {
+            node_id: ch.node_id,
+            tag: Cow::Owned(vec![0u8; 32]),
+        };
+        framing::write_frame(&mut tls2, &envelope_bytes(MsgType::CHALLENGE_ACK, &bad))
+            .await
+            .unwrap();
+        let r = read_envelope(&mut tls2).await;
+        assert!(r.is_err(), "坏 tag 必须断连");
+        drop(tls2);
+        server.await.unwrap();
+    }
+
+    /// REQ-057：已消费 key + 不同 pubkey → unknown pubkey 拒绝（tombstone
+    /// 对第二身份语义不变，persist 场景阶段 4 断言保持）
+    #[tokio::test]
+    async fn register_consumed_key_different_pubkey_rejected() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
+        let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
+            let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            server
+        }));
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            for _ in 0..2 {
+                let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+                let mut server = coordinator.lock().await;
+                let _ = server.handle_connection(&mut tls).await;
+            }
+        });
+        let host = addr.ip().to_string();
+
+        let mut tls1 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c1 = MeshClient::new([0x33; 32]);
+        let config1 = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x33; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls1, &c1.register_request(&config1))
+            .await
+            .unwrap();
+        let (mt, _) = read_envelope(&mut tls1).await.unwrap();
+        assert_eq!(mt, MsgType::REGISTER_RESPONSE);
+        drop(tls1);
+
+        // 不同静态密钥的身份复用同一 key：不得进入挑战分支
+        let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c2 = MeshClient::new([0x44; 32]);
+        let config2 = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x44; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls2, &c2.register_request(&config2))
+            .await
+            .unwrap();
+        let r = read_envelope(&mut tls2).await;
+        assert!(r.is_err(), "unknown pubkey 必须断连");
+        drop(tls2);
+        server.await.unwrap();
     }
 }

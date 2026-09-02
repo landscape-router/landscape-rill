@@ -660,6 +660,13 @@ impl Coordinator {
             .map(|e| e.static_pubkey)
     }
 
+    /// 身份绑定签名（REQ-057：挑战通过后补发 REGISTER_RESPONSE 用）
+    pub fn identity_binding_of(&self, node_id: u32) -> Option<Vec<u8>> {
+        self.domain_of_node(node_id)
+            .and_then(|d| d.registry.entry(node_id))
+            .map(|e| e.identity_binding.clone())
+    }
+
     pub fn verifier(&self) -> ed25519_dalek::VerifyingKey {
         self.signer.verifier()
     }
