@@ -436,15 +436,19 @@ impl CoordinatorServer {
                 let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
                 // 补发 REGISTER_RESPONSE（REQ-057）：注册响应丢失的客户端（Fresh
                 // 态）走既有注册处理链完成完整初始化（handshake ctx 等）；
-                // 重连客户端对同一 node_id 幂等
+                // 重连客户端对同一 node_id 幂等。条目校验刚通过，binding 缺失
+                // 属不变量破坏——fail-closed 而非空绑定静默降级
+                let Some(identity_binding) = self.coordinator.identity_binding_of(node_id) else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "challenge entry binding missing",
+                    )
+                    .into());
+                };
                 let resp = RegisterResponse {
                     node_id,
                     network_id,
-                    identity_binding: Cow::Owned(
-                        self.coordinator
-                            .identity_binding_of(node_id)
-                            .unwrap_or_default(),
-                    ),
+                    identity_binding: Cow::Owned(identity_binding),
                     leader_redirect: None,
                 };
                 write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp)).await?;

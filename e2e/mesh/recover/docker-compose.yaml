@@ -40,8 +40,6 @@ services:
       context: ../..
       dockerfile: Dockerfile
     container_name: mesh-node-b
-    environment:
-      - RUST_LOG=debug
     privileged: true
     devices:
       - /dev/net/tun
