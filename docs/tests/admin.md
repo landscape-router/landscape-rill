@@ -76,9 +76,9 @@
 
 - 关联 REQ：REQ-051
 - 测试层：单测 + docker e2e
-- 状态：`待补充`
-- 证据：—
-- 说明：无密码/错密码 → 401；同源高频错密码 → 429（按源限速）；SIGHUP 轮换密码旧拒新通；https 可达、明文 HTTP 被拒；快照方法与 coord 内存态一致（多网络/离线节点/一次性 key 已消费分支）；`status` 启用而密码哈希缺失/非法 → 拒绝启动；红线：密钥材料只出"已配置 + 指纹"
+- 状态：`已覆盖`
+- 证据：rill-coord/src/status.rs、rill-coord/src/coordinator/tests.rs、e2e/scenarios/status.sh
+- 说明：无密码/错密码 → 401；同源高频错密码 → 429（按源限速）；SIGHUP 轮换密码旧拒新通；https 可达、明文 HTTP 被拒；快照方法与 coord 内存态一致（多网络/离线节点/一次性 key 已消费分支）；`status` 启用而密码哈希缺失/非法 → 拒绝启动；红线：密钥材料只出"已配置 + 指纹"。CI：e2e-mesh status（run 33697089991）
 
 #### 验收断言（文件尾部汇总）
 
@@ -88,7 +88,7 @@
 - [x] ADM-04：`lrk-<network>-<base32>` 生成/解析/校验正确；非 lrk 前缀与 network 不匹配被拒；生成不落日志
 - [x] ADM-05：reusable 带 expires_at 过期即 InvalidAuthKey；onetime 注册即弃；配置移除 + 重载 = 吊销闭环
 - [ ] ADM-06：`lrill --help` 展示 pubkey/run/authkey/up/down/status；up/down/status 走 systemctl；无 systemd 明确报错提示 `lrill run`；Dockerfile ENTRYPOINT = `lrill run`（部分未自动化）
-- [ ] ADM-07：状态端点认证/限速/轮换/快照一致性 + fail-closed（REQ-051）
+- [x] ADM-07：状态端点认证/限速/轮换/快照一致性 + fail-closed（REQ-051，状态：`已覆盖`）
 - [x] LOG-01：RUST_LOG 级别生效性（debug 明细出现 / 默认 info 不出现）；CLI > env > 默认优先级
 - [x] LOG-02：RateCounter 周期语义（tick 计数 / poll 周期返回并清零 / 0 不输出）；丢帧 per-peer 归因 + 伪造 node_id 落全局桶；摘要 ≤1 条/s
 - [x] LOG-03：--log-file 按天轮转 + 保留上限 + stderr 双写
