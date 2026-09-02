@@ -87,10 +87,9 @@
 
 - 关联 REQ：REQ-054
 - 测试层：单测 + docker e2e（`MESH_E2E_TRANSPORT=tcp`）
-- 状态：`待补充`
-- 证据：—
-- 缺口：场景入账后随 CI 绿标定
-- 说明：报文语义 trait（`send_frame/recv_frame/local_endpoint`）+ 裸 UDP/真 TCP 两档；帧字节跨传输一致（UDP 裸帧 / TCP 2B 前缀，帧/probe 首字节分类共存）；relay 转发端点统一 `order_endpoints` 择优（v1/v2 分支）；TCP send 失败回喂端点 miss；TCP 全栈握手/数据/probe 单测 + e2e tcp 直连场景
+- 状态：`已覆盖`
+- 证据：rill-mesh/src/data/transport.rs、rill-mesh/src/data/tests.rs、rill-mesh/src/data/relay.rs、e2e/setup.sh
+- 说明：报文语义 trait + UDP/TCP 两档；帧字节断言 `udp_datagram_is_bare_frame_bytes` / `tcp_wire_is_length_prefixed_frame_bytes`；TCP 全栈 `tcp_underlay_handshake_data_and_probe`；relay 择优 `relay_v1_forward_prefers_healthy_endpoint` / `relay_v2_forward_prefers_healthy_endpoint`；断线回喂 `tcp_send_failure_feeds_endpoint_miss`；e2e tcp 直连双栈收敛
 
 ## 验收断言
 
@@ -104,4 +103,4 @@
 - [x] CON-08：帧/probe/乱入字节分派正确（首字节分派 + fail-closed）
 - [ ] CON-09：普通节点不持有远端端点（v2）
 - [x] CON-10：强制限速默认开启、指数退避、并发上限收敛（CN-01 三复核点）
-- [ ] CON-11：TCP 兜底档直连收敛、帧字节跨传输一致、relay 择优、断线回喂（REQ-054）
+- [x] CON-11：TCP 兜底档直连收敛、帧字节跨传输一致、relay 择优、断线回喂（REQ-054）
