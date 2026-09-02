@@ -90,9 +90,9 @@
 
 - 关联 REQ：REQ-058
 - 测试层：单测
-- 状态：`待补充`
-- 证据：—
-- 缺口：吊销后以重编码/变形签名绑定尝试入网 → 拒绝语义不变（吊销按 node_id 生效，与编码无关）；pubkey 单字节翻转查无；换 signer 重签 binding 不影响身份解析与幂等判定
+- 状态：`已覆盖`
+- 证据：rill-core/src/control/registry.rs
+- 说明：单测 identity_lookup_uses_raw_pubkey_bytes（pubkey 单字节翻转查无，binding 锚定原始字节）+ binding_bytes_not_a_registry_key（换 signer 重签 binding 不影响身份解析与幂等判定；吊销按 node_id 生效，原/重编码绑定一律查无）——吊销键 = node_id，与编码无关
 
 ## 验收断言
 
@@ -106,4 +106,4 @@
 - [ ] SEC-19：畸形消息不 panic、单连接隔离（fuzz 待补；限速断连已闭环）
 - [x] SEC-20：错误 auth key 限速锁定且无信息泄露（递增锁定 + 统一措辞 InvalidAuthKey）
 - [x] SEC-29：连接级限速断连、心跳超频忽略、PathRequest pending 上限（REQ-047）
-- [ ] SEC-30：重编码绑定无法绕过吊销（键规范化，REQ-058）
+- [x] SEC-30：重编码绑定无法绕过吊销（键规范化，REQ-058）
