@@ -18,7 +18,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: rustc version
         id: rustc
@@ -31,7 +31,7 @@ jobs:
       # 源码变更不失效（cargo 指纹保证增量重编正确性）；同键已存在时 save 为 no-op
       - name: Restore cargo cache
         id: cargo-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo
@@ -43,13 +43,13 @@ jobs:
       # 仅在键不存在（首次/失效后）时写入新条目
       - name: Save cargo cache
         if: steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cargo
             target
           key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ steps.week.outputs.iso }}-${{ hashFiles('**/Cargo.lock') }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lrill
           path: target/release/lrill
@@ -63,8 +63,8 @@ jobs:
       matrix:
         scenario: [direct, relay, persist, log, reload, tenancy, probe, recover]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: lrill
           # 注意：setup.sh 开头 cleanup 会清 build/，产物须放 .cache/（cleanup 不碰）

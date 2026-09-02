@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: rustc version
         id: rustc
@@ -27,7 +27,7 @@ jobs:
         run: echo "iso=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
       # 与 e2e-mesh.yml 同键共享编译 cache（内容键说明见彼处）
       - name: Restore cargo cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo
