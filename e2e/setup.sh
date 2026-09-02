@@ -32,6 +32,11 @@ elif [ "$SCENARIO" = "tenancy" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/tenancy/docker-compose.yaml"
 elif [ "$SCENARIO" = "probe" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/probe/docker-compose.yaml"
+elif [ "$SCENARIO" = "iperf" ]; then
+  # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
+  if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
+    COMPOSE="docker compose -f $E2E_DIR/mesh/relay/docker-compose.yaml"
+  fi
 fi
 
 echo "==> 0/6 预置 base 镜像（iproute2/iputils-ping；环境 DNS 受限需 --dns 引导）"
@@ -40,7 +45,7 @@ E2E_DNS="${MESH_E2E_DNS:-$(awk '$1=="nameserver" && $2 !~ /^(127\.|::1$)/{print 
 if ! docker image inspect mesh-e2e-base >/dev/null 2>&1; then
   docker run --dns "$E2E_DNS" debian:trixie-slim sh -c \
     "apt-get update && apt-get install -y --no-install-recommends \
-       iproute2 iputils-ping ca-certificates && rm -rf /var/lib/apt/lists/*"
+       iproute2 iputils-ping iperf3 ca-certificates && rm -rf /var/lib/apt/lists/*"
   docker commit "$(docker ps -lq)" mesh-e2e-base
 fi
 
@@ -268,7 +273,7 @@ with open(path, "w") as f:
 PYEOF
 fi
 
-if [ "$SCENARIO" = "relay" ]; then
+if [ "$SCENARIO" = "relay" ] || { [ "$SCENARIO" = "iperf" ] && [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; }; then
   # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，
   # 否则 docker 网桥自身路由会命中；ip route get 命中默认路由不可用）
   if ip route show 192.168.240.0/24 | grep -q . || ip route show 192.168.241.0/24 | grep -q .; then
@@ -286,6 +291,14 @@ if [ "$SCENARIO" = "persist" ] || [ "$SCENARIO" = "reload" ] || [ "$SCENARIO" = 
 fi
 $COMPOSE up -d --force-recreate
 
+# 资源约束（docs/perf.md §2.2）：cpuset 绑核（不用 --cpus CFS 配额）
+if [ -n "${MESH_E2E_CPUS:-}" ]; then
+  echo "==> 资源约束：全部容器 cpuset=${MESH_E2E_CPUS}"
+  for c in $(docker ps --filter name=mesh- --format '{{.Names}}'); do
+    docker update --cpuset-cpus "$MESH_E2E_CPUS" "$c" >/dev/null
+  done
+fi
+
 echo "==> 6/6 等待注册 + 注入 mesh 路由/黑洞（场景: $SCENARIO）"
 for _ in $(seq 1 30); do
   docker logs mesh-coord 2>/dev/null | grep -q "listening" && break
@@ -295,7 +308,10 @@ sleep 3
 
 # 内核最小参与：mesh 前缀 → tun0（生产由 runtime 自动注入）
 # direct 场景：a↔b；relay 场景：a↔c（经 b 中继）；tenancy 场景：a1↔a2、b1↔b2（组内）
-if [ "$SCENARIO" = "relay" ]; then
+# iperf 场景路由随 MESH_E2E_TOPOLOGY（direct 同 direct；relay 同 relay）
+ROUTE_TOPO="$SCENARIO"
+if [ "$SCENARIO" = "iperf" ]; then ROUTE_TOPO="${MESH_E2E_TOPOLOGY:-direct}"; fi
+if [ "$ROUTE_TOPO" = "relay" ]; then
   docker exec mesh-node-a ip route add 10.44.0.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-c ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-a ip -6 route add fd00:4::/64 dev land0 2>/dev/null || true

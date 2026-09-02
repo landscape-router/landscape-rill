@@ -56,7 +56,9 @@ node-C 容器 ──┘
 
 | 脚本 | 覆盖 | 前置条件 |
 |---|---|---|
-| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist\|log\|reload\|tenancy\|probe`（默认 direct） | docker + compose 构建 |
+| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist\|log\|reload\|tenancy\|probe\|iperf`（默认 direct） | docker + compose 构建 |
+
+`iperf` 场景（性能基准 L4，见 [../perf.md](../perf.md)）：TUN 隧道 iperf3 双向吞吐，PASS 只判退出码（数值记录 perf.md，不设阈值）。环境变量：`MESH_E2E_TOPOLOGY=relay` 用线形拓扑（经中继，转发优化最灵敏配置）；`MESH_E2E_CPUS=0` 全容器 cpuset 绑单核（资源约束约定见 perf.md §2.2）。
 | `e2e/setup.sh` | 初始化：base 镜像/CA/密钥/编译/配置/构建启动/路由与黑洞注入；幂等（开头强制 `cleanup.sh`） | 同上 |
 | `e2e/cleanup.sh` | 幂等清理：全部 mesh 场景容器/网络 + `build/`（可重复执行） | 同上 |
 | `e2e/p0_tailscale/run_p0.sh` | P0 过渡验证（headscale + 官方客户端入网 + WG 直连） | docker，GitHub/pkgs 可达 |
