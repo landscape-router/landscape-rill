@@ -158,5 +158,7 @@
   - relay docker e2e：a—b—c 线形（b 双网卡，a↔c 无直连可达性），直连候选 miss → 快速切换经 b 中继建立会话 + 数据双向（e2e/mesh/relay/，b 日志 relayed frame 为证据）
 - [x] CTL-16：coordinator 持久化——单测（roundtrip 恢复/一次性 key 消费存活/node_id+path_id 单调/损坏与不一致 fail-closed/重载不复活）+ docker e2e（coord 重启 → a↔b 恢复、node-c 挑战重连无新注册、node-d 复用已消费 key 被拒，e2e/mesh/persist/）
 - [x] CTL-17：auth key 内嵌过期——parse 层（格式/过期段/永不过期/时长解析）+ 注册时（admission）过期 key 拒绝 + 非 lrk 格式 fail-closed + 未过期注册不受影响 + `lrill authkey --ttl` 默认 24h
-- [ ] CTL-18：控制面重连退避（REQ-056）——单测：连上即断 → 重连间隔 ≥1s；Registered 后断线退避重置；指数增长封顶 300s；退避分片期间失败摘要持续输出。e2e recover 场景断言重连间隔 ≥1s
-- [ ] CTL-19：注册响应丢失挑战恢复（REQ-057）——单测：Fresh 态（无 node_id）收带 node_id 的 Challenge → tag 正确 + RegisterOk 写入会话；服务端按存储 pubkey 解析身份验证（坏 tag / 窗口外拒绝）；同 key 异 pubkey 仍拒（unknown pubkey，锁定计数路径不变）；进程重启后同 key 恢复。e2e recover：coord 注入丢弃首个 REGISTER_RESPONSE → 退避重连 → 挑战恢复拿到原 node_id → mesh 收敛无新注册
+- [x] CTL-18：控制面重连退避（REQ-056）——单测：连上即断 → 重连间隔 ≥1s；Registered 后断线退避重置；指数增长封顶 300s；退避分片期间失败摘要持续输出。e2e recover 场景断言重连间隔 ≥1s
+  - 证据：rill-node/src/runtime/reconnect.rs（3 单测）、e2e/mesh/recover/（间隔 ≥900ms 断言过）、CI e2e-mesh recover（run 33668466083）
+- [x] CTL-19：注册响应丢失挑战恢复（REQ-057）——单测：Fresh 态（无 node_id）收带 node_id 的 Challenge → tag 正确 + RegisterOk 写入会话；服务端按存储 pubkey 解析身份验证（坏 tag / 窗口外拒绝）；同 key 异 pubkey 仍拒（unknown pubkey，锁定计数路径不变）；进程重启后同 key 恢复。e2e recover：coord 注入丢弃首个 REGISTER_RESPONSE → 退避重连 → 挑战恢复拿到原 node_id → mesh 收敛无新注册
+  - 证据：rill-mesh/src/control/server.rs（ack-loss 恢复/坏 tag/异 pubkey 三单测）、e2e/mesh/recover/、persist 阶段 3 挑战证据断言、CI e2e-mesh recover+persist（run 33668466083）
