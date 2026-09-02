@@ -1648,3 +1648,63 @@ async fn v2_relay_forwards_via_forward_table() {
     let (n, _) = dest.recv_from(&mut buf).await.unwrap();
     assert_eq!(&buf[..n], &frame[..]);
 }
+
+#[tokio::test]
+async fn relay_owner_map_disambiguates_fallback_endpoints() {
+    // probe e2e 复现：中继兜底端点并入多个 peer 候选列表（apply_relay_endpoints）
+    // 后，按地址扫描归属会把经 d 中继到达的帧归给死中继 b（端点出现在 b 的
+    // 列表里）→ apply_ingress_health 永远 ok 经 b 的路径 → 回包持续选中死路径。
+    // 修复：netmap relay 列表的 node_id 构成精确归属表，反查优先命中。
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let mut d = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+        .await
+        .unwrap();
+    let d_ep = d.local_addr().unwrap();
+    d.set_endpoint(1, a.local_addr().unwrap());
+    // 污染形态：死中继 b(4) 的候选列表混入 d 的兜底端点；d(2) 自己的表也含它
+    a.set_endpoints(4, vec![d_ep]);
+    a.set_endpoints(2, vec![d_ep]);
+    a.set_relay_owners(HashMap::from([(d_ep, 2)]));
+    a.set_key_dst(1, node_key(1));
+    let direct = PathEntry {
+        path_id: 10,
+        path_epoch: 1,
+        hops: vec![3],
+        expires_at: unix_seconds() + 3600,
+    };
+    let via_dead = PathEntry {
+        path_id: 11,
+        path_epoch: 1,
+        hops: vec![4, 3],
+        expires_at: unix_seconds() + 3600,
+    };
+    let via_d = PathEntry {
+        path_id: 12,
+        path_epoch: 1,
+        hops: vec![2, 3],
+        expires_at: unix_seconds() + 3600,
+    };
+    a.set_key_path(10, path_key(10));
+    a.set_key_path(11, path_key(11));
+    a.set_key_path(12, path_key(12));
+    a.set_paths(3, vec![direct, via_dead, via_d]);
+    // 归属反查：经 d 到达的帧必须归到 d（2），不能因污染列表归给 b（4）
+    assert_eq!(a.endpoint_owner_preferring(d_ep, 3), Some(2));
+    assert_eq!(a.endpoint_owner(d_ep), Some(2));
+    // c(3) 的帧连续经 d 到达 → 直连/经 b 路径 miss 达阈值剔除，仅剩经 d 路径
+    let header = MeshFrameHeader {
+        to_node_id: 1,
+        from_node_id: 3,
+        ..Default::default()
+    };
+    let frame = build_handshake_frame(&header, &node_key(1), &[0u8; MSG1_PAYLOAD_LEN]);
+    for _ in 0..PATH_HEALTH_MISS_LIMIT {
+        d.send_to_node(1, &frame).await.unwrap();
+        let _ = a.handle_incoming().await.unwrap();
+    }
+    assert_eq!(a.pick_path(3, 0).unwrap().path_id, 12);
+    // 经 d 路径保持健康（到达即 ok），不经 miss 重置
+    assert_eq!(a.pick_path(3, u64::MAX).unwrap().path_id, 12);
+}

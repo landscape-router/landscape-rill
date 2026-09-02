@@ -115,6 +115,11 @@ pub struct MeshData {
     /// 上次对该发送目标实际选用的路径（pick_path 记录；心跳 miss 定位用——
     /// 非主路径死亡时主路径 miss 不触发切换，CON-06 故障切换）
     last_sent_path: HashMap<u32, u64>,
+    /// 中继端点精确归属：端点 → 中继节点（netmap relay 列表权威下发）。
+    /// 中继兜底端点会并入多个 peer 的发送候选列表（apply_relay_endpoints），
+    /// 按地址反查归属会命中第三方列表而误判——ingress 归因/活性降级
+    /// 必须以此表为准（端点表扫描只兜底非中继端点）
+    relay_endpoint_owner: HashMap<SocketAddr, u32>,
     /// per-peer 丢帧计数（LOGGING §5：周期摘要；仅已知 peer，防伪造 node_id 膨胀）
     drop_stats: HashMap<u32, RateCounter>,
     /// 全局丢帧计数（未知节点/畸形包，无 peer 可归因）
@@ -234,6 +239,7 @@ impl MeshData {
             endpoint_health: HashMap::new(),
             last_sent_endpoint: HashMap::new(),
             last_sent_path: HashMap::new(),
+            relay_endpoint_owner: HashMap::new(),
             drop_stats: HashMap::new(),
             drop_stats_global: RateCounter::new(DROP_STATS_PERIOD),
             probe_pending: HashMap::new(),

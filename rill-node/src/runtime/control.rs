@@ -249,6 +249,15 @@ impl Node {
             })
             .collect();
         self.relays = new_relays;
+        // 中继端点精确归属（ingress 归因/活性降级用）：netmap 权威全量替换。
+        // 兜底端点并入多个 peer 候选列表后按地址扫描会误判归属，
+        // 必须以 relay 列表自带的 node_id 为准
+        let relay_owners: HashMap<SocketAddr, u32> = self
+            .relays
+            .iter()
+            .filter_map(|r| r.node_id.map(|id| (r.endpoint, id)))
+            .collect();
+        self.mesh.set_relay_owners(relay_owners);
         if !self.relays.is_empty() {
             debug!("[node] relay candidates: {:?}", self.relays);
         }

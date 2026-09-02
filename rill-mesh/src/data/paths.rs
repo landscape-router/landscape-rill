@@ -146,8 +146,19 @@ impl MeshData {
         }
     }
 
-    /// 端点归属反查：UDP 发送者地址 → 节点（NAT 改写等未匹配场景 = None）
+    /// 中继端点归属注入（netmap relay 列表权威全量替换；runtime apply_netmap 调用）
+    pub fn set_relay_owners(&mut self, owners: HashMap<SocketAddr, u32>) {
+        self.relay_endpoint_owner = owners;
+    }
+
+    /// 端点归属反查：UDP 发送者地址 → 节点（NAT 改写等未匹配场景 = None）。
+    /// 中继端点以权威归属表为准——兜底端点并入了多个 peer 的候选列表，
+    /// 扫描端点表会命中第三方列表（PROBE 复现：经 d 中继的帧被归给死中继 b，
+    /// apply_ingress_health 永远 ok 经 b 的路径 → 回包黑洞不收敛）
     pub(super) fn endpoint_owner(&self, addr: SocketAddr) -> Option<u32> {
+        if let Some(&id) = self.relay_endpoint_owner.get(&addr) {
+            return Some(id);
+        }
         self.endpoint_table
             .iter()
             .find_map(|(id, addrs)| addrs.contains(&addr).then_some(*id))
@@ -158,6 +169,11 @@ impl MeshData {
     /// （HashMap 遍历序不定）——经中继到达的帧必须归到中继名下，
     /// 否则误判直连、活性降级失效
     pub(super) fn endpoint_owner_preferring(&self, addr: SocketAddr, pref_not: u32) -> Option<u32> {
+        if let Some(&id) = self.relay_endpoint_owner.get(&addr) {
+            if id != pref_not {
+                return Some(id);
+            }
+        }
         let mut fallback = None;
         for (id, addrs) in &self.endpoint_table {
             if addrs.contains(&addr) {
