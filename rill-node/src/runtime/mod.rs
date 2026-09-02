@@ -389,6 +389,11 @@ impl Node {
                 // 路径活性联动（v1.5）：miss 累计 → 主路径健康下降 → pick_path 切备用
                 self.mesh.path_miss_peer(peer);
                 self.mesh.miss_endpoint(peer);
+                debug!(
+                    "[node] path health for {}: {:?}",
+                    peer,
+                    self.mesh.path_health_snapshot(peer)
+                );
                 if let Ok(frame) = self.mesh.build_heartbeat_frame(peer) {
                     // 心跳帧同样走路径首跳（会话经 relay 建立后保活同路径）
                     let hop = self.mesh.path_first_hop(peer);

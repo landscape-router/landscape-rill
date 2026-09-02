@@ -2,6 +2,7 @@
 //! 端点/路径下一跳查表 → ttl 递减转发（不重签 route_mac）
 
 use super::*;
+use tracing::debug;
 
 impl MeshData {
     pub async fn relay(&mut self, frame: &mut [u8]) -> RelayOutcome {
@@ -89,6 +90,7 @@ impl MeshData {
         decrement_ttl(frame);
         for addr in candidates {
             if self.wan_send(&frame[..], addr).await.is_ok() {
+                debug!("[mesh] relay to {} via {}", header.to_node_id, addr);
                 return RelayOutcome::Forwarded {
                     to: header.to_node_id,
                 };

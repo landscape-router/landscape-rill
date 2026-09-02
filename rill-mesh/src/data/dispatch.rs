@@ -2,6 +2,7 @@
 //! 送达分发（握手/数据/心跳/广播）、probe 收发、丢帧统计
 
 use super::*;
+use tracing::debug;
 
 impl MeshData {
     /// 收帧处理（CONNECTIVITY §2.1 端口分派）：首字节 0x01..=0x0F → 34B 帧；
@@ -120,6 +121,7 @@ impl MeshData {
                 if let Some(ingress) = self.endpoint_owner_preferring(from_addr, from) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
+                    debug!("[mesh] frame from {} ingress {}", from, ingress);
                     // v1 直连活性推断（与 v2 apply_ingress_health 同哲学）：
                     // 帧经中继到达 = 发送方直连端点不可达的入站证据 → 直连端点
                     // miss，后续发送排序让位中继兜底端点（纯响应侧无发起重试，
@@ -141,6 +143,7 @@ impl MeshData {
                 if let Some(ingress) = self.endpoint_owner(from_addr) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
+                    debug!("[mesh] frame from {} ingress {}", from, ingress);
                 }
                 self.apply_ingress_health(from);
                 let ev = self.dispatch_delivered(from, frame).await;

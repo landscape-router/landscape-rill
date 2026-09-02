@@ -151,6 +151,24 @@ impl MeshData {
         self.relay_endpoint_owner = owners;
     }
 
+    /// 路径健康快照（观测用）：dest 候选路径的 (path_id, miss) 列表
+    pub fn path_health_snapshot(&self, dest: u32) -> Vec<(u64, u32)> {
+        self.path_table
+            .get(&dest)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.path_id,
+                            self.path_health.get(&p.path_id).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 端点归属反查：UDP 发送者地址 → 节点（NAT 改写等未匹配场景 = None）。
     /// 中继端点以权威归属表为准——兜底端点并入了多个 peer 的候选列表，
     /// 扫描端点表会命中第三方列表（PROBE 复现：经 d 中继的帧被归给死中继 b，
