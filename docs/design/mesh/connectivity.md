@@ -2,7 +2,7 @@
 
 > 端点发现、直连验证、中继兜底——mesh 接入的"DERP 等价物"专题。
 > 34B 帧头的转发语义见 FRAME_HEADER；端点传播进 netmap 见 CONTROL_PLANE §3.2。
-> 版本：v0.4（2026-09-01 修订：REQ-046——§4.3 probe 限速升级为强制 + 发送侧指数退避/并发上限、PONG 生成按源限速）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046
+> 版本：v0.5（2026-09-02 修订：REQ-059——§2.1 认证前最小解析/资源分配后置纪律显式化）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-059
 
 ## 1. 问题与目标
 
@@ -29,6 +29,8 @@
 - 其余 → probe（首 4B 匹配 `magic`，§4.2）；不匹配两者 → 丢弃
 
 分派规则在 XDP/用户态转发入口统一实现。**解析 fail-closed（强制要求）**：所有网络输入（帧头/载荷/probe/握手消息）解析**禁止 panic/unwrap**，长度严格校验，非法输入一律丢弃——这是防 panic DoS 的实现安全基线（验证见 [tests/security/](../../tests/security/README.md)）。
+
+**预认证解析纪律（REQ-059，FRAME_HEADER §5.1 同规则）**：分派与 probe 头解析属"固定头字段级别"——这是认证（route_mac / AEAD / 握手）通过前允许的全部解析；probe 载荷定长上限（128B，超长丢弃），任何富结构反序列化都不得发生在认证之前。资源分配后置：PONG 回包按源限速（§4.3）、在途探测表硬上限（§4.3 CN-01）、认证失败路径除读缓冲外零持久分配。限速（REQ-046）管速率，本规则管时机，互不替代；预认证解析入口纳入 fuzz 语料验收（SEC-08）。
 
 ### 2.2 反射放大防护（coordinator 回显）
 
@@ -113,6 +115,7 @@ probe 无认证为有意设计（会话建立前无认证链可用，§4.2），
 
 | 日期 | 决策 |
 |---|---|
+| 2026-09-02 | **REQ-059：预认证解析纪律显式化（§2.1）**：分派与 probe 头解析 = 认证前允许的全部解析（固定头字段级别，probe 载荷 128B 上限）；资源分配后置（PONG 按源限速、在途表上限、认证失败零持久分配）；与 REQ-046 限速叠加（速率 vs 时机）；fuzz 语料验收（SEC-08）。实现已满足，规则由隐式升级为显式（lessons CN-05） |
 | 2026-09-01 | **REQ-046：probe 强制限速/退避（§4.3 "可选限速" → 强制，落实 CN-01）**：①**发送侧三件套**（rill-node runtime/probe.rs）：全局令牌桶 10/s 突发 20（桶空本轮不发）+ 每端点指数退避（周期开始 drain 在途探测，仍 pending = 上轮无响应 → miss+1 → `30s×2^miss` 封顶 300s；PONG 确认清零）+ 在途并发上限 64（rill-mesh `send_probe_ping` 超限拒绝，替换原 1024 清空）；②**PONG 生成按源限速**（SEC-26 节点侧，rill-mesh dispatch `pong_limiter`）：10/s 突发 20，与 coordinator 回显同值；③`EchoLimiter` 泛化为 rill-core `SourceRateLimiter`（echo 与 PONG 共用，后续 REQ-047 Register 按源限速同源复用） |
 | 2026-08-15 | 端点探测 = coordinator UDP 回显（STUN 式，零额外组件）；直连 v1 = 简单互探（专用 probe 小包）+ 中继兜底，不做对称 NAT 打洞；中继 = 三层模型（coordinator 兜底 + 自愿节点 opt-in 扩容 + 独立 relay 可选），全部零协议改动 |
 | 2026-09-01 | **probe 体系实现落档（CON-01/03/04/05/06/08 + SEC-26）**：①**probe 线格式**（rill-core/src/probe.rs）：`magic("LPRB") + type(PING/PONG) + from_node_id + to_node_id + nonce`，`to_node_id=0` = coordinator 回显标记；PONG 可携带载荷（echo 的 seen 地址 "ip:port"）；解析 fail-closed（CN-02）；②**端口分派**（data.rs handle_incoming）：首字节 `0x01..=0x0F` → 34B 帧，magic 匹配 → probe，都不匹配 → 丢弃；③**coordinator UDP 数据面**（rilld run_coord_udp，默认与 TCP 同端口）：echo（按源 IP 令牌桶 10/s 突发 20，SEC-26）+ relay RTT 排序（30s 周期向各网 relay 端点 PING 测 RTT → relay_list 排序随 netmap 下发 + PathService relay 顺序 = 挂靠优先级）；④**节点侧**（runtime pump_probes，30s 周期）：echo（结果并入 EndpointReport 重报）+ 对全部 peer 候选端点互探（PONG 匹配 → 端点活性恢复）+ relay 探测（确认 → `apply_relay_endpoints`：v1 帧端点表 = 直连 ++ 确认中继，miss 轮转回落）；⑤**CON-06 故障切换修复**：心跳 miss 同时落到**实际选用路径**（`last_sent_path`——只 miss 主路径时在用中继死亡会卡死）+ 全候选 miss 耗尽时按 miss 升序选（最不坏优先，收包恢复闭环）；⑥echo 目标 = coordinator_url 推导（host:port 允许主机名，每周期 DNS 解析），可用 `udp_echo_addr` 显式覆盖 |

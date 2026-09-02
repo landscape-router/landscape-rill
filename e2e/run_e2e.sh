@@ -13,6 +13,10 @@
 #   recover：注册响应丢失恢复（REQ-056/057）——coord 注入丢弃首个 REGISTER_RESPONSE →
 #            node-a（一次性 key）退避 ≥1s 重连 → 挑战恢复原 node_id（无新注册）→
 #            node-b 正常注册 → a↔b 双栈通
+#   preauth_flood：预认证洪泛（REQ-059/SEC-08）——宿主向 node-a 数据面灌 UDP 垃圾
+#            （随机/变形帧头/probe 全 type）、向 coord:8443 灌裸 TCP 垃圾 + TLS 后
+#            超长帧/垃圾信封/REGISTER 垃圾消息体 → 三容器存活不 panic、node-a 丢帧
+#            摘要出现（fail-closed）、洪泛后 b→a 双栈 ping 收敛（已认证流量不受影响）
 #   iperf ：性能场景（docs/perf.md §2.4）——TUN 隧道 iperf3 双向吞吐；
 #           MESH_E2E_TOPOLOGY=relay 用线形拓扑（经中继），MESH_E2E_CPUS=0 全容器绑单核
 # 环境变量 MESH_E2E_TRANSPORT（默认 udp，REQ-054）：=tcp 时数据面走真 TCP 兜底档

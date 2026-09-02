@@ -472,6 +472,78 @@ async fn unknown_protocol_dropped() {
     ));
 }
 
+/// 预认证分派语料（REQ-059 / SEC-08，CONNECTIVITY §2.1 / FRAME_HEADER §5.1）：
+/// 全首字节值域 + probe 全 type 值域 + 随机洪泛——收端只产出合法事件、不 panic
+#[tokio::test]
+async fn preauth_dispatch_fuzz_corpus() {
+    let mut node = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+
+    // 全首字节值域：0x01..=0x0F 走帧路径（Version/Short/NoKeyDst 拒绝，非 UnknownProtocol），
+    // 其余非 magic → UnknownProtocol
+    for first in 0..=255u8 {
+        let mut pkt = vec![first; 40];
+        pkt[1..].iter_mut().enumerate().for_each(|(i, b)| {
+            *b = (i * 31 + 7) as u8;
+        });
+        inject(&node, &pkt).await;
+        let ev = node.handle_incoming().await.unwrap();
+        match first {
+            b if (0x01..=0x0F).contains(&b) => match ev {
+                IncomingEvent::Dropped { reason } => {
+                    assert_ne!(reason, DropReason::UnknownProtocol);
+                }
+                other => panic!("帧路径首字节 {b:#x} 产出预期外事件: {other:?}"),
+            },
+            _ => assert!(matches!(
+                ev,
+                IncomingEvent::Dropped {
+                    reason: DropReason::UnknownProtocol
+                }
+            )),
+        }
+    }
+
+    // probe 路径：全 type 值域（PING 对己 → ProbePing 事件；其余 → 丢弃）
+    for t in 0..=255u8 {
+        let mut pkt = vec![0u8; 17 + 8];
+        pkt[..4].copy_from_slice(&crate::probe::PROBE_MAGIC);
+        pkt[4] = t;
+        pkt[5..].iter_mut().enumerate().for_each(|(i, b)| {
+            *b = (i * 13 + 3) as u8;
+        });
+        inject(&node, &pkt).await;
+        let ev = node.handle_incoming().await.unwrap();
+        assert!(
+            matches!(
+                ev,
+                IncomingEvent::ProbePing { .. } | IncomingEvent::Dropped { .. }
+            ),
+            "probe type {t} 产出预期外事件"
+        );
+    }
+
+    // 随机洪泛：任意长度随机字节 → 恒 Ok、不 panic
+    let mut s: u64 = 0xD15A_0006;
+    let mut pkt = [0u8; 200];
+    for _ in 0..500 {
+        let len = (xorshift(&mut s) % 201) as usize;
+        for b in pkt[..len].iter_mut() {
+            *b = xorshift(&mut s) as u8;
+        }
+        inject(&node, &pkt[..len]).await;
+        let _ = node.handle_incoming().await.unwrap();
+    }
+}
+
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
 /// 发给他人的 PING → 不回 PONG（互探目标定向）
 #[tokio::test]
 async fn probe_ping_foreign_target_not_replied() {

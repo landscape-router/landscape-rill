@@ -139,4 +139,41 @@ mod tests {
         let d = ProbePacket::decode(&p.encode()).unwrap();
         assert_eq!(d.to_node_id, 0);
     }
+
+    // ---- 预认证解析语料（REQ-059 / SEC-08）：随机与变形输入不 panic ----
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn decode_fuzz_corpus() {
+        let mut s: u64 = 0xB05B_0002;
+        let mut buf = vec![0u8; 256];
+        for _ in 0..2000 {
+            // 纯随机字节（任意长度）
+            let len = (xorshift(&mut s) % 257) as usize;
+            for b in buf[..len].iter_mut() {
+                *b = xorshift(&mut s) as u8;
+            }
+            let _ = ProbePacket::decode(&buf[..len]);
+            // magic 前缀 + 随机余量（type 字段任意值由分派层拒绝）
+            if len >= 4 {
+                buf[..4].copy_from_slice(&PROBE_MAGIC);
+                let _ = ProbePacket::decode(&buf[..len]);
+            }
+        }
+        // 边界长度：头部逐字节截断 + 载荷上限恰好/超限
+        let mut ping = ProbePacket::ping(1, 2, 3).encode();
+        for cut in 0..=ping.len() {
+            let _ = ProbePacket::decode(&ping[..cut]);
+        }
+        ping.extend_from_slice(&[0u8; PROBE_PAYLOAD_MAX]);
+        assert!(ProbePacket::decode(&ping).is_some());
+        ping.push(0);
+        assert_eq!(ProbePacket::decode(&ping), None);
+    }
 }

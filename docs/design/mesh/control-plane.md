@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057 / REQ-060
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057 / REQ-059 / REQ-060
 
-**版本：v0.10（2026-09-02 修订：REQ-056——§2 重连退避语义；REQ-057——§3.9 挑战携带 node_id 与注册响应丢失恢复 + §5.1 恢复流程；REQ-060——§2/§3.1/§3.9/§5.1 挑战统一触发：无持有证明不发身份）**
+**版本：v0.11（2026-09-02 修订：REQ-059——§3.13 预认证最小解析与资源分配后置时机纪律）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -331,6 +331,12 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - 限速参数为常量（config 风格）；`CoordinatorServer` 暴露字段供测试放大（localhost 共源场景）
 - 复用 rill-core `TokenBucket`/`SourceRateLimiter`（与数据面泛洪/probe 限速同源，REQ-046）
 
+**预认证解析与分配时机（REQ-059）**：限速上表管"到达速率"，本段管"解析与分配时机"（FRAME_HEADER §5.1 同规则，互不替代）：
+
+1. **认证前最小解析**：TLS 建立前零应用字节解析（TLS 记录层属协议本体，rustls 处理）；TLS 之上仅两级定头解析——4B 长度前缀（上限 1 MiB，超限 fail-closed）+ Envelope 定头（`msg_type` 判别值 + 不透明 `body` 字节）；**消息体 protobuf 反序列化发生在该消息的准入闸门之后**（连接级桶 → REGISTER 的锁定/per-源限速 → decode）
+2. **资源分配后置**：逐连接状态 = 固定小状态（读缓冲 + 限速桶 + 挑战槽 + 心跳时间戳），容量与连接数同阶有界；**持久状态**（注册表/binding/一次性 key 消费 tombstone/netmap 版本）全部后置到注册或挑战通过之后（REQ-060：消费后置于 PoP）；认证失败路径零持久分配
+3. **fuzz 验收**：长度前缀 / Envelope 定头 / 预认证闸门序列纳入鲁棒性 fuzz 语料——畸形与随机输入不 panic、错误只能经 `Result` 返回（SEC-08 闭环）
+
 ## 4. 状态模型（Raft 兼容核心）
 
 ### 4.1 三分类
@@ -512,6 +518,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 - **路径健康落档（2026-08-31，REQ-034，§3.11 快速切换实现）**：①**逐路径入站健康**：收帧按"帧实际到达的上一跳"（UDP 发送者归属节点，直连 = 源节点自身、经中继 = relay 节点）更新路径活性——首跳 == 入站跳的路径 ok（miss 清零）、其余 miss+1；直连帧全路径 ok，经中继的帧证明中继路径存活、直连路径持续 miss（不再"收包全恢复"——中继帧续命直连路径会卡死不对称拓扑切换）；②**端点级活性**：多端点节点（多宿主通告全部）按 `(端点归属, 端点)` 维护 miss，发送排序活性差者置后、同活性轮换上次未用者（UDP 黑洞端点：sendto 成功但包被网关丢弃，无法从收包侧感知，靠无响应信号逐个排除）；③**握手重试驱动 miss**：`HANDSHAKE_RETRY_INTERVAL=2s`——上次握手尝试超时无响应 → 主路径 miss + 端点 miss + 丢弃在途发起状态，下一次调用重新发起 msg1（懒握手在黑洞下永不收敛，重试驱动快速切换收敛）；发起方与响应方均受益：响应方经中继收到重复 msg1 → 入站健康使直连持续 miss → 响应改走中继路径；④**中继日志**：转发节点记录 `relayed frame to <dest>`（e2e 中继证据）
 - **多网络隔离落档（2026-09-01，REQ-010，§1.5 实现）**：①**CoordConfig 形态**：`networks: [{ name, master_key, auth_keys, announce_whitelist }]` 列表（breaking，仓库未发布）；扁平 `network/master_key/auth_keys/announce_whitelist` 移除；storage_path/signing_seed/TLS 共享；②**network_id = FNV-1a(name)**（确定性散列，0 保留）：跨重启/重载稳定（配置顺序变化不漂移），碰撞在配置加载时 fail-closed 拒绝；③**NetworkDomain**（rill-coord/src/domain.rs）：每网络独立 Registry（auth key 空间/白名单/条目）+ KeyManager（主密钥独立 → `key_dst = KDF(网络主密钥, node_id)`，跨网伪造 route_mac 必失配）+ PathService（relay 集合/PathMap 按网络独立）+ relay_list；**node_id 全局唯一分配**（跨网络不冲突，Directory/Liveness 按 node_id 键控）；④**归域**：auth key 内嵌网络（REQ-043），admission 按 key 网络选域，未知网络 → InvalidAuthKey（fail-closed）；配置层 key 放错网络段 → 拒绝启动；⑤**netmap 隔离**：`netmap_snapshot(network_id)` 过滤 + server 按注册节点网络推送（netmap/relay 列表/key_dst 全量只含本网）；⑥**路径同网门控**：跨网络 PathRequest → 空集（netmap 隔离下源本就看不到异网节点）；⑦**持久化 schema v2**：nodes 按 network_id 归域恢复、consumed tombstone 按 key 内嵌网络分组、key_versions/path_maps/relay_lists 按网络分组；⑧**覆盖层调整（SEC-24）**：跨网绑定注入 e2e 需完整恶意客户端（Noise 握手）且 netmap 隔离已结构性阻断攻击面 → 直接验证生产验签路径 `verify_binding`（集成）+ 跨网握手 prologue 拒绝（线级）
 - **消息限速与准入落档（2026-09-01，REQ-047，§3.13）**：①**连接级限速**（rill-mesh server.rs `ConnectionState.msg_bucket` 20/s 突发 40，桶空断连——handle_message 入口收口，handle_connection 与 rilld 连接循环共用）；②**Register 准入**（`CoordinatorServer.register_limiter` per-源 IP 0.5/s 突发 5 + `register_lockout` 失败锁定 5 次 → 30s×2ⁿ 封顶 1h；源 IP 取 TLS peer addr；成功清零、挑战路径不计失败但锁定期间一律拒绝）；③**心跳超频忽略**（`ConnectionState.last_heartbeat` + `heartbeat_min_interval` 默认 5s——server 字段可配，主机测试 300ms 心跳泵需调小）；④**PathRequest pending 上限**（节点 `pending_path_requests` 256 / rill-coord path_service per-source 1024 饱和丢弃）；⑤**观测**（`rate_limited` RateCounter，run_coord 周期摘要 `control rate-limited`——SEC-20 e2e 证据）；错误措辞统一 InvalidAuthKey 原已闭环（coordinator register admission 全映射）
+- **预认证解析纪律落档（2026-09-02，REQ-059，§3.13）**：入口实现已满足两级定头纪律（framing 4B 长度上限 1 MiB 先于任何分配校验；Envelope 仅 msg_type + 不透明 body），规则由隐式升级为显式；fuzz 语料（随机/截断/变形 envelope 与消息体）断言不 panic、错误经 `Result` 返回（SEC-08）；lessons CN-05 闭环
 
 ## 9. 与数据面文档的对照（闭合验证）
 
