@@ -10,7 +10,7 @@ name: e2e-mesh
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   workflow_dispatch:
 
 jobs:
