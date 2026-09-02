@@ -8,9 +8,10 @@
 2. **[design/](./design/README.md)**——系统行为权威描述（分域）：架构、mesh 协议、接入、路由引擎
 3. **[requirements/](./requirements/README.md)**——需求/决策库：每条需求何时提出、是否已合并进 design
 4. **[tests/](./tests/README.md)**——验收场景与状态（四档）、验收矩阵、验收断言
-5. **[e2e/](./e2e/README.md)**——全链路容器验证环境与脚本说明
-6. **[ci/](./ci/README.md)**——CI 结构与一致性检查（`ci/check-docs.sh`）
-7. **[lessons/](./lessons/README.md)**——外部缺陷教训库（防回归复核表，独立于演进体系）
+5. **[perf.md](./perf.md)**——性能基线与回归对照（证据类：基准分层 L1~L4、复跑方法、A/B 结果）
+6. **[e2e/](./e2e/README.md)**——全链路容器验证环境与脚本说明
+7. **[ci/](./ci/README.md)**——CI 结构与一致性检查（`ci/check-docs.sh`）
+8. **[lessons/](./lessons/README.md)**——外部缺陷教训库（防回归复核表，独立于演进体系）
 
 ## 三张图怎么用
 
