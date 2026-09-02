@@ -63,10 +63,9 @@
 
 - 关联 REQ：REQ-017 / REQ-059
 - 测试层：单测（确定性 fuzz 语料）+ docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：截断/越界拒绝已闭环；确定性 fuzz 语料（随机/变形输入不 panic、错误经 Result 返回）与 e2e 未认证洪泛（内存/任务有界、已认证流量不受影响）待补
-- 说明：预认证解析入口（帧头 decode / open_frame / probe decode / 信封定头）按 REQ-059 只做固定头字段级解析；fuzz 语料 + e2e 洪泛场景闭环
+- 状态：`已覆盖`
+- 证据：rill-core/src/frame/、rill-core/src/probe.rs、rill-mesh/src/framing/、rill-mesh/src/control/codec/、rill-mesh/src/data/tests.rs、rill-mesh/src/control/server_tests.rs、e2e/scenarios/preauth_flood.sh
+- 说明：预认证解析入口（帧头 decode / open_frame / probe decode / 信封定头）按 REQ-059 只做固定头字段级解析；确定性语料 preauth_parse_fuzz_corpus / decode_fuzz_corpus / read_frame_fuzz_corpus / parse_envelope_fuzz_corpus / read_envelope_fuzz_corpus / preauth_dispatch_fuzz_corpus / preauth_garbage_inputs_rejected——随机/变形/截断输入不 panic、错误只经 Result/Option 返回；e2e 未认证洪泛下容器存活、丢帧摘要出现（fail-closed）、已认证流量收敛
 
 ## SEC-09 握手重定向
 
@@ -101,7 +100,7 @@
 - [x] SEC-05：重放窗口拦截（含 rekey 残留期双窗口）
 - [x] SEC-06：rekey 交叠 5s 窗口语义
 - [x] SEC-07：非帧/非 probe 字节丢弃（端口分派 fail-closed，CON-08）
-- [ ] SEC-08：畸形输入不 panic（fuzz 语料 + e2e 洪泛，REQ-059）
+- [x] SEC-08：畸形输入不 panic（fuzz 语料 + e2e 洪泛，REQ-059）
 - [x] SEC-09：握手重定向拒绝（msg1 目标校验）
 - [x] SEC-10：身份绑定验证拒绝冒充 + prologue 混淆拒绝
 - [ ] SEC-11：垃圾 AEAD 洪泛被限速丢弃（容器级）
