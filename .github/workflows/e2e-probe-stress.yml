@@ -1,0 +1,79 @@
+# probe 场景压力校验（手动触发，docs/ci/README.md §1）：常规时序 + 单核绑核
+# （MESH_E2E_CPUS=0，慢机时序——曾暴露 v2 相位锁定残留）两阶段 × N 次重复，
+# 统计通过率，任一迭代失败即红。不做常规门禁，用于收敛稳定性抽检。
+# 触发：gh workflow run e2e-probe-stress.yml [-f iterations=N]
+name: e2e-probe-stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "每阶段重复次数"
+        default: 5
+        type: number
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: rustc version
+        id: rustc
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      - name: iso week
+        id: week
+        run: echo "iso=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+      # 与 e2e-mesh.yml 同键共享编译 cache（内容键说明见彼处）
+      - name: Restore cargo cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ steps.week.outputs.iso }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: release build
+        run: cargo build --release
+      - name: stage binary for e2e
+        run: |
+          mkdir -p e2e/.cache
+          cp target/release/lrill e2e/.cache/lrill
+          chmod +x e2e/.cache/lrill
+      # 阶段 1：常规时序（同 e2e-mesh probe job 条件）× N
+      - name: probe x ${{ inputs.iterations }} (normal timing)
+        env:
+          MESH_E2E_DNS: 1.1.1.1
+          MESH_E2E_SCENARIO: probe
+          E2E_SKIP_BUILD: "1"
+        run: |
+          n=${{ inputs.iterations }}
+          fails=0
+          for i in $(seq 1 "$n"); do
+            echo "=== normal iter $i/$n ==="
+            if ! ./e2e/run_e2e.sh; then fails=$((fails+1)); fi
+          done
+          echo "normal timing: $((n-fails))/$n passed"
+          echo "FAILS_NORMAL=$fails" >> "$GITHUB_ENV"
+      # 阶段 2：单核绑核（全部容器 cpuset=0，CPU 争抢放大时序相位差）× N
+      - name: probe x ${{ inputs.iterations }} (single-core timing)
+        env:
+          MESH_E2E_DNS: 1.1.1.1
+          MESH_E2E_SCENARIO: probe
+          MESH_E2E_CPUS: "0"
+          E2E_SKIP_BUILD: "1"
+        run: |
+          n=${{ inputs.iterations }}
+          fails=0
+          for i in $(seq 1 "$n"); do
+            echo "=== single-core iter $i/$n ==="
+            if ! ./e2e/run_e2e.sh; then fails=$((fails+1)); fi
+          done
+          echo "single-core timing: $((n-fails))/$n passed"
+          echo "FAILS_CPUSET=$fails" >> "$GITHUB_ENV"
+      - name: summary
+        if: always()
+        run: |
+          fn="${FAILS_NORMAL:-0}"; fc="${FAILS_CPUSET:-0}"
+          echo "== probe stress 结果：normal 失败 ${fn}，single-core 失败 ${fc} =="
+          [ "$((fn + fc))" = "0" ] || { echo "存在失败迭代"; exit 1; }
