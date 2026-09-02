@@ -1,7 +1,9 @@
 //! coordinator 运行入口：TLS accept 循环 + SIGHUP 重载 + UDP 数据面
 //! （echo 回显限速 + relay RTT 排序，CONNECTIVITY §2/§5）
 
+use crate::status_http::{spawn_status_server, StatusState};
 use crate::{load_coord, BoxResult};
+use landscape_rill_coord::status::PasswordHash;
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_mesh::control::{
@@ -51,6 +53,23 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
     let udp = tokio::net::UdpSocket::bind(udp_addr).await?;
     let udp_server = server.clone();
     tokio::spawn(async move { run_coord_udp(udp, udp_server, networks).await });
+    // 只读状态端点（REQ-051/CONTROL_PLANE §3.14）：配置段缺省 = 不启用；
+    // 启用而无有效密码哈希已在 parse/validate 层拒绝启动（fail-closed）
+    let status_state = match &config.status {
+        Some(status_cfg) => {
+            let hash = PasswordHash::parse(&status_cfg.password_hash)?;
+            let state = Arc::new(StatusState::new(
+                server.clone(),
+                config.listen_addr.clone(),
+                status_cfg.listen_addr.clone(),
+                config.storage_path.clone(),
+                hash,
+            ));
+            spawn_status_server(status_cfg, cert.clone(), key.clone(), state.clone()).await?;
+            Some(state)
+        }
+        None => None,
+    };
     let net_names: Vec<String> = config.networks.iter().map(|n| n.name.clone()).collect();
     info!(
         "[coord] listening on {} (networks={}, udp={}, reload=SIGHUP)",
@@ -67,9 +86,29 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
                     Ok(new_cfg) => {
                         server.lock().await.apply_config(&new_cfg);
                         info!("[coord] config reloaded (SIGHUP)");
+                        // 状态端点增量收敛（REQ-051）：密码轮换热生效 + 重载历史
+                        if let Some(state) = &status_state {
+                            match &new_cfg.status {
+                                Some(sc) => match PasswordHash::parse(&sc.password_hash) {
+                                    Ok(h) => state.rotate_password(h).await,
+                                    Err(e) => {
+                                        warn!("[status] password rotation rejected: {}", e.0)
+                                    }
+                                },
+                                None => warn!("[status] status segment removed; keep serving (restart to disable)"),
+                            }
+                            state
+                                .note_reload(true, "config reloaded (SIGHUP)".to_string())
+                                .await;
+                        }
                     }
                     Err(e) => {
-                        error!("[coord] reload failed, keeping old config: {}", format_chain(&*e))
+                        error!("[coord] reload failed, keeping old config: {}", format_chain(&*e));
+                        if let Some(state) = &status_state {
+                            state
+                                .note_reload(false, format_chain(&*e))
+                                .await;
+                        }
                     }
                 }
             }

@@ -631,3 +631,123 @@ fn two_networks_arg() -> Vec<(String, [u8; 32])> {
         ("work".to_string(), [0x88; 32]),
     ]
 }
+
+// ==================== 遥测聚合与状态端点视图（REQ-051/052） ====================
+
+use crate::status::{CoordRuntimeMeta, DropView, PeerTrafficView, StatusView, TelemetryView};
+
+fn view(node_id: u32, tx: u64) -> TelemetryView {
+    TelemetryView {
+        peers: vec![PeerTrafficView {
+            node_id,
+            tx_frames: tx,
+            tx_bytes: tx * 100,
+            rx_frames: tx,
+            rx_bytes: tx * 100,
+        }],
+        drop_global: 1,
+        drops: vec![DropView { node_id, count: 1 }],
+        direct: vec![],
+        updated_at: 0,
+    }
+}
+
+#[test]
+fn telemetry_latest_wins_aggregation() {
+    // §3.15：coord 聚合 = latest-wins 快照（旧值直接覆盖），不承诺时序存储
+    let (mut c, ak) = setup();
+    let id = register_node(&mut c, &ak, 0x11);
+    c.store_telemetry(id, view(id, 1));
+    c.store_telemetry(id, view(id, 7));
+    let all = c.telemetry_all();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].0, id);
+    assert_eq!(all[0].1.peers[0].tx_frames, 7);
+    assert!(all[0].1.updated_at > 0, "coordinator 侧打点");
+}
+
+#[test]
+fn telemetry_cleared_on_revoke() {
+    let (mut c, ak) = setup();
+    let id = register_node(&mut c, &ak, 0x11);
+    c.store_telemetry(id, view(id, 1));
+    c.revoke(id);
+    assert!(c.telemetry_all().is_empty());
+}
+
+#[test]
+fn build_version_roundtrip_and_empty_skip() {
+    // §3.1 version 字段：可选元数据；空值 = 旧节点 → 不写 build_version
+    let (mut c, ak) = setup();
+    let id = register_node(&mut c, &ak, 0x11);
+    assert!(c.build_version(id).is_none());
+    c.set_build_version(id, "lrill 0.1.0".into());
+    assert_eq!(c.build_version(id), Some("lrill 0.1.0"));
+    // 恢复类重注册（PoP 后 set_build_version 由 server 侧空值守卫）——直接验证存储
+    c.set_build_version(id, String::new());
+    assert_eq!(c.build_version(id), Some(""));
+}
+
+#[test]
+fn status_view_multi_network_offline_consumed() {
+    // §3.14 内容组 1-3：多网络全量视图 + 离线节点分支 + 一次性 key 已消费分支；
+    // 红线：master_key/signing_seed 不出现在序列化输出
+    let (mut c, ak_lab, _ak_work) = two_networks();
+    let id_a = register_node(&mut c, &ak_lab, 0x21);
+    let id_b = register_node(&mut c, &ak_lab, 0x22);
+    c.mark_offline(id_b);
+    c.store_telemetry(id_a, view(id_a, 3));
+    // 一次性 key 注册即消费（消费 tombstone 进台账）
+    let ak_one = lrk("lab", 86_400);
+    c.add_auth_key(&ak_one, AuthKeyPolicy::OneTime);
+    let _id_c = register_node(&mut c, &ak_one, 0x23);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let meta = CoordRuntimeMeta {
+        control_addr: "0.0.0.0:8443".into(),
+        status_addr: Some("127.0.0.1:8444".into()),
+        storage_path: Some("/var/lib/rill/state.redb".into()),
+        started_at_unix: now - 120,
+        now_unix: now,
+        reload_log: vec!["ok test".into()],
+    };
+    let snap = StatusView::snapshot(&c, &meta);
+
+    // 网络概览：双网络全量
+    assert_eq!(snap.networks.len(), 2);
+    assert!(snap.networks.iter().any(|n| n.name == "lab"));
+    assert!(snap.networks.iter().any(|n| n.name == "work"));
+
+    // 节点表：在线/离线分支 + last_seen age + 遥测聚合展示
+    let a = snap.nodes.iter().find(|n| n.node_id == id_a).unwrap();
+    assert!(a.online);
+    assert_eq!(a.network, "lab");
+    assert!(a.pubkey_fingerprint.starts_with("sha256:"));
+    let b = snap.nodes.iter().find(|n| n.node_id == id_b).unwrap();
+    assert!(!b.online);
+
+    // auth key 台账：脱敏 + 已消费分支
+    assert!(snap
+        .auth_keys
+        .iter()
+        .any(|k| k.consumed && k.network == "lab"));
+    assert!(snap.auth_keys.iter().all(|k| !k
+        .key_masked
+        .contains(&ak_lab[ak_lab.len() - 12..ak_lab.len() - 4])));
+
+    // 遥测快照组（内容组 6）
+    assert_eq!(snap.telemetry.len(), 1);
+    assert_eq!(snap.telemetry[0].peers[0].tx_frames, 3);
+
+    // coord 自身（内容组 5）：uptime + 存储模式 + 重载历史
+    assert_eq!(snap.coord.uptime_secs, 120);
+    assert_eq!(snap.coord.storage, "redb:/var/lib/rill/state.redb");
+    assert_eq!(snap.coord.reload_log, vec!["ok test"]);
+
+    // 红线：密钥材料零输出（signing_seed 0x5a 序列不得出现）
+    let json = serde_json::to_string(&snap).unwrap();
+    assert!(!json.contains(&"5a".repeat(8)));
+}

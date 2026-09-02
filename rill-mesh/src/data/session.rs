@@ -138,11 +138,12 @@ impl MeshData {
         Ok(build_handshake_frame(&header, key_dst, payload))
     }
 
-    pub async fn send_to_node(&self, to_node_id: u32, frame: &[u8]) -> std::io::Result<bool> {
+    pub async fn send_to_node(&mut self, to_node_id: u32, frame: &[u8]) -> std::io::Result<bool> {
         match self.endpoint_table.get(&to_node_id) {
             Some(addrs) => {
                 for addr in addrs {
                     if self.wan_send(frame, *addr).await.is_ok() {
+                        self.note_tx(to_node_id, frame.len());
                         return Ok(true);
                     }
                 }
@@ -178,6 +179,7 @@ impl MeshData {
                         Ok(_) => {
                             debug!("[mesh] send to {} hop {} via {}", to_node_id, hop, addr);
                             self.last_sent_endpoint.insert(to_node_id, addr);
+                            self.note_tx(to_node_id, frame.len());
                             return Ok(true);
                         }
                         Err(e) => last_err = Some(e),

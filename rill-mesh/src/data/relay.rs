@@ -95,6 +95,7 @@ impl MeshData {
         for addr in candidates {
             if self.wan_send(&frame[..], addr).await.is_ok() {
                 debug!("[mesh] relay to {} via {}", header.to_node_id, addr);
+                self.note_tx(header.to_node_id, frame.len());
                 return RelayOutcome::Forwarded {
                     to: header.to_node_id,
                 };

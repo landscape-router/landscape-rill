@@ -40,6 +40,18 @@ pub struct CoordConfig {
     /// 隔离网络列表（CONTROL_PLANE §1.5）：每网络独立主密钥 / auth key 空间 / 白名单
     #[serde(default)]
     pub networks: Vec<NetworkConfig>,
+    /// 只读状态端点（REQ-051/CONTROL_PLANE §3.14）；None = 不启用。
+    /// 密码只存 PBKDF2 哈希（明文禁止落盘，教训 KC-02）；哈希非法 → 拒绝启动（fail-closed）
+    #[serde(default)]
+    pub status: Option<StatusConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatusConfig {
+    /// 独立监听地址（缺省取向 127.0.0.1:8444，loopback = 本机运维查询）
+    pub listen_addr: String,
+    /// `pbkdf2-sha256$<iter>$<salt_hex>$<hash_hex>`（盐 ≥16B、iter ≥ 10_000）
+    pub password_hash: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +146,16 @@ impl CoordConfig {
         if let Some(addr) = &self.udp_listen_addr {
             addr.parse::<SocketAddr>()
                 .map_err(|_| ConfigError(format!("invalid udp_listen_addr: {addr}")))?;
+        }
+        if let Some(status) = &self.status {
+            status.listen_addr.parse::<SocketAddr>().map_err(|_| {
+                ConfigError(format!(
+                    "invalid status.listen_addr: {}",
+                    status.listen_addr
+                ))
+            })?;
+            crate::status::PasswordHash::parse(&status.password_hash)
+                .map_err(|e| ConfigError(format!("status.password_hash: {}", e.0)))?;
         }
         Ok(())
     }

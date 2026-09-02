@@ -236,7 +236,7 @@ async fn prologue_mismatch_rejected_over_wire() {
 
 #[tokio::test]
 async fn msg2_without_initiator_rejected() {
-    let (a, mut b) = setup_pair().await;
+    let (mut a, mut b) = setup_pair().await;
     let header = MeshFrameHeader {
         to_node_id: 2,
         from_node_id: 1,
@@ -1157,7 +1157,7 @@ async fn v2_frame_shorter_than_header_rejected() {
 
 #[tokio::test]
 async fn send_to_unknown_node_returns_false() {
-    let a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
         .await
         .unwrap();
     let frame = frame_from(1, 9, b"payload", 64, 1);
@@ -1932,4 +1932,88 @@ async fn v2_relay_forward_skips_fallback_endpoints() {
         .unwrap();
     assert_eq!(&buf[..n], &frame[..]);
     assert!(other.try_recv(&mut buf).is_err());
+}
+
+// ==================== 节点遥测（REQ-052/CONTROL_PLANE §3.15） ====================
+
+#[tokio::test]
+async fn telemetry_interval_counts_and_reset() {
+    // 区间计数语义（LOG-02）：tx 归业务终点、rx 归发送方；上报即清零，
+    // 下区间不含旧值；peers 按 node_id 排序输出确定
+    let (mut a, mut b) = setup_pair().await;
+    let msg1 = a.initiate_handshake(2).unwrap().unwrap();
+    a.send_to_node(2, &msg1).await.unwrap();
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Responded { peer: 1 }
+    );
+
+    let tele = a.take_telemetry();
+    assert_eq!(tele.peers.len(), 1);
+    assert_eq!(tele.peers[0].node_id, 2);
+    assert_eq!(tele.peers[0].tx_frames, 1);
+    assert_eq!(tele.peers[0].tx_bytes, msg1.len() as u64);
+    assert_eq!(tele.peers[0].rx_frames, 0);
+
+    let tele_b = b.take_telemetry();
+    assert_eq!(tele_b.peers.len(), 1);
+    assert_eq!(tele_b.peers[0].node_id, 1);
+    assert_eq!(tele_b.peers[0].rx_frames, 1);
+    assert_eq!(tele_b.peers[0].rx_bytes, msg1.len() as u64);
+
+    // 上报即清零：下区间不含旧值
+    assert!(a.take_telemetry().peers.is_empty());
+    assert!(b.take_telemetry().peers.is_empty());
+}
+
+#[tokio::test]
+async fn telemetry_drop_attribution_and_global_bucket() {
+    // 丢帧归因计数（§3.15 内容 2）：已知 peer → per-peer；伪造/未知 → 全局桶
+    let mut m = MeshData::bind("127.0.0.1:0".parse().unwrap(), 7)
+        .await
+        .unwrap();
+    m.set_key_dst(1, node_key(1));
+    m.note_drop(Some(1));
+    m.note_drop(Some(1));
+    m.note_drop(Some(999));
+    m.note_drop(None);
+
+    let tele = m.take_telemetry();
+    assert_eq!(tele.drop_global, 2);
+    assert_eq!(
+        tele.drops,
+        vec![landscape_rill_proto::wire::control::TelemetryDrop {
+            node_id: 1,
+            count: 2
+        }]
+    );
+    // 取走即清零
+    assert_eq!(m.take_telemetry().drop_global, 0);
+}
+
+#[tokio::test]
+async fn telemetry_direct_pair_rtt_recorded_on_pong() {
+    // 直连确认对（§3.15 内容 3）：probe 发送时间簿记，PONG 匹配 → RTT 记录
+    let (mut a, b) = setup_pair().await;
+    let b_addr = b.local_addr().unwrap();
+    let nonce = a.send_probe_ping(b_addr, 1, 2).await.expect("pending 未满");
+    let ping = crate::probe::ProbePacket::ping(1, 2, nonce);
+    let pong = crate::probe::ProbePacket::pong(&ping, Vec::new());
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sender
+        .send_to(&pong.encode(), a.local_addr().unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        a.handle_incoming().await.unwrap(),
+        IncomingEvent::ProbePong { from: 2, .. }
+    ));
+    let tele = a.take_telemetry();
+    assert_eq!(tele.direct.len(), 1);
+    assert_eq!(tele.direct[0].node_id, 2);
+    assert_eq!(tele.direct[0].endpoint, b_addr.to_string());
+    // RTT 非负即可（同进程回环 < 1ms 也合法）
+    let _ = tele.direct[0].rtt_ms;
+    // 取走即清零
+    assert!(a.take_telemetry().direct.is_empty());
 }

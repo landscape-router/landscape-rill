@@ -62,6 +62,11 @@ impl Liveness {
         &self.offline
     }
 
+    /// 节点 last_seen（unix 秒；REQ-051 状态端点展示 age 用）
+    pub fn last_seen_of(&self, node_id: u32) -> Option<u64> {
+        self.last_seen.get(&node_id).copied()
+    }
+
     /// 节点吊销/移除时清理全部活性状态
     pub fn remove(&mut self, node_id: u32) {
         self.last_seen.remove(&node_id);

@@ -11,6 +11,10 @@ use landscape_rill_core::handshake::{
 };
 use landscape_rill_core::rate::RateCounter;
 use landscape_rill_core::rate::{SourceRateLimiter, TokenBucket};
+use landscape_rill_proto::wire::control::{
+    DirectPair, TelemetryDrop, TelemetryPayload, TelemetryPeer,
+};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -128,10 +132,26 @@ pub struct MeshData {
     drop_stats: HashMap<u32, RateCounter>,
     /// 全局丢帧计数（未知节点/畸形包，无 peer 可归因）
     drop_stats_global: RateCounter,
-    /// 未确认的探针：nonce → (目标节点, 探测端点)；PONG 匹配即移除
-    probe_pending: HashMap<u32, (u32, SocketAddr)>,
+    /// 未确认的探针：nonce → (目标节点, 探测端点, 发送时刻)；PONG 匹配即移除
+    /// （发送时刻用于 RTT，REQ-052）
+    probe_pending: HashMap<u32, (u32, SocketAddr, Instant)>,
     /// PONG 生成按源限速（CONNECTIVITY §4.3，SEC-26）：伪造源灌 PING 的响应面上界
     pong_limiter: SourceRateLimiter,
+    /// 遥测区间计数（REQ-052/CONTROL_PLANE §3.15，LOG-02 语义：上报即清零）
+    peer_traffic: HashMap<u32, PeerTraffic>,
+    telemetry_drops: HashMap<u32, u64>,
+    telemetry_drops_global: u64,
+    /// PONG 确认的直连对：peer → (端点, RTT)
+    direct_pairs: HashMap<u32, (SocketAddr, u32)>,
+}
+
+/// per-peer 数据面流量区间计数（tx 归业务终点/转发下一跳，rx 归发送方）
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PeerTraffic {
+    pub tx_frames: u64,
+    pub tx_bytes: u64,
+    pub rx_frames: u64,
+    pub rx_bytes: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -249,6 +269,10 @@ impl MeshData {
             drop_stats_global: RateCounter::new(DROP_STATS_PERIOD),
             probe_pending: HashMap::new(),
             pong_limiter: SourceRateLimiter::new(PONG_RATE_PER_SEC, PONG_CAPACITY),
+            peer_traffic: HashMap::new(),
+            telemetry_drops: HashMap::new(),
+            telemetry_drops_global: 0,
+            direct_pairs: HashMap::new(),
         })
     }
 

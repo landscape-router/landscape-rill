@@ -305,6 +305,36 @@ with open(path, "w") as f:
 PYEOF
 fi
 
+if [ "$SCENARIO" = "status" ]; then
+  # 状态端点场景（REQ-051/052，CONTROL_PLANE §3.14/§3.15）：direct 拓扑 +
+  # coord status 段（0.0.0.0:9444）；另存轮换后整文件（pass-2，SIGHUP 断言用）
+  gen_status_hash() {
+    python3 - "$1" <<'PYEOF'
+import hashlib, os, sys
+pw = sys.argv[1].encode()
+salt = os.urandom(16)
+it = 60000
+h = hashlib.pbkdf2_hmac("sha256", pw, salt, it)
+print(f"pbkdf2-sha256${it}${salt.hex()}${h.hex()}")
+PYEOF
+  }
+  STATUS_HASH1=$(gen_status_hash "e2e-status-pass-1")
+  STATUS_HASH2=$(gen_status_hash "e2e-status-pass-2")
+  python3 - "$BUILD_DIR/coord.json" "$STATUS_HASH1" "$STATUS_HASH2" <<'PYEOF'
+import json, sys
+path, h1, h2 = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["coord"]["status"] = {"listen_addr": "0.0.0.0:9444", "password_hash": h1}
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+rot = json.loads(json.dumps(cfg))
+rot["coord"]["status"]["password_hash"] = h2
+with open(path + ".rotated", "w") as f:
+    json.dump(rot, f, indent=2)
+PYEOF
+fi
+
 if [ "$SCENARIO" = "relay" ] || { [ "$SCENARIO" = "iperf" ] && [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; }; then
   # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，
   # 否则 docker 网桥自身路由会命中；ip route get 命中默认路由不可用）

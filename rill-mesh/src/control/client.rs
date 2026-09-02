@@ -81,6 +81,8 @@ impl MeshClient {
                 .iter()
                 .map(|r| Cow::Borrowed(r.as_str()))
                 .collect(),
+            // 构建版本元数据（REQ-052/CONTROL_PLANE §3.1）：可选，coordinator 仅展示
+            version: Cow::Owned(env!("CARGO_PKG_VERSION").to_string()),
         };
         envelope_bytes(MsgType::REGISTER, &msg)
     }
@@ -104,8 +106,9 @@ impl MeshClient {
         envelope_bytes(MsgType::CHALLENGE_ACK, &ack)
     }
 
-    pub fn heartbeat(&self) -> Vec<u8> {
-        envelope_bytes(MsgType::HEARTBEAT, &Heartbeat {})
+    /// 心跳（REQ-052）：遥测载荷可选（区间计数上报即清零；无数据时空载荷）
+    pub fn heartbeat(&self, telemetry: Option<TelemetryPayload>) -> Vec<u8> {
+        envelope_bytes(MsgType::HEARTBEAT, &Heartbeat { telemetry })
     }
 
     /// 路径请求（v1.5，CONTROL_PLANE §3.11）：请求本节点 → dest 的候选路径集
@@ -227,8 +230,8 @@ impl ControlSession {
         framing::write_frame(&mut self.stream, envelope).await
     }
 
-    pub fn heartbeat_envelope(&self) -> Vec<u8> {
-        self.client.heartbeat()
+    pub fn heartbeat_envelope(&self, telemetry: Option<TelemetryPayload>) -> Vec<u8> {
+        self.client.heartbeat(telemetry)
     }
 
     /// 端点上报（数据面 UDP 地址；注册后/地址变化时发送，服务端并入 netmap）

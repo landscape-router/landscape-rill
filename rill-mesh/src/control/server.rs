@@ -4,6 +4,9 @@ use crate::control::codec::{envelope_body, read_envelope, write_msg};
 use crate::control::BoxResult;
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
+use landscape_rill_coord::status::{
+    DirectPairView as DirectPairDst, DropView, PeerTrafficView as PeerTrafficDst, TelemetryView,
+};
 use landscape_rill_core::rate::{RateCounter, SourceRateLimiter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead};
@@ -47,11 +50,49 @@ struct ChallengeState {
 }
 
 /// 挑战期间保留的注册数据（REQ-060）：PoP 通过后才执行对应完成语义
+/// proto 遥测载荷 → coordinator 视图（REQ-052；字段直拷，node_id 0 = 无对端归因保留）
+fn telemetry_view(t: TelemetryPayload) -> TelemetryView {
+    TelemetryView {
+        peers: t
+            .peers
+            .into_iter()
+            .map(|p| PeerTrafficDst {
+                node_id: p.node_id,
+                tx_frames: p.tx_frames,
+                tx_bytes: p.tx_bytes,
+                rx_frames: p.rx_frames,
+                rx_bytes: p.rx_bytes,
+            })
+            .collect(),
+        drop_global: t.drop_global,
+        drops: t
+            .drops
+            .into_iter()
+            .map(|d| DropView {
+                node_id: d.node_id,
+                count: d.count,
+            })
+            .collect(),
+        direct: t
+            .direct
+            .into_iter()
+            .map(|d| DirectPairDst {
+                node_id: d.node_id,
+                endpoint: d.endpoint.into_owned(),
+                rtt_ms: d.rtt_ms,
+            })
+            .collect(),
+        updated_at: 0,
+    }
+}
+
 struct PendingRegister {
     auth_key: String,
     capabilities: u32,
     routes: Vec<String>,
     protocol_version: u32,
+    /// 构建版本元数据（REQ-052；可选，仅状态端点展示）
+    version: String,
     /// true = 恢复类（pubkey 已注册表命中）；false = 新建类
     resume: bool,
 }
@@ -320,6 +361,7 @@ impl CoordinatorServer {
                     capabilities: req.capabilities,
                     routes,
                     protocol_version: req.protocol_version,
+                    version: req.version.to_string(),
                     resume: false,
                 };
                 let (node_id, ch_pubkey, pending) =
@@ -382,13 +424,14 @@ impl CoordinatorServer {
                 let eph_priv = ch.eph_priv;
                 let nonce = ch.nonce.clone();
                 let issued_at = ch.issued_at;
-                let (auth_key, capabilities, routes, protocol_version, resume) = {
+                let (auth_key, capabilities, routes, protocol_version, version, resume) = {
                     let p = &ch.pending;
                     (
                         p.auth_key.clone(),
                         p.capabilities,
                         p.routes.clone(),
                         p.protocol_version,
+                        p.version.clone(),
                         p.resume,
                     )
                 };
@@ -446,6 +489,9 @@ impl CoordinatorServer {
                     self.coordinator.heartbeat(ch_node, unix_seconds());
                     self.coordinator
                         .set_protocol_version(ch_node, protocol_version);
+                    if !version.is_empty() {
+                        self.coordinator.set_build_version(ch_node, version.clone());
+                    }
                     let network_id = self.coordinator.network_id_of(ch_node).unwrap_or(0);
                     // binding 缺失属不变量破坏——fail-closed 而非空绑定静默降级
                     let Some(identity_binding) = self.coordinator.identity_binding_of(ch_node)
@@ -477,6 +523,10 @@ impl CoordinatorServer {
                             }
                             self.coordinator
                                 .set_protocol_version(data.node_id, protocol_version);
+                            if !version.is_empty() {
+                                self.coordinator
+                                    .set_build_version(data.node_id, version.clone());
+                            }
                             // e2e 故障注入（REQ-057）：注册已消费、响应丢弃并断连——
                             // 客户端须走退避重连 + 挑战恢复（ack 丢失模拟）
                             if self.drop_first_register_response {
@@ -522,8 +572,14 @@ impl CoordinatorServer {
             }
             MsgType::HEARTBEAT => {
                 let mut reader = BytesReader::from_bytes(body);
-                let _ = Heartbeat::from_reader(&mut reader, body)?;
+                let hb = Heartbeat::from_reader(&mut reader, body)?;
                 if let Some(node_id) = state.registered {
+                    // 遥测聚合（REQ-052/§3.15）：latest-wins 快照，旧值直接覆盖；
+                    // 无载荷（旧节点）不触碰已有快照
+                    if let Some(telemetry) = hb.telemetry {
+                        self.coordinator
+                            .store_telemetry(node_id, telemetry_view(telemetry));
+                    }
                     // 超频忽略（REQ-047）：间隔不足即丢弃——不更新 last_seen、
                     // 不推快照、不回 LEASE（零成本），租约/离线判定语义不变
                     let now = Instant::now();

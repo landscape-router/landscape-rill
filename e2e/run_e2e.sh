@@ -17,6 +17,10 @@
 #            （随机/变形帧头/probe 全 type）、向 coord:8443 灌裸 TCP 垃圾 + TLS 后
 #            超长帧/垃圾信封/REGISTER 垃圾消息体 → 三容器存活不 panic、node-a 丢帧
 #            摘要出现（fail-closed）、洪泛后 b→a 双栈 ping 收敛（已认证流量不受影响）
+#   status：只读状态端点（REQ-051/052，CONTROL_PLANE §3.14/§3.15）——direct 拓扑 +
+#            coord status 段；认证（401/429/明文拒绝）、内容组齐全（含 REQ-052
+#            build_version）、遥测聚合（per-peer 计数 + 直连对 RTT）、SIGHUP 密码
+#            轮换（旧 401 新 200 + reload_log）、红线（密码/密钥材料零输出）
 #   iperf ：性能场景（docs/perf.md §2.4）——TUN 隧道 iperf3 双向吞吐；
 #           MESH_E2E_TOPOLOGY=relay 用线形拓扑（经中继），MESH_E2E_CPUS=0 全容器绑单核
 # 环境变量 MESH_E2E_TRANSPORT（默认 udp，REQ-054）：=tcp 时数据面走真 TCP 兜底档

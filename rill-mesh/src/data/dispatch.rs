@@ -52,7 +52,10 @@ impl MeshData {
                 })
             }
             crate::probe::probe_type::PONG => {
-                if self.probe_pending.remove(&probe.nonce).is_some() {
+                if let Some((to, endpoint, sent_at)) = self.probe_pending.remove(&probe.nonce) {
+                    // 直连确认对（REQ-052）：RTT 以 nonce 发送时刻计，上报即清零
+                    let rtt_ms = u32::try_from(sent_at.elapsed().as_millis()).unwrap_or(u32::MAX);
+                    self.direct_pairs.insert(to, (endpoint, rtt_ms));
                     Ok(IncomingEvent::ProbePong {
                         from: probe.from_node_id,
                         endpoint: from_addr,
@@ -87,7 +90,8 @@ impl MeshData {
             return None;
         }
         let nonce = rand::random::<u32>();
-        self.probe_pending.insert(nonce, (to, endpoint));
+        self.probe_pending
+            .insert(nonce, (to, endpoint, Instant::now()));
         let packet = crate::probe::ProbePacket::ping(from, to, nonce);
         match self.wan_send(&packet.encode(), endpoint).await {
             Ok(_) => Some(nonce),
@@ -106,7 +110,10 @@ impl MeshData {
     /// 取走上轮全部在途探测（目标, 端点）：pump 周期开始调用——
     /// 剩余 = 上轮无 PONG 确认 → 驱动发送侧指数退避（CN-01/REQ-046）
     pub fn take_pending_probes(&mut self) -> Vec<(u32, SocketAddr)> {
-        self.probe_pending.drain().map(|(_, v)| v).collect()
+        self.probe_pending
+            .drain()
+            .map(|(_, (to, endpoint, _))| (to, endpoint))
+            .collect()
     }
 
     /// 帧路径（原 relay 入口逻辑，分派后调用）。帧留在接收缓冲中：
@@ -118,6 +125,7 @@ impl MeshData {
     ) -> std::io::Result<IncomingEvent> {
         match self.relay(frame).await {
             RelayOutcome::Delivered { from } => {
+                self.note_rx(from, frame.len());
                 if let Some(ingress) = self.endpoint_owner_preferring(from_addr, from) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
@@ -140,6 +148,7 @@ impl MeshData {
                 Ok(ev)
             }
             RelayOutcome::Flooded { from, .. } => {
+                self.note_rx(from, frame.len());
                 if let Some(ingress) = self.endpoint_owner(from_addr) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
@@ -171,8 +180,63 @@ impl MeshData {
                     .entry(f)
                     .or_insert_with(|| RateCounter::new(DROP_STATS_PERIOD));
                 rc.tick();
+                *self.telemetry_drops.entry(f).or_insert(0) += 1;
             }
-            _ => self.drop_stats_global.tick(),
+            _ => {
+                self.drop_stats_global.tick();
+                self.telemetry_drops_global = self.telemetry_drops_global.saturating_add(1);
+            }
+        }
+    }
+
+    /// per-peer 数据面流量计数（REQ-052）：tx 归业务终点/转发下一跳
+    pub(super) fn note_tx(&mut self, peer: u32, bytes: usize) {
+        let t = self.peer_traffic.entry(peer).or_default();
+        t.tx_frames = t.tx_frames.saturating_add(1);
+        t.tx_bytes = t.tx_bytes.saturating_add(bytes as u64);
+    }
+
+    /// per-peer 数据面流量计数（REQ-052）：rx 归发送方
+    pub(super) fn note_rx(&mut self, peer: u32, bytes: usize) {
+        let t = self.peer_traffic.entry(peer).or_default();
+        t.rx_frames = t.rx_frames.saturating_add(1);
+        t.rx_bytes = t.rx_bytes.saturating_add(bytes as u64);
+    }
+
+    /// 取走本区间遥测（REQ-052/CONTROL_PLANE §3.15）：上报即清零，下区间不含旧值；
+    /// peers 按 node_id 排序保证输出确定。控制面心跳周期调用
+    pub fn take_telemetry(&mut self) -> TelemetryPayload<'static> {
+        let mut peers: Vec<(u32, PeerTraffic)> = self.peer_traffic.drain().collect();
+        peers.sort_by_key(|(id, _)| *id);
+        let mut drops: Vec<(u32, u64)> = self.telemetry_drops.drain().collect();
+        drops.sort_by_key(|(id, _)| *id);
+        let mut direct: Vec<(u32, (SocketAddr, u32))> = self.direct_pairs.drain().collect();
+        direct.sort_by_key(|(id, _)| *id);
+        let drop_global = std::mem::take(&mut self.telemetry_drops_global);
+        TelemetryPayload {
+            peers: peers
+                .into_iter()
+                .map(|(node_id, t)| TelemetryPeer {
+                    node_id,
+                    tx_frames: t.tx_frames,
+                    tx_bytes: t.tx_bytes,
+                    rx_frames: t.rx_frames,
+                    rx_bytes: t.rx_bytes,
+                })
+                .collect(),
+            drop_global,
+            drops: drops
+                .into_iter()
+                .map(|(node_id, count)| TelemetryDrop { node_id, count })
+                .collect(),
+            direct: direct
+                .into_iter()
+                .map(|(node_id, (endpoint, rtt_ms))| DirectPair {
+                    node_id,
+                    endpoint: Cow::Owned(endpoint.to_string()),
+                    rtt_ms,
+                })
+                .collect(),
         }
     }
 

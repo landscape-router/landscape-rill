@@ -125,6 +125,13 @@ impl Registry {
         self.auth_keys.keys().cloned().collect()
     }
 
+    /// key + 规格成对迭代（REQ-051 状态端点台账；key 脱敏由展示层负责）
+    pub fn auth_key_specs(&self) -> impl Iterator<Item = (String, AuthKeySpec)> + '_ {
+        self.auth_keys
+            .iter()
+            .map(|(k, spec)| (k.clone(), spec.clone()))
+    }
+
     /// 白名单为空 = 拒绝一切公告（fail-closed，CONTROL_PLANE §3.12）
     pub fn set_announce_whitelist(&mut self, whitelist: Vec<Prefix>) {
         self.announce_whitelist = whitelist;

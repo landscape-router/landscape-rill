@@ -84,6 +84,7 @@ mod tests {
             hostname: Cow::Borrowed(""),
             os: Cow::Borrowed(""),
             routes: vec![],
+            version: Cow::Borrowed(""),
         };
         let bytes = envelope_bytes(MsgType::REGISTER, &msg);
         let (mt, inner) = parse_envelope(&bytes).unwrap();

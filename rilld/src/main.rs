@@ -31,6 +31,7 @@ pub(crate) type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync
 mod coord_run;
 mod logging;
 mod node_run;
+mod status_http;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/landscape/overlay.json";
 const UNIT_NAME: &str = "lrill.service";

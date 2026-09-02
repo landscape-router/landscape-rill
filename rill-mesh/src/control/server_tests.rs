@@ -158,7 +158,7 @@ async fn conn_message_flood_disconnects() {
     let client = MeshClient::new([0x44; 32]);
     // 未注册心跳 = 无操作消息：纯测连接级限速
     for _ in 0..(CONN_MSG_CAPACITY as usize + 10) {
-        framing::write_frame(&mut tls, &client.heartbeat())
+        framing::write_frame(&mut tls, &client.heartbeat(None))
             .await
             .unwrap();
     }
@@ -240,12 +240,12 @@ async fn heartbeat_overspeed_ignored() {
     );
     while read_envelope(&mut tls).await.unwrap().0 != MsgType::KEY_DIST {}
     // 心跳 1（首个，间隔充分）→ 快照 + LEASE 推送
-    framing::write_frame(&mut tls, &client.heartbeat())
+    framing::write_frame(&mut tls, &client.heartbeat(None))
         .await
         .unwrap();
     while read_envelope(&mut tls).await.unwrap().0 != MsgType::LEASE {}
     // 心跳 2（紧随其后，< 最小间隔）→ 忽略：无任何推送
-    framing::write_frame(&mut tls, &client.heartbeat())
+    framing::write_frame(&mut tls, &client.heartbeat(None))
         .await
         .unwrap();
     let r = tokio::time::timeout(
@@ -550,6 +550,7 @@ async fn register_resume_with_valid_key_still_requires_pop() {
         hostname: Cow::Borrowed(""),
         os: Cow::Borrowed(""),
         routes: Vec::new(),
+        version: Cow::Borrowed(""),
     };
     framing::write_frame(&mut tls2, &envelope_bytes(MsgType::REGISTER, &spoof))
         .await
@@ -778,4 +779,77 @@ async fn preauth_garbage_inputs_rejected() {
             .unwrap();
     })
     .await;
+}
+
+/// 遥测入库（REQ-052/§3.15）：Heartbeat 携带遥测载荷 → coordinator latest-wins
+/// 快照更新；载荷为 optional 扩展字段（旧节点空载荷照常处理，连接不断）
+#[tokio::test]
+async fn heartbeat_telemetry_stored() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (ca_cert, cert, key) = ca_pair();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let master = [0x11; 32];
+    let seed = [0x22; 32];
+    let ak = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+    let ak_server = ak.clone();
+    let server = tokio::spawn(async move {
+        let mut listener = listener;
+        let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+        let mut server = CoordinatorServer::new(master, seed);
+        server
+            .coordinator
+            .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+        let _ = server.handle_connection(&mut tls).await;
+        // 客户端断连后验证入库
+        let all = server.coordinator.telemetry_all();
+        assert_eq!(all.len(), 1);
+        let t = all[0].1;
+        assert_eq!(t.peers.len(), 1);
+        assert_eq!(t.peers[0].tx_frames, 5);
+        assert_eq!(t.peers[0].tx_bytes, 500);
+        assert_eq!(t.drop_global, 2);
+        assert_eq!(t.direct.len(), 1);
+        assert_eq!(t.direct[0].endpoint, "10.0.0.1:10001");
+        assert_eq!(t.direct[0].rtt_ms, 42);
+        assert!(t.updated_at > 0);
+    });
+    let host = addr.ip().to_string();
+    let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+        .await
+        .unwrap();
+    let client = MeshClient::new([0x34; 32]);
+    let reg = client.register_request(&bad_leg_config(&ak, 0x34));
+    framing::write_frame(&mut tls, &reg).await.unwrap();
+    answer_challenge(&mut tls, &client).await;
+    assert_eq!(
+        read_envelope(&mut tls).await.unwrap().0,
+        MsgType::REGISTER_RESPONSE
+    );
+    while read_envelope(&mut tls).await.unwrap().0 != MsgType::KEY_DIST {}
+    let tele = TelemetryPayload {
+        peers: vec![TelemetryPeer {
+            node_id: 9,
+            tx_frames: 5,
+            tx_bytes: 500,
+            rx_frames: 4,
+            rx_bytes: 400,
+        }],
+        drop_global: 2,
+        drops: vec![TelemetryDrop {
+            node_id: 9,
+            count: 1,
+        }],
+        direct: vec![DirectPair {
+            node_id: 9,
+            endpoint: Cow::Borrowed("10.0.0.1:10001"),
+            rtt_ms: 42,
+        }],
+    };
+    framing::write_frame(&mut tls, &client.heartbeat(Some(tele)))
+        .await
+        .unwrap();
+    while read_envelope(&mut tls).await.unwrap().0 != MsgType::LEASE {}
+    drop(tls);
+    server.await.unwrap();
 }

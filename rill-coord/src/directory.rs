@@ -11,6 +11,8 @@ pub struct Directory {
     endpoints: HashMap<u32, Vec<String>>,
     relay_list: Vec<String>,
     protocol_versions: HashMap<u32, u32>,
+    /// 构建版本元数据（REQ-052/CONTROL_PLANE §3.1）：仅展示用，不参与协商
+    build_versions: HashMap<u32, String>,
 }
 
 impl Directory {
@@ -66,10 +68,20 @@ impl Directory {
         self.protocol_versions.get(&node_id).copied().unwrap_or(1)
     }
 
+    /// 构建版本（REQ-052，可选元数据；仅状态端点展示）
+    pub fn set_build_version(&mut self, node_id: u32, version: String) {
+        self.build_versions.insert(node_id, version);
+    }
+
+    pub fn build_version(&self, node_id: u32) -> Option<&str> {
+        self.build_versions.get(&node_id).map(|v| v.as_str())
+    }
+
     /// 节点吊销/移除时清理目录状态（netmap 版本递增由调用方编排）
     pub fn remove_node(&mut self, node_id: u32) {
         self.endpoints.remove(&node_id);
         self.protocol_versions.remove(&node_id);
+        self.build_versions.remove(&node_id);
     }
 }
 

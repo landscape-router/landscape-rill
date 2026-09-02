@@ -45,6 +45,7 @@ message RegisterRequest {
   string hostname = 5;          // 可选元数据
   string os = 6;                // 可选元数据
   repeated string routes = 7;   // 前缀公告（CIDR，§3.8）
+  string version = 8;           // 构建版本元数据（可选，CARGO_PKG_VERSION；REQ-052）
 }
 
 message RegisterResponse {
@@ -88,6 +89,34 @@ message KeyDist {
 
 // §3.4 心跳与租约
 message Heartbeat {
+  TelemetryPayload telemetry = 1;  // 可选遥测载荷（REQ-052，旧节点省略=默认值）
+}
+
+// §3.15 遥测（REQ-052）：区间计数（上报即清零）+ 直连确认对
+message TelemetryPeer {
+  fixed32 node_id = 1;
+  uint64 tx_frames = 2;
+  uint64 tx_bytes = 3;
+  uint64 rx_frames = 4;
+  uint64 rx_bytes = 5;
+}
+
+message DirectPair {
+  fixed32 node_id = 1;
+  string endpoint = 2;  // 数据面 UDP 地址
+  uint32 rtt_ms = 3;
+}
+
+message TelemetryPayload {
+  repeated TelemetryPeer peers = 1;   // 数据面 per-peer 流量（单播转发）
+  uint64 drop_global = 2;             // 未能归因到 peer 的丢帧
+  repeated TelemetryDrop drops = 3;   // per-peer 丢帧归因
+  repeated DirectPair direct = 4;     // PONG 确认的直连对（端点 + RTT）
+}
+
+message TelemetryDrop {
+  fixed32 node_id = 1;  // 0 = 会话/解析层错误，无明确对端
+  uint64 count = 2;
 }
 
 message Lease {

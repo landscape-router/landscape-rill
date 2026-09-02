@@ -12,6 +12,7 @@ use crate::domain::{network_id_for, NetworkDomain};
 use crate::liveness::Liveness;
 use crate::path_service::{PathCandidate, PathEvent, PathSet};
 use crate::signer::Ed25519Signer;
+use crate::status::TelemetryView;
 use crate::store::{CoordState, CoordStore, StoreError, STATE_SCHEMA};
 use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, RegisterOutcome,
@@ -19,6 +20,7 @@ use landscape_rill_core::control::registry::{
 use landscape_rill_core::crypto::KEY_DST_LEN;
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::route::Prefix;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use tracing::{error, warn};
@@ -74,6 +76,10 @@ pub struct Coordinator {
     next_node_id: u32,
     /// 持久化存储（REQ-037）；None = 纯内存（重启丢失注册）
     store: Option<CoordStore>,
+    /// 节点遥测快照（REQ-052/CONTROL_PLANE §3.15）：latest-wins，软状态不落盘
+    telemetry: HashMap<u32, TelemetryView>,
+    /// 注册拒绝累计（REQ-051 安全计数器，§3.14 内容组 4）
+    register_rejects: u64,
 }
 
 impl Coordinator {
@@ -85,6 +91,8 @@ impl Coordinator {
             directory: Directory::new(),
             next_node_id: 1,
             store: None,
+            telemetry: HashMap::new(),
+            register_rejects: 0,
         }
     }
 
@@ -325,6 +333,59 @@ impl Coordinator {
         self.directory.protocol_version(node_id)
     }
 
+    /// 构建版本（REQ-052）：可选元数据，仅状态端点展示
+    pub fn set_build_version(&mut self, node_id: u32, version: String) {
+        self.directory.set_build_version(node_id, version);
+    }
+
+    pub fn build_version(&self, node_id: u32) -> Option<&str> {
+        self.directory.build_version(node_id)
+    }
+
+    /// 遥测快照入库（REQ-052/CONTROL_PLANE §3.15）：latest-wins，直接覆盖旧值；
+    /// updated_at 由 coordinator 侧打点（不信任节点时钟）
+    pub fn store_telemetry(&mut self, node_id: u32, mut view: TelemetryView) {
+        view.updated_at = unix_seconds();
+        self.telemetry.insert(node_id, view);
+    }
+
+    /// 全量遥测快照（状态端点 §3.14 观察面）：node_id 升序，输出确定
+    pub fn telemetry_all(&self) -> Vec<(u32, &TelemetryView)> {
+        let mut v: Vec<(u32, &TelemetryView)> =
+            self.telemetry.iter().map(|(k, t)| (*k, t)).collect();
+        v.sort_by_key(|(id, _)| *id);
+        v
+    }
+
+    /// 注册拒绝累计（§3.14 内容组 4）
+    pub fn register_rejects(&self) -> u64 {
+        self.register_rejects
+    }
+
+    /// 网络名列表（§3.14 内容组 1；插入序 = 配置序）
+    pub fn network_names(&self) -> Vec<String> {
+        self.domains.iter().map(|d| d.name.clone()).collect()
+    }
+
+    /// auth key 台账条目（§3.14 内容组 3）：key + 规格；调用方做脱敏/剩余有效期
+    pub fn auth_key_specs_for(&self, network: &str) -> Vec<(String, AuthKeySpec)> {
+        self.domain_by_name(network)
+            .map(|d| d.registry.auth_key_specs().collect())
+            .unwrap_or_default()
+    }
+
+    /// 已消费一次性 key tombstone（§3.14 内容组 3）
+    pub fn consumed_one_time_keys_for(&self, network: &str) -> Vec<String> {
+        self.domain_by_name(network)
+            .map(|d| d.registry.consumed_one_time_keys().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// 节点 last_seen（unix 秒；None = 从未见/重启后未知）
+    pub fn last_seen_of(&self, node_id: u32) -> Option<u64> {
+        self.liveness.last_seen_of(node_id)
+    }
+
     /// 节点所属网络（server 按节点网络过滤 netmap/relay 列表）
     pub fn network_id_of(&self, node_id: u32) -> Option<u32> {
         self.domain_of_node(node_id).map(|d| d.network_id)
@@ -400,6 +461,21 @@ impl Coordinator {
     // ==================== 注册 / 密钥下发 ====================
 
     pub fn register(
+        &mut self,
+        auth_key: &str,
+        static_pubkey: &[u8; 32],
+        capabilities: u32,
+        routes: Vec<String>,
+    ) -> Result<RegisterData, RegisterError> {
+        // 注册拒绝计数（REQ-051 §3.14 内容组 4）：任何 Err 路径收口统计
+        let r = self.register_inner(auth_key, static_pubkey, capabilities, routes);
+        if r.is_err() {
+            self.register_rejects = self.register_rejects.saturating_add(1);
+        }
+        r
+    }
+
+    fn register_inner(
         &mut self,
         auth_key: &str,
         static_pubkey: &[u8; 32],
@@ -631,6 +707,7 @@ impl Coordinator {
                 d.registry.revoke(node_id);
                 self.liveness.remove(node_id);
                 self.directory.remove_node(node_id);
+                self.telemetry.remove(&node_id);
                 // 路径联动：撤销所有涉及该节点的路径（源/目的/中继）
                 d.paths.withdraw_node(node_id);
                 d.keys.bump_version();

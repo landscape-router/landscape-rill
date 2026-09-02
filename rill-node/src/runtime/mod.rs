@@ -358,7 +358,9 @@ impl Node {
         if now.duration_since(self.last_control_heartbeat) >= self.opts.heartbeat_interval {
             self.last_control_heartbeat = now;
             if let Some(control) = self.control.as_mut() {
-                let hb = control.heartbeat_envelope();
+                // 遥测随控制面心跳上报（REQ-052/§3.15）：区间计数取走即清零
+                let tele = self.mesh.take_telemetry();
+                let hb = control.heartbeat_envelope(Some(tele));
                 if control.send_envelope(&hb).await.is_err() {
                     self.control = None;
                 }
