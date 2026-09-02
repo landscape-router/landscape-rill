@@ -4,7 +4,7 @@ use crate::coord_run::run_coord;
 use crate::{unix_now, BoxResult, FileConfig};
 use landscape_rill_coord::authkey::{is_expired, parse_auth_key};
 use landscape_rill_core::error::format_chain;
-use landscape_rill_node::config::Config;
+use landscape_rill_node::config::{Config, DataTransport};
 use landscape_rill_node::runtime::{Node, NodeOptions};
 use landscape_rill_node::tun::TunConfig;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,15 @@ pub(crate) fn run_daemon(
             coord_signing_pubkey,
             ca_cert_path,
             udp_echo_addr,
+            data_transport: match file.data_transport.as_deref() {
+                None => DataTransport::default(),
+                Some(s) => DataTransport::parse(s).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "data_transport must be \"udp\" or \"tcp\"",
+                    )
+                })?,
+            },
             coord: None,
         };
         config.validate().map_err(|e| {

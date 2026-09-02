@@ -12,6 +12,8 @@
 #            重启 coord → a↔b 恢复 + node-c 挑战重连（无新注册）→ node-d 复用同一 key 被拒
 #   iperf ：性能场景（docs/perf.md §2.4）——TUN 隧道 iperf3 双向吞吐；
 #           MESH_E2E_TOPOLOGY=relay 用线形拓扑（经中继），MESH_E2E_CPUS=0 全容器绑单核
+# 环境变量 MESH_E2E_TRANSPORT（默认 udp，REQ-054）：=tcp 时数据面走真 TCP 兜底档
+#（帧字节与 UDP 一致，仅外覆 2B 长度前缀）——建议与 direct 场景组合验证。
 set -euo pipefail
 
 E2E_DIR="$(cd "$(dirname "$0")" && pwd)"

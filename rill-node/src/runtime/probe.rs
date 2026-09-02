@@ -117,19 +117,23 @@ impl Node {
         let Some(id) = self.node_id else {
             return;
         };
-        if let Some((host, port)) = self.echo_target.clone() {
-            let Some(echo_ip) = tokio::net::lookup_host((host.as_str(), port))
-                .await
-                .ok()
-                .and_then(|mut it| it.next())
-                .map(|a| a.ip())
-            else {
-                debug!("[node] echo target unresolved: {host}:{port}");
-                return;
-            };
-            let ep = SocketAddr::new(echo_ip, port);
-            if self.probe_send_gate(&ep, now) {
-                let _ = self.mesh.send_probe_ping(ep, id, 0).await;
+        // echo = coordinator UDP 回显（STUN 式 NAT 发现），只对 UDP underlay 有意义；
+        // TCP 兜底档的公网端点发现挂 REQ-054 开放问题 2（v1 跳过，避免打 coord TLS 口）
+        if self.mesh.underlay_kind() != UnderlayKind::Tcp {
+            if let Some((host, port)) = self.echo_target.clone() {
+                let Some(echo_ip) = tokio::net::lookup_host((host.as_str(), port))
+                    .await
+                    .ok()
+                    .and_then(|mut it| it.next())
+                    .map(|a| a.ip())
+                else {
+                    debug!("[node] echo target unresolved: {host}:{port}");
+                    return;
+                };
+                let ep = SocketAddr::new(echo_ip, port);
+                if self.probe_send_gate(&ep, now) {
+                    let _ = self.mesh.send_probe_ping(ep, id, 0).await;
+                }
             }
         }
         let peers = self.mesh.peer_endpoints();

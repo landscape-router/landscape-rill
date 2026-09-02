@@ -2,6 +2,7 @@ use super::*;
 use landscape_rill_core::crypto::{derive_key_dst, KEY_DST_LEN};
 use landscape_rill_core::frame::{build_frame, packet_type, HEADER_LEN_V2, TAG_LEN, VERSION2};
 use landscape_rill_core::handshake::{BINDING_LEN, SESSION_KEY_LEN};
+use tokio::net::UdpSocket;
 
 const MASTER: [u8; 32] = [0x42; 32];
 const NETWORK_ID: u32 = 0x0000_0001;
@@ -47,6 +48,37 @@ async fn setup_pair() -> (MeshData, MeshData) {
     let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
         .await
         .unwrap();
+    wire_pair(&mut a, &mut b).await;
+    (a, b)
+}
+
+/// TCP 兜底 underlay 节点对（REQ-054：帧字节跨传输一致，配对注入逻辑同 UDP）
+async fn setup_pair_tcp() -> (MeshData, MeshData) {
+    let mut a = MeshData::bind_underlay(
+        Underlay::Tcp(
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap(),
+        ),
+        1,
+    )
+    .await
+    .unwrap();
+    let mut b = MeshData::bind_underlay(
+        Underlay::Tcp(
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap(),
+        ),
+        2,
+    )
+    .await
+    .unwrap();
+    wire_pair(&mut a, &mut b).await;
+    (a, b)
+}
+
+async fn wire_pair(a: &mut MeshData, b: &mut MeshData) {
     let a_addr = a.local_addr().unwrap();
     let b_addr = b.local_addr().unwrap();
     for id in [1u32, 2] {
@@ -61,7 +93,13 @@ async fn setup_pair() -> (MeshData, MeshData) {
     b.set_binding_verifier(verifier);
     a.set_endpoint(2, b_addr);
     b.set_endpoint(1, a_addr);
-    (a, b)
+}
+
+/// 从独立 socket 向节点注入原始字节（模拟 WAN 入包；underlay 重构后
+/// MeshData 不再暴露内部 socket）
+async fn inject(node: &MeshData, bytes: &[u8]) {
+    let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    s.send_to(bytes, node.local_addr().unwrap()).await.unwrap();
 }
 
 #[tokio::test]
@@ -379,10 +417,7 @@ async fn probe_ping_replies_pong_and_matches() {
     }
     // PONG 已确认（nonce 已消费）；重复 PONG → 丢弃
     let dup = ProbePacket::pong(&ProbePacket::ping(1, 2, nonce), Vec::new());
-    b.socket
-        .send_to(&dup.encode(), a.local_addr().unwrap())
-        .await
-        .unwrap();
+    inject(&a, &dup.encode()).await;
     let ev = a.handle_incoming().await.unwrap();
     assert!(matches!(
         ev,
@@ -407,10 +442,7 @@ async fn probe_echo_pong_carries_seen_addr() {
         .unwrap();
     let ping = ProbePacket::ping(1, crate::probe::NODE_ID_COORDINATOR, nonce);
     let pong = ProbePacket::pong(&ping, b"203.0.113.9:41641".to_vec());
-    node.socket
-        .send_to(&pong.encode(), node.local_addr().unwrap())
-        .await
-        .unwrap();
+    inject(&node, &pong.encode()).await;
     // 先消费自己发出的 PING（to=0 不回 PONG）
     let ev = node.handle_incoming().await.unwrap();
     assert!(matches!(ev, IncomingEvent::ProbePing { from: 1 }));
@@ -430,10 +462,7 @@ async fn unknown_protocol_dropped() {
         .await
         .unwrap();
     let garbage = b"\x80not-a-frame-not-a-probe";
-    node.socket
-        .send_to(garbage, node.local_addr().unwrap())
-        .await
-        .unwrap();
+    inject(&node, garbage).await;
     let ev = node.handle_incoming().await.unwrap();
     assert!(matches!(
         ev,
@@ -455,10 +484,7 @@ async fn probe_ping_foreign_target_not_replied() {
         .unwrap();
     // A 收到发给节点 3 的 PING（B 与 A 无关）→ B 不应收到 PONG 之外的任何帧
     let ping = ProbePacket::ping(3, 3, 55).encode();
-    a.socket
-        .send_to(&ping, a.local_addr().unwrap())
-        .await
-        .unwrap();
+    inject(&a, &ping).await;
     let ev = a.handle_incoming().await.unwrap();
     assert!(matches!(ev, IncomingEvent::ProbePing { from: 3 }));
     // A 不应自动回任何东西：直接检查 b 的 socket 无入帧（对 A 本地环回，回包会到 a 自己）
@@ -556,7 +582,6 @@ async fn forward_through_relay() {
     let mut b = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
         .await
         .unwrap();
-    let relay_addr = relay.local_addr().unwrap();
     let b_addr = b.local_addr().unwrap();
 
     relay.set_key_dst(3, node_key(3));
@@ -564,7 +589,7 @@ async fn forward_through_relay() {
     b.set_key_dst(3, node_key(3));
 
     let frame = frame_from(1, 3, b"payload", 64, 1);
-    relay.socket.send_to(&frame, relay_addr).await.unwrap();
+    inject(&relay, &frame).await;
     let (_, mut recv) = relay.recv_frame().await.unwrap();
     assert_eq!(
         relay.relay(&mut recv).await,
@@ -1361,4 +1386,180 @@ async fn oversize_datagram_dropped_then_normal_ok() {
         b.handle_incoming().await.unwrap(),
         IncomingEvent::Responded { peer: 1 }
     );
+}
+
+// ==================== underlay 传输（REQ-054） ====================
+
+/// TCP 兜底档全路径：握手 + 数据往返 + 帧/probe 共存一条流
+/// （REQ-054 验收：帧字节跨传输一致，行为与 UDP 档对齐）
+#[tokio::test]
+async fn tcp_underlay_handshake_data_and_probe() {
+    let (mut a, mut b) = setup_pair_tcp().await;
+    // 惰性 connect：首帧触发建连，握手照常
+    let msg1 = a.initiate_handshake(2).unwrap().unwrap();
+    a.send_to_node(2, &msg1).await.unwrap();
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Responded { peer: 1 }
+    );
+    assert_eq!(
+        a.handle_incoming().await.unwrap(),
+        IncomingEvent::Established { peer: 2 }
+    );
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Established { peer: 1 }
+    );
+    // 数据往返
+    let (frame, hop) = a.build_data_frame(2, b"via-tcp", 0x42).unwrap();
+    assert!(hop.is_none()); // v1 直连
+    a.send_to_node_hop(2, hop, &frame).await.unwrap();
+    match b.handle_incoming().await.unwrap() {
+        IncomingEvent::Data { from, payload } => {
+            assert_eq!(from, 1);
+            assert_eq!(payload.as_ref(), b"via-tcp");
+        }
+        other => panic!("expected data, got {:?}", other),
+    }
+    // probe 与帧共存（REQ-054 决策 3：首字节分类，同流互不干扰）
+    let nonce = a
+        .send_probe_ping(b.local_addr().unwrap(), 1, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::ProbePing { from: 1 }
+    );
+    match a.handle_incoming().await.unwrap() {
+        IncomingEvent::ProbePong {
+            from,
+            endpoint,
+            payload,
+        } => {
+            assert_eq!(from, 2);
+            assert!(payload.is_empty());
+            // PONG 源 = TCP 连接对端地址（回包走缓存的同一条连接）
+            assert_eq!(endpoint.ip().to_string(), "127.0.0.1");
+        }
+        other => panic!("expected ProbePong, got {:?}", other),
+    }
+    let _ = nonce;
+}
+
+/// relay 侧端点择优（v1 直连分支，REQ-054 决策 6）：
+/// 首选端点 miss 高 → 置后，转发命中健康端点
+#[tokio::test]
+async fn relay_v1_forward_prefers_healthy_endpoint() {
+    let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
+        .await
+        .unwrap();
+    let bad = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let good = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    relay.set_key_dst(3, node_key(3));
+    relay.set_endpoints(
+        3,
+        vec![bad.local_addr().unwrap(), good.local_addr().unwrap()],
+    );
+    // 首选端点活性差 → order_endpoints 置后
+    relay
+        .endpoint_health
+        .insert((3, bad.local_addr().unwrap()), 5);
+
+    let mut frame = frame_from(1, 3, b"payload", 64, 1);
+    assert_eq!(
+        relay.relay(&mut frame).await,
+        RelayOutcome::Forwarded { to: 3 }
+    );
+    // good 收到（TTL 已原地递减），bad 无包
+    let mut buf = [0u8; 2048];
+    let (n, from) = good.recv_from(&mut buf).await.unwrap();
+    assert_eq!(from, relay.local_addr().unwrap());
+    assert_eq!(&buf[..n], &frame[..]);
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        bad.recv_from(&mut buf)
+    )
+    .await
+    .is_err());
+}
+
+/// relay 侧端点择优（v2 path_next_hop 分支，REQ-054 决策 6）：
+/// 路径后继的多端点按活性排序转发
+#[tokio::test]
+async fn relay_v2_forward_prefers_healthy_endpoint() {
+    let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+        .await
+        .unwrap();
+    let bad = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let good = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    relay.set_key_path(0x300, path_key(0x300));
+    relay.set_endpoints(
+        2,
+        vec![bad.local_addr().unwrap(), good.local_addr().unwrap()],
+    );
+    relay
+        .endpoint_health
+        .insert((2, bad.local_addr().unwrap()), 5);
+    relay.set_paths(
+        2,
+        vec![PathEntry {
+            path_id: 0x300,
+            path_epoch: 1,
+            hops: vec![3, 2],
+            expires_at: unix_seconds() + 3600,
+        }],
+    );
+
+    let header = MeshFrameHeader {
+        version: VERSION2,
+        to_node_id: 2,
+        from_node_id: 1,
+        path_id: 0x300,
+        seq: 1,
+        ttl: 64,
+        ..Default::default()
+    };
+    let mut frame = build_frame(
+        &header,
+        &path_key(0x300),
+        &[0x24; 32],
+        0x1234_5678,
+        b"payload",
+    )
+    .unwrap();
+    assert_eq!(
+        relay.relay(&mut frame).await,
+        RelayOutcome::Forwarded { to: 2 }
+    );
+    let mut buf = [0u8; 2048];
+    let (n, _) = good.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], &frame[..]);
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        bad.recv_from(&mut buf)
+    )
+    .await
+    .is_err());
+}
+
+/// 流式断线信号回喂（REQ-054 决策 7）：TCP connect 失败 →
+/// send 报错 + 端点 miss 递增（后续发送置后该端点）
+#[tokio::test]
+async fn tcp_send_failure_feeds_endpoint_miss() {
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead.local_addr().unwrap();
+    drop(dead);
+    let mut a = MeshData::bind_underlay(
+        Underlay::Tcp(
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap(),
+        ),
+        1,
+    )
+    .await
+    .unwrap();
+    a.set_endpoints(2, vec![dead_addr]);
+    assert!(a.send_to_node_hop(2, None, b"\x01junk").await.is_err());
+    assert_eq!(a.endpoint_health.get(&(2, dead_addr)), Some(&1));
 }

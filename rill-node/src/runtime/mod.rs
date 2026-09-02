@@ -16,7 +16,9 @@ use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::rate::{RateCounter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
 use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
-use landscape_rill_mesh::data::{IncomingEvent, MeshData, PathEntry};
+use landscape_rill_mesh::data::{
+    IncomingEvent, MeshData, PathEntry, TcpTransport, UdpTransport, Underlay, UnderlayKind,
+};
 use probe::RelayEntry;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -169,7 +171,16 @@ impl Node {
     pub async fn new(cfg: Config, opts: NodeOptions) -> BoxResult<Self> {
         cfg.validate()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let mesh = MeshData::bind("0.0.0.0:0".parse()?, 0).await?;
+        // underlay 选择（REQ-054）：UDP 默认 / TCP 兜底（v1 全网统一）
+        let underlay = match cfg.data_transport {
+            crate::config::DataTransport::Udp => {
+                Underlay::Udp(UdpTransport::bind("0.0.0.0:0".parse()?).await?)
+            }
+            crate::config::DataTransport::Tcp => {
+                Underlay::Tcp(TcpTransport::bind("0.0.0.0:0".parse()?).await?)
+            }
+        };
+        let mesh = MeshData::bind_underlay(underlay, 0).await?;
         // 枚举本机非 loopback、非 tun 接口地址（供 EndpointReport 通告；多宿主节点
         // 通告全部端点，coordinator 并入 netmap，对端按可达性选用）
         let advertise_ips = collect_local_ips().await;

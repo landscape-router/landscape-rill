@@ -98,6 +98,8 @@ NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_C_AUTHKEY=$("$OVERLAY" authkey --network lab)
 gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认1)
   CAP="${7:-1}"
+  # 数据面 underlay（REQ-054）：MESH_E2E_TRANSPORT=tcp 时节点走真 TCP 兜底档
+  DT="${MESH_E2E_TRANSPORT:-udp}"
   cat > "$BUILD_DIR/$1" <<EOF
 {
   "coordinator_url": "https://coord:8443",
@@ -107,6 +109,7 @@ gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=
   "announce_routes": $5,
   "coord_signing_pubkey": "$COORD_PUBKEY",
   "ca_cert_path": "/etc/landscape/ca.pem",
+  "data_transport": "$DT",
   "tun": { "name": "land0", "mtu": 1420, "address4": "$3", "address6": "$4" }
 }
 EOF

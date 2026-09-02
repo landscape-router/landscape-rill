@@ -13,7 +13,9 @@ use landscape_rill_core::rate::{SourceRateLimiter, TokenBucket};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket;
+
+pub mod transport;
+pub use transport::{TcpTransport, UdpTransport, Underlay, UnderlayKind, UnderlayTransport};
 
 /// 广播泛洪令牌桶参数（FRAME_HEADER §2.6）：容量 64、补充 16/s
 pub const FLOOD_BUCKET_CAPACITY: u32 = 64;
@@ -68,7 +70,8 @@ impl PathEntry {
 }
 
 pub struct MeshData {
-    socket: UdpSocket,
+    /// underlay 传输（REQ-054）：报文语义接缝，裸 UDP/真 TCP 兜底可换
+    underlay: Underlay,
     /// WAN 接收缓冲（REQ-053）：跨包复用，recv_buf_from 直写 spare 容量免零初始化
     recv_buf: BytesMut,
     key_dst_table: HashMap<u32, [u8; 32]>,
@@ -198,9 +201,13 @@ pub mod session;
 
 impl MeshData {
     pub async fn bind(bind: SocketAddr, self_node_id: u32) -> std::io::Result<Self> {
-        let socket = UdpSocket::bind(bind).await?;
+        Self::bind_underlay(Underlay::Udp(UdpTransport::bind(bind).await?), self_node_id).await
+    }
+
+    /// 以指定 underlay 构建（REQ-054：真 TCP 兜底等非默认传输入口）
+    pub async fn bind_underlay(underlay: Underlay, self_node_id: u32) -> std::io::Result<Self> {
         Ok(Self {
-            socket,
+            underlay,
             recv_buf: BytesMut::with_capacity(MAX_FRAME),
             key_dst_table: HashMap::new(),
             endpoint_table: HashMap::new(),
@@ -231,7 +238,12 @@ impl MeshData {
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.socket.local_addr()
+        self.underlay.local_endpoint()
+    }
+
+    /// 传输谱系观测（REQ-054）：probe echo 等传输相关行为分支用
+    pub fn underlay_kind(&self) -> UnderlayKind {
+        self.underlay.kind()
     }
 
     /// 注册完成后由 runtime 注入真实 node_id（bind 时未知）
@@ -341,27 +353,29 @@ impl MeshData {
             .and_then(|p| p.hops.first().copied())
     }
 
-    /// WAN 接收原语（REQ-053）：BytesMut 跨包复用，返回缓冲切片（未 freeze），
+    /// WAN 接收原语（REQ-053/054）：BytesMut 跨包复用，返回缓冲切片（未 freeze），
     /// 转发 TTL 递减与就地解密在 freeze 前完成（零拷贝扇出）。
-    /// 超长报文（≥ MAX_FRAME）被内核截断 → 丢弃并计全局桶。
+    /// 传输超长报文（≥ MAX_FRAME）→ 丢弃并计全局桶。
     pub async fn recv_frame(&mut self) -> std::io::Result<(SocketAddr, BytesMut)> {
-        self.recv_buf.reserve(MAX_FRAME);
-        let (n, from) = self.socket.recv_buf_from(&mut self.recv_buf).await?;
-        if n >= MAX_FRAME {
-            self.recv_buf.clear();
-            self.drop_stats_global.tick();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "frame exceeds MAX_FRAME",
-            ));
+        let res = self.underlay.recv_frame(&mut self.recv_buf).await;
+        match res {
+            Ok(from) => {
+                let n = self.recv_buf.len();
+                Ok((from, self.recv_buf.split_to(n)))
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::InvalidData {
+                    self.drop_stats_global.tick();
+                }
+                Err(e)
+            }
         }
-        Ok((from, self.recv_buf.split_to(n)))
     }
 
-    /// WAN 发送原语（REQ-053 函数级接缝）：数据面全部 socket 发送收口于此，
-    /// P4 XDP 快速路径在此抽取。
+    /// WAN 发送原语（REQ-053 函数级接缝 → REQ-054 传输接缝）：
+    /// 数据面全部 socket 发送收口于此，XDP 快速路径在此替换。
     pub(super) async fn wan_send(&self, frame: &[u8], addr: SocketAddr) -> std::io::Result<usize> {
-        self.socket.send_to(frame, addr).await
+        self.underlay.send_frame(addr, frame).await
     }
 
     pub fn is_handshake(frame: &[u8]) -> bool {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::DataTransport;
 use landscape_rill_core::control::registry::AuthKeyPolicy;
 use landscape_rill_mesh::control::{server_tls_stream, CoordinatorServer};
 use std::net::IpAddr;
@@ -95,6 +96,7 @@ fn node_config(url: &str, ca_path: &str, seed: u8, routes: Vec<String>) -> Confi
         coord_signing_pubkey: VerifyingKey::from(&signing_key).to_bytes(),
         ca_cert_path: ca_path.into(),
         udp_echo_addr: None,
+        data_transport: DataTransport::default(),
         coord: None,
     }
 }

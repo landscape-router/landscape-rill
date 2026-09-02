@@ -7,6 +7,24 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_LEASE_THRESHOLD: Duration = Duration::from_secs(60);
 pub const DEFAULT_SESSION_REKEY_HOURS: u64 = 24;
 
+/// 数据面 underlay 传输（REQ-054）：Udp 默认；Tcp 为 UDP 封禁兜底
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataTransport {
+    #[default]
+    Udp,
+    Tcp,
+}
+
+impl DataTransport {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "udp" => Some(Self::Udp),
+            "tcp" => Some(Self::Tcp),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub coordinator_url: String,
@@ -21,6 +39,8 @@ pub struct Config {
     /// coordinator UDP 回显目标（CONNECTIVITY §2，"host:port" 允许主机名）；
     /// None = 按 coordinator_url 推导（coordinator 默认 TCP/UDP 同端口）
     pub udp_echo_addr: Option<String>,
+    /// 数据面 underlay 传输（REQ-054）：v1 全网统一（UDP 默认 / TCP 兜底）
+    pub data_transport: DataTransport,
     pub coord: Option<CoordConfig>,
 }
 
@@ -168,6 +188,7 @@ mod tests {
             coord_signing_pubkey: [7; 32],
             ca_cert_path: "/etc/landscape/ca.pem".into(),
             udp_echo_addr: None,
+            data_transport: DataTransport::Udp,
             coord: None,
         }
     }

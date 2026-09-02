@@ -142,6 +142,9 @@ struct FileConfig {
     /// coordinator UDP 回显地址（host:port）；缺省 = coordinator_url host + 8443
     #[serde(default)]
     udp_echo_addr: Option<String>,
+    /// 数据面 underlay 传输（REQ-054）："udp"（默认）/"tcp"
+    #[serde(default)]
+    data_transport: Option<String>,
     #[serde(default)]
     tun: Option<TunFile>,
     #[serde(default)]

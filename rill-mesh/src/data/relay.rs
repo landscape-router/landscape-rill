@@ -62,49 +62,50 @@ impl MeshData {
                 reason: DropReason::TtlExpired,
             };
         }
-        // 转发端点：v2 路径按路径下一跳（本节点在 hops 中的后继），v1 直连目标端点
-        let next_hop = if header.version == VERSION2 {
-            self.path_next_hop(&header)
+        // 转发下一跳节点：v2 路径 = 本节点在 hops 中的后继，v1 = 直连目标。
+        // 端点按活性排序逐个尝试（REQ-054 决策 6：relay 侧同样择优，
+        // 修复此前固定取 .first() 的缺口）
+        let next_node = if header.version == VERSION2 {
+            self.path_next_node(&header)
         } else {
-            None
+            Some(header.to_node_id)
         };
-        let endpoint = match next_hop {
-            Some(e) => Some(e),
-            None => self
-                .endpoint_table
-                .get(&header.to_node_id)
-                .and_then(|v| v.first())
-                .copied(),
-        };
-        let Some(endpoint) = endpoint else {
+        let Some(next_node) = next_node else {
             return RelayOutcome::Dropped {
                 reason: DropReason::NoEndpoint,
             };
         };
+        let mut candidates = match self.endpoint_table.get(&next_node) {
+            Some(v) => v.clone(),
+            None => {
+                return RelayOutcome::Dropped {
+                    reason: DropReason::NoEndpoint,
+                };
+            }
+        };
+        self.order_endpoints(next_node, header.to_node_id, &mut candidates);
         // 原地 TTL 递减后直接从接收缓冲发出（REQ-053：转发零拷贝；
-        // ttl 不参与认证，自交付解密不受影响）
+        // ttl 不参与认证，自交付解密不受影响；逐端点尝试先成功即止）
         decrement_ttl(frame);
-        match self.wan_send(&frame[..], endpoint).await {
-            Ok(_) => RelayOutcome::Forwarded {
-                to: header.to_node_id,
-            },
-            Err(_) => RelayOutcome::Dropped {
-                reason: DropReason::NoEndpoint,
-            },
+        for addr in candidates {
+            if self.wan_send(&frame[..], addr).await.is_ok() {
+                return RelayOutcome::Forwarded {
+                    to: header.to_node_id,
+                };
+            }
+        }
+        RelayOutcome::Dropped {
+            reason: DropReason::NoEndpoint,
         }
     }
 
-    /// v2 路径转发下一跳：本节点在路径 hops 中的后继节点
-    pub(super) fn path_next_hop(&self, header: &MeshFrameHeader) -> Option<SocketAddr> {
+    /// v2 路径转发下一跳节点：本节点在路径 hops 中的后继
+    pub(super) fn path_next_node(&self, header: &MeshFrameHeader) -> Option<u32> {
         let paths = self.path_table.get(&header.to_node_id)?;
         let path = paths
             .iter()
             .find(|p| p.path_id == header.path_id && !p.expired(unix_seconds()))?;
         let idx = path.hops.iter().position(|h| *h == self.self_node_id)?;
-        let next = path.hops.get(idx + 1)?;
-        self.endpoint_table
-            .get(next)
-            .and_then(|v| v.first())
-            .copied()
+        path.hops.get(idx + 1).copied()
     }
 }
