@@ -23,3 +23,8 @@ landscape-rill-macro = { path = "../rill-macro" }
 [dev-dependencies]
 rcgen.workspace = true
 ed25519-dalek.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "dataplane"
+harness = false

@@ -75,6 +75,9 @@ tracing-appender = "0.2.3"
 # --- Test helpers ---
 rcgen = "0.14.8"
 
+# --- Benchmark (dev-only, docs/perf.md) ---
+criterion = "0.5"
+
 # --- Build tools ---
 pb-rs = "0.10.0"
 walkdir = "2.5.0"

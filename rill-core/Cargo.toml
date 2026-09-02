@@ -16,3 +16,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 landscape-rill-macro = { path = "../rill-macro" }
+
+[[bench]]
+name = "frame"
+harness = false
+
+[dev-dependencies]
+criterion.workspace = true
