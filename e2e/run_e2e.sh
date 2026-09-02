@@ -476,6 +476,8 @@ PYEOF
       echo "FAIL: c→a 中继兜底未通（CON-04）"
       echo "--- node-c 日志 ---"; logs mesh-node-c | grep -E 'relay|probe|dropped|path|frame|session' | tail -20
       echo "--- node-b 日志 ---"; logs mesh-node-b | grep -E 'relay|dropped|frame' | tail -10
+      echo "--- node-a 日志 ---"; logs mesh-node-a | grep -E 'route|path|frame|session|dropped|send' | tail -20
+      echo "--- node-d 日志 ---"; logs mesh-node-d | grep -E 'relay|dropped|frame' | tail -10
       exit 1
     }
   done
