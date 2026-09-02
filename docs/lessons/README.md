@@ -2,8 +2,8 @@
 
 > 抽象自外部协议实现公开缺陷（安全/可靠性）的教训库，逐一对照 landscape-rill 设计的规避状态。
 > 目的：防回归——实现/演进时对照复核。
-> 版本：v0.6
-> 最近修改：2026-08-30
+> 版本：v0.7
+> 最近修改：2026-09-02
 
 ## 场景目录
 
@@ -38,21 +38,26 @@
 | [CN-02](./connectivity/CN-02-punch-parse-panic.md) | 连通性 | 打洞信令解析 panic 复发 | ✅ 已落档 |
 | [CN-03](./connectivity/CN-03-shared-node-no-auth.md) | 连通性 | 共享/中继节点无用户级认证 | ✅ 已落档 |
 | [CN-04](./connectivity/CN-04-policy-all-paths.md) | 连通性 | 策略执行未覆盖中继/打洞/直连全部路径 | ✅ 已落档 |
+| [CN-05](./connectivity/CN-05-preauth-parse-alloc.md) | 连通性 | 认证前富解析/预认证资源分配 | **需补**：REQ-059 合并时入设计 + fuzz（SEC-08） |
 | [CP-01](./control-plane/CP-01-rpc-no-auth-leak.md) | 控制面 | 控制接口无认证信息泄露 | ✅ 已落档 |
 | [CP-02](./control-plane/CP-02-duplicate-peer-id.md) | 控制面 | 节点 ID 冲突 | ✅ 架构规避 |
 | [CP-03](./control-plane/CP-03-cascade-failure.md) | 控制面 | 初始节点崩溃级联故障 | ✅ 架构规避 |
 | [CP-04](./control-plane/CP-04-stale-node-leftover.md) | 控制面 | 失效节点信息残留 | ✅ 架构收益 |
 | [CP-05](./control-plane/CP-05-reconnect-loop.md) | 控制面 | 重连无限循环无退避 | ✅ 已落档 |
+| [CP-06](./control-plane/CP-06-local-ipc-unauth.md) | 控制面 | 本地 IPC/状态变更端点无认证 | ✅ 架构规避 |
 | [KC-01](./keys-config/KC-01-weak-kdf.md) | 密钥配置 | 非加密哈希充当 KDF | ✅ 已落档 |
 | [KC-02](./keys-config/KC-02-keys-plaintext-disk.md) | 密钥配置 | 密钥明文落盘 | **需补**：文件权限 600 + 加密存储 |
 | [KC-03](./keys-config/KC-03-dns-resolution-backpressure.md) | 密钥配置 | 域名解析无背压 | ✅ 已落档 |
 | [KC-04](./keys-config/KC-04-config-silently-ignored.md) | 密钥配置 | 配置静默失效 | ✅ 已落档 |
+| [KC-05](./keys-config/KC-05-peer-metadata-config-injection.md) | 密钥配置 | 协商元数据写入本地配置未转义 | **需补**：配置生成实现时转义+回读验证 |
+| [KC-06](./keys-config/KC-06-noncanonical-revocation-key.md) | 密钥配置 | 吊销/比对键未规范化 | **需补**：REQ-058 合并时显式入 CONTROL_PLANE |
 | [AO-01](./admin-ops/AO-01-default-credentials.md) | 管理面 | 硬编码默认凭据 | ✅ 已落档 |
 | [AO-02](./admin-ops/AO-02-client-side-config-storage.md) | 管理面 | 关键配置存客户端本地存储 | ✅ 已落档 |
 | [AO-03](./admin-ops/AO-03-admin-api-privesc.md) | 管理面 | 管理接口越权 | **需补**：授权模型 + 越权测试 |
 | [AO-04](./admin-ops/AO-04-log-storm.md) | 管理面 | 日志撑爆磁盘 | ✅ 已落档 |
 | [AO-05](./admin-ops/AO-05-no-security-audit.md) | 管理面 | 无独立安全审计 | **需补**：P3/P4 挂审计 |
 | [AO-06](./admin-ops/AO-06-release-source-consistency.md) | 管理面 | 发布产物与源码不一致 | **需补**：可复现构建 + 一致性校验 |
+| [AO-07](./admin-ops/AO-07-admin-action-toctou.md) | 管理面 | 管理操作时序型越权（检查/执行窗口） | **需补**：P3 管理 API 原子授权 + 吊销即时生效 |
 | [RM-01](./runtime/RM-01-panic-systemic.md) | 运行时 | 解析路径 panic 系统性复发 | **需补**：实现规范 + 任务隔离 |
 | [RM-02](./runtime/RM-02-socket-leak.md) | 运行时 | 连接资源泄漏 → EMFILE | **需补**：生命周期管理 |
 | [PF-01](./platform/PF-01-platform-sleep-stale.md) | 平台 | 休眠/网络切换后静默失效 | **需补**：平台生命周期钩子 |
@@ -65,16 +70,18 @@
 - 设计/新增任何包类型时：复核 **FS-01/FS-04**（不得绕过 AEAD、帧头必须进 AAD）+ **FS-09**（通道不得绕过代理/源地址语义）
 - 实现路由引擎（LPM/fallback）时：复核 **RT-01/RT-02/RT-03** + **CN-01**（probe 限速强制）
 - 实现前缀公告流程时：复核 **RT-01/RT-03** + **KC-04**（白名单校验不静默失效）
-- 实现密钥体系/KDF 时：复核 **FS-02/FS-03/FS-07** + **KC-01** + **KC-02**（密钥存储规范）
+- 实现密钥体系/KDF 时：复核 **FS-02/FS-03/FS-07** + **KC-01** + **KC-02**（密钥存储规范）+ **KC-06**（吊销/比对键规范化）
 - 实现握手/会话时：复核 **FS-01/FS-02**（逐对会话密钥 + 身份绑定交叉验证）
 - 实现任务框架时：复核 **RM-01**（fail-closed 规范 + 任务隔离）
 - 实现控制面连接管理时：复核 **RM-02** + **CP-03**（重连全量补偿）+ **CP-05**（退避 + 上限）
 - 实现组级隔离（v2）/打洞时：复核 **CN-04**（策略覆盖中继/打洞/直连全部路径）
 - 实现平台适配（macOS/Windows）时：复核 **PF-01/PF-02** + **PF-03**（禁内核驱动）+ **PF-04**（事件驱动就绪）
 - 实现 netmap 增量（v2）时：复核 **CP-04**（淘汰策略）
-- 实现管理面/WebUI 时：复核 **AO-01/AO-02** + **AO-03**（授权模型）
+- 实现管理面/WebUI 时：复核 **AO-01/AO-02** + **AO-03**（授权模型）+ **AO-07**（原子授权 + 吊销即时生效）
+- 新增本地管理接口/daemon socket/Web API 时：复核 **CP-06**（对端身份验证 + 权限最小化 + 破坏性端点同等鉴权）
+- 实现配置生成/元数据落盘时：复核 **KC-05**（转义/白名单 + 回读验证）
 - 实现配置解析时：复核 **KC-03**（缓存 + 指数退避）+ **KC-04**
-- 实现中继限速/挂靠时：复核 **CN-03**
+- 实现中继限速/挂靠时：复核 **CN-03** + **CN-05**（预认证最小解析 + 资源分配后置）
 - 实现 CI 发布流水线时：复核 **AO-06**（可复现构建 + 产物一致性）
 - 路线图规划时：复核 **AO-05**（安全审计）
 
@@ -103,6 +110,7 @@
 
 | 日期 | 变更 |
 |---|---|
+| 2026-09-02 | **v0.7**：新增 5 条（CN-05/KC-05/KC-06/CP-06/AO-07）——认证前富解析与预认证分配、协商元数据注入本地配置、吊销/比对键规范化、本地管理接口与状态变更端点鉴权、管理操作时序型越权；同批提出 REQ-058/REQ-059（外部项目公开 advisory 教训吸收批次） |
 | 2026-08-30 | **v0.6**：模板升级——全部 37 条重写为「问题（现象）/原因/正确行为/复核触发点」结构，去除"我们的规避"段（规则归属设计文档，避免重复而失真）；场景描述具体化到可还原 |
 | 2026-08-30 | **v0.5**：新增 6 条（CN-04/AO-06/FS-09/PF-03/PF-04/CP-05），合计 38 条 |
 | 2026-08-30 | **v0.4 重构**：单表 LESSONS.md → docs/lessons/ 场景化拆分（8 场景 32 条），共用模板，来源信息抽象化移除；README 承载场景目录/汇总表/复核触发点/模板规范 |
