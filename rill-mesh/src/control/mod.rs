@@ -15,7 +15,7 @@ pub use codec::{
     envelope_body, envelope_bytes, parse_envelope, read_envelope, write_msg, EnvelopeError,
 };
 pub use server::{ConnectionState, CoordinatorServer};
-pub use tls::{client_tls_stream, server_tls_stream};
+pub use tls::{client_tls_stream, server_tls_accept, server_tls_stream};
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const CHALLENGE_NONCE_LEN: usize = 16;

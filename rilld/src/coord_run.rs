@@ -5,7 +5,7 @@ use crate::{load_coord, BoxResult};
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
 use landscape_rill_mesh::control::{
-    read_envelope, server_tls_stream, ConnectionState, CoordinatorServer,
+    read_envelope, server_tls_accept, ConnectionState, CoordinatorServer,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -20,8 +20,14 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
     let config = load_coord(config_path)?;
     let cert = std::fs::read(&config.tls_cert_path)?;
     let key = std::fs::read(&config.tls_key_path)?;
-    let mut listener = TcpListener::bind(config.listen_addr.parse::<SocketAddr>()?).await?;
-    let server = Arc::new(Mutex::new(CoordinatorServer::from_config(&config)?));
+    let listener = TcpListener::bind(config.listen_addr.parse::<SocketAddr>()?).await?;
+    let mut server = CoordinatorServer::from_config(&config)?;
+    // e2e 故障注入（REQ-057，仅 e2e recover 场景）：丢弃首个 REGISTER_RESPONSE
+    if std::env::var("RILL_E2E_DROP_FIRST_REGISTER_RESPONSE").is_ok_and(|v| v == "1") {
+        server.arm_drop_first_register_response();
+        warn!("[coord] e2e injection armed: drop first REGISTER_RESPONSE");
+    }
+    let server = Arc::new(Mutex::new(server));
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     // 高频失败 → 周期摘要（LOGGING §5）：事件只计数，每周期 ≤1 条，0 不输出
     let mut accept_failed = RateCounter::new(RATE_SUMMARY_PERIOD);
@@ -85,19 +91,27 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
                     }
                 }
             }
-            next = accept_next(&mut listener, &cert, &key) => {
-                // 单连接 TLS 错误不得杀死 coordinator（恶意/畸形握手 → 计数摘要后继续监听）
-                let tls = match next {
+            next = listener.accept() => {
+                // 只 select 裸 accept（取消安全：未决连接由内核排队）——TLS 握手
+                // 不得作为可取消分支（与 1s 周期分支竞争会击杀进行中的握手，
+                // 客户端 1s 退避与 tick 周期可通约 → 相位锁定连续失败）
+                let (tcp, _) = match next {
                     Ok(t) => t,
-                    Err(_) => {
+                    Err(e) => {
+                        warn!("[coord] accept error: {e}");
                         accept_failed.tick();
                         continue;
                     }
                 };
                 let srv = server.clone();
+                let cert = cert.clone();
+                let key = key.clone();
                 tokio::spawn(async move {
+                    let mut tls = match server_tls_accept(tcp, &cert, &key).await {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
                     let mut conn = ConnectionState::default();
-                    let mut tls = tls;
                     loop {
                         let (msg_type, body) = match read_envelope(&mut tls).await {
                             Ok(v) => v,
@@ -116,16 +130,6 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
             }
         }
     }
-}
-
-async fn accept_next(
-    listener: &mut TcpListener,
-    cert: &[u8],
-    key: &[u8],
-) -> BoxResult<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
-    server_tls_stream(listener, cert, key).await.map_err(|e| {
-        Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(e.to_string()))
-    })
 }
 
 /// relay RTT 探测周期（CONNECTIVITY §5：可达性验证 + RTT 测量）

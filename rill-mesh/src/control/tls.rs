@@ -45,6 +45,25 @@ pub async fn server_tls_stream(
     Ok(acceptor.accept(tcp).await?)
 }
 
+/// 已接受 TCP 连接上的 TLS 握手（accept 由调用方完成——select 里只跑裸
+/// accept 才取消安全，握手在 spawn 任务里进行不得被周期分支取消击杀）
+pub async fn server_tls_accept(
+    tcp: TcpStream,
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> BoxResult<tokio_rustls::server::TlsStream<TcpStream>> {
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(cert_pem).collect::<Result<_, _>>()?;
+    let key = PrivateKeyDer::pem_slice_iter(key_pem)
+        .next()
+        .transpose()?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no key"))?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    Ok(acceptor.accept(tcp).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
