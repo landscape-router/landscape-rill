@@ -162,4 +162,5 @@
   - 证据：rill-node/src/runtime/reconnect.rs（3 单测）、e2e/mesh/recover/（间隔 ≥900ms 断言过）、CI e2e-mesh recover（run 33668466083）
 - [x] CTL-19：注册响应丢失挑战恢复（REQ-057）——单测：Fresh 态（无 node_id）收带 node_id 的 Challenge → tag 正确 + RegisterOk 写入会话；服务端按存储 pubkey 解析身份验证（坏 tag / 窗口外拒绝）；同 key 异 pubkey 仍拒（unknown pubkey，锁定计数路径不变）；进程重启后同 key 恢复。e2e recover：coord 注入丢弃首个 REGISTER_RESPONSE → 退避重连 → 挑战恢复拿到原 node_id → mesh 收敛无新注册
   - 证据：rill-mesh/src/control/server.rs（ack-loss 恢复/坏 tag/异 pubkey 三单测）、e2e/mesh/recover/、persist 阶段 3 挑战证据断言、CI e2e-mesh recover+persist（run 33668466083）
-- [ ] CTL-20：注册挑战统一（REQ-060，状态：`待补充`）——单测：恢复类对抗（有效 key + 受害者 pubkey + 精确 caps/routes → 仍须挑战，坏 tag 拒、无响应泄露）；新建类 PoP 前置（key 只读校验 → 挑战 → 验证后才准入+消费）；幂等比对后置（caps/routes 不一致在 PoP 后拒绝）；Challenge node_id=0 语义。e2e 全场景回归（首注册 +1 RTT）
+- [x] CTL-20：注册挑战统一（REQ-060，状态：`已覆盖`）——单测：恢复类对抗（有效 key + 受害者 pubkey + 精确 caps/routes → 仍须挑战，无私钥 tag 必败、身份无扰动）；新建类 PoP 前置（挑战未通过 key 不消费，通过后才准入）；幂等比对后置（caps 变更在 PoP 后拒绝）；新建类 Challenge node_id=0。e2e 全场景回归（direct/relay/persist/recover 本地绿 + CI 八场景全绿，首注册 +1 RTT）
+  - 证据：rill-mesh/src/control/server.rs（resume_with_valid_key_still_requires_pop / one_time_key_consumed_only_after_pop / resume_caps_mismatch_rejected_after_pop 三单测）、CI e2e-mesh run 33679179273

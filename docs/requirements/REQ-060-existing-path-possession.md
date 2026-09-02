@@ -13,6 +13,8 @@ REQ-057 收口时明确标注的另案：挑战恢复只在 Fresh 分支（未�
 
 实施范围经用户拍板取 **B（统一全挑战）**：凡 REGISTER 且本连接未证明持有 → 一律挑战，**含首次注册（新建类）**——"无持有证明不发身份"无例外，顺带阻断公钥抢注（squatting）。分两类完成语义：恢复类（pubkey 命中）验证后做幂等比对、按条目回响应、不校验 key 有效性；新建类（pubkey 未命中）key 只读校验后挑战，验证通过才执行完整准入（一次性 key 消费后置于 PoP）。caps/routes 比对后置到 PoP 之后（消除认证前配置比对 oracle）。wire 零改动（Challenge.node_id 复用 REQ-057 字段，新建类填 0）；代价：每次首注册/重注册 +1 RTT（低频路径，可接受）。机制完全复用 REQ-057（ChallengeState 绑定存储 pubkey，X25519 DH 挑战 + HMAC tag）。
 
-## 验收标准
+## 验收标准（已落地，2026-09-02）
 
-CTL-20 落地后回填（对抗单测：恢复类凭成员凭据+受害者 pubkey 不可获身份；新建类 key 消费后置；幂等比对后置。e2e 全场景回归：首注册 +1 RTT 不破坏既有断言）。
+- 单测：恢复类对抗（有效 reusable key + 受害者 pubkey + 精确 caps/routes → 挑战 → 无私钥 tag 必败，身份无扰动）/ 新建类 PoP 前置（挑战未通过 key 不消费，通过后才准入）/ 幂等比对后置（caps 变更 PoP 后拒绝）——rill-mesh/src/control/server.rs
+- e2e：direct/relay/persist/recover 本地全绿；CI e2e-mesh 八场景全绿（run 33679179273）
+- CI：check + e2e-mesh 双绿（同 run）
