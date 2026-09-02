@@ -472,7 +472,12 @@ PYEOF
       fi
     fi
     sleep 2
-    [ "$i" = "40" ] && { echo "FAIL: c→a 中继兜底未通（CON-04）"; exit 1; }
+    [ "$i" = "40" ] && {
+      echo "FAIL: c→a 中继兜底未通（CON-04）"
+      echo "--- node-c 日志 ---"; logs mesh-node-c | grep -E 'relay|probe|dropped|path|frame|session' | tail -20
+      echo "--- node-b 日志 ---"; logs mesh-node-b | grep -E 'relay|dropped|frame' | tail -10
+      exit 1
+    }
   done
 
   echo "==> probe 阶段 5/6：CON-06 中继故障切换（stop node-b → 经 d 中继仍可达）"
