@@ -164,6 +164,11 @@ impl MeshData {
         match self.endpoint_table.get(&hop) {
             Some(addrs) => {
                 let mut ordered = addrs.clone();
+                // v2 帧（版本字节 = 0x02）限定首跳自有端点：非参与者兜底中继
+                // 无法转发 v2，发了必丢（v1 保留兜底语义）
+                if frame.first() == Some(&VERSION2) {
+                    self.retain_hop_endpoints(hop, &mut ordered);
+                }
                 self.order_endpoints(hop, to_node_id, &mut ordered);
                 let mut last_err = None;
                 let mut last_tried = None;

@@ -1708,3 +1708,120 @@ async fn relay_owner_map_disambiguates_fallback_endpoints() {
     // 经 d 路径保持健康（到达即 ok），不经 miss 重置
     assert_eq!(a.pick_path(3, u64::MAX).unwrap().path_id, 12);
 }
+
+/// 1↔3 手工建会话（wire_pair 是 1↔2 专用；本测试需要 dest=3）
+async fn wire_pair_1_3(a: &mut MeshData, c: &mut MeshData) {
+    let a_addr = a.local_addr().unwrap();
+    let c_addr = c.local_addr().unwrap();
+    for id in [1u32, 3] {
+        a.set_key_dst(id, node_key(id));
+        c.set_key_dst(id, node_key(id));
+    }
+    a.set_handshake_context(ctx(1));
+    c.set_handshake_context(ctx(3));
+    a.set_peer_static(3, peer_static(3));
+    c.set_peer_static(1, peer_static(1));
+    a.set_binding_verifier(verifier);
+    c.set_binding_verifier(verifier);
+    a.set_endpoint(3, c_addr);
+    c.set_endpoint(1, a_addr);
+}
+
+#[tokio::test]
+async fn v2_send_targets_first_hop_owned_endpoints_only() {
+    // 相位锁定修复（probe CI）：首跳候选列表混入其他中继的兜底端点时，
+    // v2 帧必须跳过（非参与者无法转发 → 必丢）；v1 帧保留兜底语义。
+    // 修复前 last-used 轮换让回包相位锁定在兜底死端点（心跳 v1 存活、ping v2 全灭）
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let mut c = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+        .await
+        .unwrap();
+    wire_pair_1_3(&mut a, &mut c).await;
+    let msg1 = a.initiate_handshake(3).unwrap().unwrap();
+    a.send_to_node(3, &msg1).await.unwrap();
+    let _ = c.handle_incoming().await.unwrap();
+    let _ = a.handle_incoming().await.unwrap();
+    let _ = c.handle_incoming().await.unwrap();
+    assert!(a.has_session(3));
+    // 首跳 4 的候选列表：d(2) 的兜底端点排前 + b(4) 自有端点；b/d 用裸 socket
+    let b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let d = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b_ep = b.local_addr().unwrap();
+    let d_ep = d.local_addr().unwrap();
+    a.set_endpoints(4, vec![d_ep, b_ep]);
+    a.set_relay_owners(HashMap::from([(d_ep, 2u32), (b_ep, 4u32)]));
+    a.set_key_path(0x21, path_key(0x21));
+    a.set_paths(
+        3,
+        vec![PathEntry {
+            path_id: 0x21,
+            path_epoch: 1,
+            hops: vec![4, 3],
+            expires_at: unix_seconds() + 3600,
+        }],
+    );
+    // v2 数据帧：必发往 b(4) 自有端点，兜底端点 d 不收
+    let (frame, first_hop) = a.build_data_frame(3, b"ping", 7).unwrap();
+    assert_eq!(first_hop, Some(4));
+    assert!(a.send_to_node_hop(3, first_hop, &frame).await.unwrap());
+    let mut buf = [0u8; 2048];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(1), b.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], &frame[..]);
+    assert!(d.try_recv(&mut buf).is_err());
+    // v1 对照：同一首跳的心跳帧仍可用兜底端点（last-used 轮换到 d）
+    let hb = a.build_heartbeat_frame(3).unwrap();
+    assert!(a.send_to_node_hop(3, Some(4), &hb).await.unwrap());
+    let _ = tokio::time::timeout(Duration::from_secs(1), d.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(b.try_recv(&mut buf).is_err());
+}
+
+#[tokio::test]
+async fn v2_relay_forward_skips_fallback_endpoints() {
+    // 中继转发侧同理：下一跳候选混入其他中继兜底端点时，v2 帧只发自有端点
+    let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 4)
+        .await
+        .unwrap();
+    let dest = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let other = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dest_ep = dest.local_addr().unwrap();
+    let other_ep = other.local_addr().unwrap();
+    relay.set_key_path(0x31, path_key(0x31));
+    // 污染形态：下一跳 3 的候选里混入其他中继(2)的兜底端点且排前
+    relay.set_endpoints(3, vec![other_ep, dest_ep]);
+    relay.set_relay_owners(HashMap::from([(other_ep, 2u32)]));
+    relay.set_forward_path(PathEntry {
+        path_id: 0x31,
+        path_epoch: 1,
+        hops: vec![1, 4, 3],
+        expires_at: unix_seconds() + 3600,
+    });
+    let header = MeshFrameHeader {
+        version: VERSION2,
+        to_node_id: 3,
+        from_node_id: 1,
+        path_id: 0x31,
+        seq: 1,
+        ttl: 64,
+        ..Default::default()
+    };
+    let mut frame = build_frame(&header, &path_key(0x31), &[0x24; 32], 0x1234_5678, b"p").unwrap();
+    assert_eq!(
+        relay.relay(&mut frame).await,
+        RelayOutcome::Forwarded { to: 3 }
+    );
+    let mut buf = [0u8; 2048];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(1), dest.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], &frame[..]);
+    assert!(other.try_recv(&mut buf).is_err());
+}

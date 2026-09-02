@@ -84,6 +84,10 @@ impl MeshData {
                 };
             }
         };
+        // v2 帧限定下一跳自有端点（非参与者兜底中继无法转发，见 paths.rs）
+        if header.version == VERSION2 {
+            self.retain_hop_endpoints(next_node, &mut candidates);
+        }
         self.order_endpoints(next_node, header.to_node_id, &mut candidates);
         // 原地 TTL 递减后直接从接收缓冲发出（REQ-053：转发零拷贝；
         // ttl 不参与认证，自交付解密不受影响；逐端点尝试先成功即止）
