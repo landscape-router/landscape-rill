@@ -395,6 +395,10 @@ impl Node {
                     let _ = self.mesh.send_to_node_hop(peer, hop, &frame).await;
                 }
                 if *miss >= self.opts.data_heartbeat_misses {
+                    info!(
+                        "[node] session {} dropped: {} heartbeat misses",
+                        peer, *miss
+                    );
                     self.mesh.drop_session(peer);
                     self.peer_heartbeats.remove(&peer);
                 }

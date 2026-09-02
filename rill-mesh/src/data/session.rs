@@ -2,6 +2,7 @@
 //! 帧构建/发送（数据/心跳/握手）、会话帧解密
 
 use super::*;
+use tracing::debug;
 
 impl MeshData {
     /// 主动发起握手（懒握手入口）。已有会话 → Ok(None)；
@@ -42,6 +43,13 @@ impl MeshData {
         flow_hash: u64,
     ) -> Result<(Vec<u8>, Option<u32>), SendError> {
         let path = self.pick_path(to, flow_hash);
+        match &path {
+            Some(p) => debug!(
+                "[mesh] data frame to {} via path {} hops {:?}",
+                to, p.path_id, p.hops
+            ),
+            None => debug!("[mesh] data frame to {} via default path (v1)", to),
+        }
         let frame = match path {
             Some(ref p) => self.build_typed_frame_v2(to, p, packet_type::UNICAST, payload)?,
             None => self.build_typed_frame(to, packet_type::UNICAST, payload)?,
@@ -163,6 +171,7 @@ impl MeshData {
                     last_tried = Some(addr);
                     match self.wan_send(frame, addr).await {
                         Ok(_) => {
+                            debug!("[mesh] send to {} hop {} via {}", to_node_id, hop, addr);
                             self.last_sent_endpoint.insert(to_node_id, addr);
                             return Ok(true);
                         }
@@ -179,7 +188,10 @@ impl MeshData {
                 }
                 Err(last_err.unwrap_or_else(|| std::io::Error::other("no endpoint")))
             }
-            None => Ok(false),
+            None => {
+                debug!("[mesh] no endpoints for hop {}", hop);
+                Ok(false)
+            }
         }
     }
 

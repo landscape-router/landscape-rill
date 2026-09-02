@@ -81,7 +81,10 @@ impl Node {
                                 _ => LanOutcome::Dropped,
                             }
                         }
-                        Err(_) => LanOutcome::Dropped,
+                        Err(e) => {
+                            debug!("[node] data frame build failed to {}: {:?}", peer, e);
+                            LanOutcome::Dropped
+                        }
                     }
                 }
             }
