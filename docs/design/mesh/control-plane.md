@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057
 
-**版本：v0.8（2026-09-01 修订：REQ-047——§3.13 消息限速与准入配额 + §5.2 心跳超频忽略）**
+**版本：v0.9（2026-09-02 修订：REQ-056——§2 重连退避语义；REQ-057——§3.9 挑战携带 node_id 与注册响应丢失恢复 + §5.1 恢复流程）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -79,6 +79,8 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 - **身份证明强度与签名等价**：只有持有节点静态私钥的实体能构造合法 tag
 - 吊销自然生效：注册表移除 → 公钥不存在 → 无法验证；coordinator 临时私钥一次性 + nonce 时间窗口 → 防重放
 - 静态私钥 = 节点身份根；丢失走 §5.7 恢复流程
+
+**重连退避（REQ-056）**：断线重连统一指数退避 1s→300s（时间封顶为编译期常量，可配置/次数上限待需求出现——CP-05 三查：退避 ✓ / 上限 ✓ / 防抖 ✓（单飞串行重连，退避期间不发起））。退避覆盖两类失败——**连接失败与「连上后断开」**（read-Err），后者此前零退避立即重连，构成热循环放大器（连上即断 ~80ms 循环，烧穿 §3.13 限速）。**退避重置条件 = 注册成功**（Registered 事件）：bare TCP/TLS 建立不重置——半开连接 ≠ 恢复。退避等待分片调度（100ms 片轮转 pump_timers），失败摘要周期输出不静默（LOGGING §5）。
 
 ## 3. 消息定义（语义级）
 
@@ -171,14 +173,30 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 **Challenge**（coordinator → 节点）
 - `eph_pub`：coordinator 一次性临时 X25519 公钥（32B）
 - `nonce`：随机值（建议 16B）；`issued_at`：时间戳（服务端校验时间窗口，防重放）
-- 与 §3.1 注册无关，仅用于已注册节点（注册表存在 node_id）的重连
+- `node_id`（4B，REQ-057）：服务端按注册表解析的目标身份。重连场景与客户端已知值一致；**注册响应丢失恢复场景**客户端尚不知道自己的 node_id，由本字段携带——node_id 非机密（netmap 本就下发），tag 的安全锚是私钥持有证明
+- 触发条件除重连外含**注册响应丢失恢复**（见下），均要求注册表存在该 node_id
 
 **ChallengeAck**（节点 → coordinator）
 - `node_id`（4B）
-- `tag`：HMAC 值（32B）——`HMAC密钥 = HKDF-SHA256(X25519(节点静态私钥, eph_pub), salt=nonce, info="challenge")`，对 `(node_id || nonce || eph_pub)` 计算
-- coordinator 用 `X25519(eph_priv, 节点静态公钥)` 得同一 K 派生验证
+- `tag`：HMAC 值（32B）——`HMAC密钥 = HKDF-SHA256(X25519(节点静态私钥, eph_pub), salt=nonce, info="challenge")`，对 `(node_id || nonce || eph_pub)` 计算（node_id 取 Challenge 消息携带值，非客户端自报）
+- coordinator 用 `X25519(eph_priv, 节点静态公钥)` 得同一 K 派生验证；**身份按挑战状态绑定的 pubkey 解析（服务端存储为准），不信任自报 node_id**（CP-02：ID 权威在服务端）
 
 **安全属性**：只有持节点静态私钥者能构造合法 tag（持有证明，强度等价签名）；nonce 一次性（时间窗口内使用，重放拒绝）；coordinator 临时密钥一次性（eph_priv 用完即弃）；吊销自然生效（注册表移除 → 验签失败）；幂等（验证无副作用，重试安全）。
+
+**注册响应丢失恢复（REQ-057）**：one-time key 消费先于响应写出（tombstone 持久化），响应丢失后客户端（Fresh 态，node_id 未知）重发同一 key 进入恢复：
+
+```
+Register(已消费 key, pubkey) → InvalidAuthKey（tombstone 遮蔽 pubkey 幂等路径）
+  → 服务端按 pubkey 查注册表命中 → Challenge(node_id)
+    （挑战状态绑定该 pubkey；不计失败锁定——合法恢复路径）
+  → 客户端以消息 node_id 计算 tag + RegisterOk{node_id} 写入会话
+  → ChallengeAck → 服务端按存储 pubkey 解析身份验证 tag
+  → registered + 重推 netmap → 恢复完成（node_id 与首次注册一致，无新注册）
+```
+
+- 身份锚是静态密钥对而非内存状态——**进程重启后重发同一 key 同样恢复**
+- tombstone 对第二身份语义不变：同 key 异 pubkey → unknown pubkey 拒绝（计入失败锁定）
+- 形态对标：Tailscale（一次性 join token + machine key 持有证明恢复）／Stripe 幂等键（重试者认证后去重）——「key 失效」不是终点判定而是恢复入口的触发信号
 
 ### 3.10 Policy\*（预留，ACL v2）
 
@@ -357,6 +375,8 @@ auth_key 预生成
 ```
 
 加入完成后数据面即可与全网互通（身份绑定供数据面握手验证）。
+
+注册响应丢失（key 已消费、ack 未达）时：客户端退避后重发同一 key 进入挑战分支（§3.9 恢复流程），按持有证明取回原 node_id——无需人工换 key（REQ-057）。
 
 ### 5.2 心跳与离线
 
