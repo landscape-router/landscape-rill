@@ -86,9 +86,9 @@
 
 - 关联 REQ：REQ-008
 - 测试层：单测
-- 状态：`待补充`
-- 证据：—
-- 缺口：离线撤销语义未实现——netmap 不带 offline 标志、节点侧路由表不随离线撤销（待实现）
+- 状态：`已覆盖`
+- 证据：rill-coord/src/liveness.rs、rill-coord/src/coordinator/tests.rs、rill-mesh/src/control/server_tests.rs、rill-node/src/runtime/control.rs
+- 说明：离线撤销语义落地——NetmapEntry 增 `offline` 可达性标记（wire field 8）；租约超时扫描（LEASE_EXPIRY_SECS = 60s，与 LEASE 回发同源）挂在心跳处理上（事件驱动，无后台任务），离线/恢复转移递增 netmap 版本；节点侧 `apply_netmap` 对离线条目跳过路由插入（身份/端点/密钥照常维护，回在线随 netmap 刷新自动恢复）；快照保持注册表镜像（routes 保留），撤销语义由节点侧按标记执行；单测 offline_sweep_withdraws_routes_and_restores 覆盖超时撤销与恢复全程；CI e2e-mesh run 33684776386 全绿
 
 ## CTL-12 Raft 主切换（P2）
 
@@ -148,9 +148,9 @@
 - [x] CTL-06：key_dst 按目的派生且主密钥不可推导
 - [ ] CTL-07：新旧密钥宽限期并存、旧版本过期作废（节点侧待落地）
 - [x] CTL-08：吊销后条目移除、全网轮换、旧会话作废
-- [ ] CTL-09：同 coordinator 两网络互不可见、key_dst 互不通用、auth key 归域（待实现）
+- [x] CTL-09：同 coordinator 两网络互不可见、key_dst 互不通用、auth key 归域（SEC-21~25 全覆盖；详见 CTL-09 详细条目与 tests/security/tenancy.md）
 - [x] CTL-10：白名单内公告并入 netmap、白名单外拒绝、过短前缀拒绝、空白名单 fail-closed
-- [ ] CTL-11：离线后 routes[] 随可达性撤销（待实现）
+- [x] CTL-11：离线后 routes[] 随可达性撤销（netmap offline 标志 wire 贯通 + 租约超时扫描 + 节点侧路由撤销；详见 CTL-11 详细条目）
 - [ ] CTL-12：主切换幂等重注册、软状态重建（P2）
 - [x] CTL-13：DH 挑战闭环、时间窗口防重放
 - [x] CTL-14：未 opt-in 节点 keydist 不带 broadcast_key（keydist_broadcast_key_opt_in_only）；opt-out 节点本地组播不泛洪（broadcast_opt_out_node_gets_no_key_and_no_flood）；e2e 默认 capabilities=33（relay+broadcast）
