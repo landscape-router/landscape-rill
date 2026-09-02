@@ -93,4 +93,70 @@ mod tests {
         assert_eq!(parsed.auth_key, "ak");
         assert_eq!(parsed.capabilities, 0x01);
     }
+
+    // ---- 预认证解析语料（REQ-059 / SEC-08，CONTROL_PLANE §3.13）----
+    // 定头两级解析（长度前缀 + Envelope 定头）对随机/变形输入只经 Result 返回
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    fn sample_envelope() -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut w = Writer::new(&mut out);
+        Envelope {
+            msg_type: MsgType::HEARTBEAT,
+            body: Cow::Borrowed(&[0x7u8; 8]),
+        }
+        .write_message(&mut w)
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn parse_envelope_fuzz_corpus() {
+        let mut s: u64 = 0xE4C0_0004;
+        let mut buf = [0u8; 128];
+        for _ in 0..2000 {
+            // 纯随机字节
+            let len = (xorshift(&mut s) % 129) as usize;
+            for b in buf[..len].iter_mut() {
+                *b = xorshift(&mut s) as u8;
+            }
+            let _ = parse_envelope(&buf[..len]);
+        }
+        // 合法 envelope 变形（1..=4 处翻转）
+        let valid = sample_envelope();
+        for _ in 0..2000 {
+            let mut m = valid.clone();
+            let flips = 1 + (xorshift(&mut s) % 4) as usize;
+            for _ in 0..flips {
+                let pos = xorshift(&mut s) as usize % m.len();
+                m[pos] ^= (xorshift(&mut s) as u8) | 1;
+            }
+            let _ = parse_envelope(&m);
+        }
+    }
+
+    #[tokio::test]
+    async fn read_envelope_fuzz_corpus() {
+        use crate::framing::MAX_MESSAGE_LEN;
+        use tokio::io::duplex;
+        let mut s: u64 = 0xD07_0005;
+        for _ in 0..200 {
+            let (mut a, mut b) = duplex(4096);
+            // 超长帧声明 → InvalidData（先于 body 分配）
+            let declared = MAX_MESSAGE_LEN + 1;
+            a.write_all(&declared.to_be_bytes()).await.unwrap();
+            assert!(read_envelope(&mut b).await.is_err());
+            // 帧内随机字节：Ok（合法信封）或 Err（坏信封）——只要求不 panic
+            let n = (xorshift(&mut s) % 64) as usize;
+            let garbage: Vec<u8> = (0..n).map(|_| xorshift(&mut s) as u8).collect();
+            framing::write_frame(&mut a, &garbage).await.unwrap();
+            let _ = read_envelope(&mut b).await;
+        }
+    }
 }

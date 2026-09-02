@@ -71,4 +71,37 @@ mod tests {
         let err = read_frame(&mut b).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
+
+    // ---- 预认证解析语料（REQ-059 / SEC-08）----
+    // 长度校验必须先于 body 读取/分配：超长声明只消费 4B 头即拒绝
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[tokio::test]
+    async fn read_frame_fuzz_corpus() {
+        let mut s: u64 = 0xF3A9_0003;
+        for _ in 0..300 {
+            let (mut a, mut b) = duplex(1024);
+            // 超长声明：无 body 字节也必须 InvalidData（而非 EOF/分配）
+            let declared = MAX_MESSAGE_LEN + 1 + (xorshift(&mut s) as u32 % 1000);
+            a.write_all(&declared.to_be_bytes()).await.unwrap();
+            let err = read_frame(&mut b).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            // 合法声明（≥1）+ body 截断 → EOF
+            let declared = 1 + (xorshift(&mut s) as u32 % 64);
+            a.write_all(&declared.to_be_bytes()).await.unwrap();
+            drop(a);
+            let err = read_frame(&mut b).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+        // 合法小帧往返不受语料影响
+        let (mut a, mut b) = duplex(1024);
+        write_frame(&mut a, &[0x42; 100]).await.unwrap();
+        assert_eq!(read_frame(&mut b).await.unwrap(), vec![0x42; 100]);
+    }
 }

@@ -754,4 +754,50 @@ mod tests {
             OpenError::RouteMac
         );
     }
+
+    // ---- 预认证解析语料（REQ-059 / SEC-08，FRAME_HEADER §5.1）----
+    // 随机与变形输入只允许经 Result/Option 返回，任何入口不得 panic
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn preauth_parse_fuzz_corpus() {
+        let mut s: u64 = 0x5EED_0001;
+        let mut buf = [0u8; 96];
+        for _ in 0..2000 {
+            // 家族 A：纯随机字节（任意长度）
+            let len = (xorshift(&mut s) % 97) as usize;
+            for b in buf[..len].iter_mut() {
+                *b = xorshift(&mut s) as u8;
+            }
+            let _ = MeshFrameHeader::decode(&buf[..len]);
+            let _ = frame_payload(&buf[..len]);
+            let _ = open_frame(&buf[..len], &KEY_DST, &SESSION, SALT);
+
+            // 家族 B：合法帧变形（1..=8 处字节翻转；翻转 ttl 可能仍通过——合法）
+            let mut frame =
+                build_frame(&sample_header(), &KEY_DST, &SESSION, SALT, b"payload").unwrap();
+            let flips = 1 + (xorshift(&mut s) % 8) as usize;
+            for _ in 0..flips {
+                let pos = xorshift(&mut s) as usize % frame.len();
+                frame[pos] ^= (xorshift(&mut s) as u8) | 1;
+            }
+            let _ = open_frame(&frame, &KEY_DST, &SESSION, SALT);
+        }
+
+        // 家族 C：版本字节全值域 × 截断长度全值域
+        let mut hbuf = [0u8; HEADER_LEN_V2];
+        sample_v2_header().encode(&mut hbuf);
+        for v in 0..=255u8 {
+            hbuf[0] = v;
+            for cut in 0..=HEADER_LEN_V2 {
+                let _ = MeshFrameHeader::decode(&hbuf[..cut]);
+            }
+        }
+    }
 }

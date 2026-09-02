@@ -2,10 +2,11 @@
 
 > 本文档只覆盖 `landscape-rill` 中 **mesh 模式**（自建控制面）数据面的帧头设计。
 > 不涉及 tailscale 模式（boringtun/WireGuard 协议）与控制面协议本体；控制面对数据面的接口需求见 §9。
-> 相关需求：REQ-001 / REQ-002 / REQ-003 / REQ-011 / REQ-016 / REQ-017 / REQ-028 / REQ-029 / REQ-032 / REQ-034 / REQ-035 / REQ-053
+> 相关需求：REQ-001 / REQ-002 / REQ-003 / REQ-011 / REQ-016 / REQ-017 / REQ-028 / REQ-029 / REQ-032 / REQ-034 / REQ-035 / REQ-053 / REQ-059
 
-**版本：v1.1（2026-09-01 修订）**
+**版本：v1.2（2026-09-02 修订：REQ-059——§5.1 预认证最小解析与资源分配后置纪律显式化）**
 
+- **v1.2 预认证解析纪律显式化（REQ-059）**：新增 §5.1——认证前只解析固定头字段、资源分配后置、与限速叠加（限速管速率、本规则管时机）；预认证解析入口纳入 fuzz 验收（SEC-08）。实现已满足，本版将隐式安全升级为显式硬规则
 - **v1.1 数据面 I/O 优化落档（REQ-053）**：§2.2 新增接收上限（超长帧显式丢弃）；§8 记录缓冲复用/原地加解密/零拷贝转发/golden vectors/WAN 接缝等实现级决定
 - **v1.0 新增 §2.7 v2 帧头规格（v2 路径数据面）**：42B 固定帧头（34B + 8B `path_id`），`version=0x02`；path_id 纳入 route_mac 与 AEAD AAD 输入；v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`（按路径签发、只发路径参与者）；`path_id=0` = 默认路径 = 现有 key_dst 语义（v1 兼容回退，v1 帧头不变）；v1 节点互操作 = 发送方按对端协议版本（netmap `protocol_version`）回退 34B 帧。实现落档 CONTROL_PLANE §3.11 / REQ-034
 - v0.9 修订内容（广播 opt-in）
@@ -226,6 +227,15 @@ route_mac = siphash_2-4(key_dst, 帧头[0..18] 且 ttl 置零) 的低 16 字节
 
 **设计哲学**：route_mac 管"转发依据可信 + 外部进不来"，AEAD 管"内容只属于通信双方"，握手层管"身份不可冒充"——成员恶意被限制在"弄脏转发面"，永远够不到内容层。成员以自身身份的正常流量滥用（骚扰/灌数据）由 coordinator 吊销与 ACL 治理，不在帧头设计范围。
 
+### 5.1 预认证最小解析与资源分配后置（REQ-059）
+
+数据面 UDP 入口对**未认证字节**的处理纪律——两条硬规则（ lessons CN-05 / CN-02 的上游约束；REQ-046/REQ-047 限速管"到达速率"，本规则管"解析与分配时机"，互不替代）：
+
+1. **认证前最小解析**：入口认证（route_mac 校验 / AEAD 解密 / 握手验证）通过之前，只允许 **magic / 长度 / 固定头字段级别**的解析——首字节端口分派（CONNECTIVITY §2.1）、34B/42B 定长帧头字段、probe 17B 定长头；**禁止把未认证字节反序列化为富结构**（protobuf/serde 类）。载荷的一切结构化解析（会话消息、握手消息体）都在认证通过之后。解析 fail-closed（非法输入一律丢弃、禁止 panic）是 CN-02 的健壮性基线，本规则额外约束**解析发生的时机**
+2. **资源分配后置**：认证失败路径除读缓冲外**零持久分配**——逐包接收缓冲跨包复用（§2.2/§8，REQ-053），逐包零分配；probe 回包受 per-source 限速、在途探测表有硬上限（CONNECTIVITY §4.3）；认证失败不建立任何逐攻击者持久状态（表项/timer/任务）
+
+**fuzz 验收**：预认证解析入口（帧头 decode / open_frame / probe decode / 端口分派）纳入鲁棒性 fuzz 语料——畸形与随机输入不 panic、错误只能经 `Result`/`Option` 返回（SEC-08 闭环）。
+
 ## 6. 密钥体系
 
 | 密钥 | 用途 | 持有者 | 生命周期 |
@@ -259,6 +269,7 @@ route_mac = siphash_2-4(key_dst, 帧头[0..18] 且 ttl 置零) 的低 16 字节
 | 2026-08-30 | **v0.9（广播 opt-in，纯控制面语义，帧头零改动）**：broadcast_key **按需下发**——keydist 仅向能力位含 `broadcast`（0x20，CONTROL_PLANE §3.1 新增）的节点携带；**泛洪目标 = opt-in 端点**（发送与转发双侧过滤，无能力记录按未 opt-in fail-closed）；未 opt-in 节点：无 key 即丢（既有的 fail-closed 路径）、本地 LAN 组播不泛洪。动机：广播平时不参与（仅 ND/mDNS 等组播场景），opt-in 让"不想收 L2 的主机"协议层面收不到（省带宽+CPU）；L2 内容继续走 payload（现状），帧头不加 L2 标记（`flags` 注释相应清理） |
 | 2026-08-31 | **v1.0（v2 路径数据面实现，REQ-034）**：新增 §2.7 v2 帧头（42B，8B path_id @18..26，route_mac @26..42）；`version=0x02`；认证输入 26B（path_id 纳入 route_mac 与 AAD）；v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`；`path_id=0` 回退 `key_dst`；互操作按 netmap `protocol_version` 回退 v1 帧头；握手/心跳/广播恒 v1 帧头；转发按 path_id 查 key_path + hops 下一跳 |
 | 2026-09-01 | **v1.1（数据面 I/O 优化，REQ-053）**：接收缓冲 `BytesMut` 跨包复用（免零初始化；超长显式丢弃，§2.2）；AEAD 与转发路径原地化——`seal_in_place`/`open_in_place` 明文写回接收缓冲、`build_frame` 单缓冲组装、转发原地 ttl-1 零拷贝扇出；**AEAD 失败不改动缓冲**（先验 tag 后解密，rekey 双窗口兜底依赖此契约，有专项测试钉死）；帧格式以偏移常量 + golden vectors 与 §2 逐字节绑定（encode/decode 对称漂移不可能无声通过）；WAN socket 触点收拢为 `MeshData` 私有原语（P4 XDP 快速路径的函数级接缝，明确不引入 trait、不引入 zerocopy crate） |
+| 2026-09-02 | **v1.2（预认证解析纪律显式化，REQ-059）**：§5.1 新增两条硬规则——认证前只解析 magic/长度/固定头字段（载荷结构化解析一律后置于 route_mac/AEAD/握手认证），资源分配后置（认证失败路径除读缓冲外零持久分配）；与 REQ-046/047 限速叠加（限速管速率、本规则管时机）；预认证解析入口配 fuzz 语料验收（SEC-08）。实现已满足，规则由隐式升级为显式（lessons CN-05） |
 
 ## 9. 控制面接口（见 CONTROL_PLANE.md）
 

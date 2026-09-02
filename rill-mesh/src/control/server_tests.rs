@@ -719,3 +719,63 @@ async fn register_resume_caps_mismatch_rejected_after_pop() {
     drop(tls2);
     server.await.unwrap();
 }
+
+// ==================== 预认证解析语料（REQ-059，SEC-08） ====================
+
+/// 预认证入口语料骨架（TLS 之上）：closure 自行建立 TLS 连接并注入字节，
+/// 服务端 handle_connection 必须以 Err 断连（ca_cert 统一由本骨架生成传递）
+async fn assert_preauth_reject<F, Fut>(client: F)
+where
+    F: FnOnce(String, u16, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (ca_cert, cert, key) = ca_pair();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut listener = listener;
+        let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        assert!(
+            server.handle_connection(&mut tls).await.is_err(),
+            "预认证垃圾输入必须断连"
+        );
+    });
+    let host = addr.ip().to_string();
+    client(host.clone(), addr.port(), ca_cert.clone()).await;
+    let r = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
+    assert!(r.is_ok(), "服务端未在垃圾输入后断连（host={host}）");
+    r.unwrap().unwrap();
+}
+
+/// 三级预认证语料：超长帧声明 / 垃圾信封 / REGISTER 垃圾消息体——
+/// 长度校验先于 body 分配，全部 Err 收场、不 panic（CONTROL_PLANE §3.13 时机纪律）
+#[tokio::test]
+async fn preauth_garbage_inputs_rejected() {
+    // ① 超长帧声明：只发 4B 头、无 body——长度校验必须先于读取/分配
+    assert_preauth_reject(|host, port, ca| async move {
+        let mut tls = client_tls_stream(&host, port, &ca).await.unwrap();
+        tls.write_all(&(framing::MAX_MESSAGE_LEN + 1).to_be_bytes())
+            .await
+            .unwrap();
+    })
+    .await;
+
+    // ② 垃圾信封：合法长度前缀 + 非信封字节 → bad envelope
+    assert_preauth_reject(|host, port, ca| async move {
+        let mut tls = client_tls_stream(&host, port, &ca).await.unwrap();
+        let garbage: Vec<u8> = (0..48usize).map(|i| (i * 37 + 11) as u8).collect();
+        framing::write_frame(&mut tls, &garbage).await.unwrap();
+    })
+    .await;
+
+    // ③ REGISTER 垃圾消息体：准入闸门通过后 protobuf 解码失败 → Err（不 panic）
+    assert_preauth_reject(|host, port, ca| async move {
+        let mut tls = client_tls_stream(&host, port, &ca).await.unwrap();
+        write_msg(&mut tls, MsgType::REGISTER, &[0xFF; 24])
+            .await
+            .unwrap();
+    })
+    .await;
+}

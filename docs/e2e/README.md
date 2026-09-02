@@ -42,6 +42,11 @@ node-C 容器 ──┘
     `echo confirmed`）；宿主灌 echo 洪泛 → coord `echo rate-limited` 摘要；relay RTT
     排序（coord 日志 + 节点 `relay candidates`）；互探确认（`probe confirmed direct via`）；
     c→a 经 b 中继（`relayed frame`）；`docker stop node-b` → 切 node-d（故障切换）
+  - `preauth_flood`：预认证洪泛（REQ-059，SEC-08）——direct 拓扑下宿主向 node-a 数据面
+    灌 UDP 垃圾（随机字节/变形帧头/probe 全 type），向 coord:8443 灌裸 TCP 垃圾与
+    TLS 后超长帧声明/垃圾信封/REGISTER 垃圾消息体；断言三容器存活不 panic、
+    node-a 丢帧摘要出现（解析 fail-closed）、洪泛后 b→a 双栈 ping 收敛
+    （已认证流量不受影响，认证失败路径零持久分配）
   - `tenancy`：单 coordinator 双网络隔离（CONTROL_PLANE §1.5，SEC-21~25）——lab
     （node-a1/a2）+ work（node-b1/b2）共用一个 coordinator，全部容器同 bridge（隔离是逻辑的）：
     组内双栈互通、跨网络不可达、netmap 各见本网条目；node-d 持未配置网络（ghost）key 注册被拒；

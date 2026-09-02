@@ -38,7 +38,7 @@
 | [CN-02](./connectivity/CN-02-punch-parse-panic.md) | 连通性 | 打洞信令解析 panic 复发 | ✅ 已落档 |
 | [CN-03](./connectivity/CN-03-shared-node-no-auth.md) | 连通性 | 共享/中继节点无用户级认证 | ✅ 已落档 |
 | [CN-04](./connectivity/CN-04-policy-all-paths.md) | 连通性 | 策略执行未覆盖中继/打洞/直连全部路径 | ✅ 已落档 |
-| [CN-05](./connectivity/CN-05-preauth-parse-alloc.md) | 连通性 | 认证前富解析/预认证资源分配 | **需补**：REQ-059 合并时入设计 + fuzz（SEC-08） |
+| [CN-05](./connectivity/CN-05-preauth-parse-alloc.md) | 连通性 | 认证前富解析/预认证资源分配 | 已补：REQ-059 合并（FRAME_HEADER §5.1 等 + fuzz 验收 SEC-08） |
 | [CP-01](./control-plane/CP-01-rpc-no-auth-leak.md) | 控制面 | 控制接口无认证信息泄露 | ✅ 已落档 |
 | [CP-02](./control-plane/CP-02-duplicate-peer-id.md) | 控制面 | 节点 ID 冲突 | ✅ 架构规避 |
 | [CP-03](./control-plane/CP-03-cascade-failure.md) | 控制面 | 初始节点崩溃级联故障 | ✅ 架构规避 |
