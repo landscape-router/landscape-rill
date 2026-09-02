@@ -2,7 +2,7 @@
 
 > 端点发现、直连验证、中继兜底——mesh 接入的"DERP 等价物"专题。
 > 34B 帧头的转发语义见 FRAME_HEADER；端点传播进 netmap 见 CONTROL_PLANE §3.2。
-> 版本：v0.5（2026-09-02 修订：REQ-059——§2.1 认证前最小解析/资源分配后置纪律显式化）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-059
+> 版本：v0.6（2026-09-02 修订：REQ-054——relay 链路择优统一 order_endpoints + 传输维度并入链路自由度）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-054 / REQ-059
 
 ## 1. 问题与目标
 
@@ -115,6 +115,7 @@ probe 无认证为有意设计（会话建立前无认证链可用，§4.2），
 
 | 日期 | 决策 |
 |---|---|
+| 2026-09-02 | **REQ-054：relay 链路择优泛化 + 断线回喂（FRAME_HEADER §2.8/§8 落档）**：①relay 转发侧端点选择统一走 `order_endpoints`（活性置后/轮转）——修复 v1 直连分支与 v2 `path_next_hop` 固定取 `.first()` 的缺口（专项单测 v1/v2 各一）；②传输档并入链路自由度（端点 → 链路 = (后继, 地址, 传输)，v1 全网同档配置，多传输择优随 REQ-055 谱系）；③TCP send 失败 = 显式断线信号，喂端点 miss/健康机器（流式链路由推断升级为实报，机制不变）；④非 UDP 传输的公网端点发现挂账（UDP echo 学不到 TCP NAT 映射） |
 | 2026-09-02 | **REQ-059：预认证解析纪律显式化（§2.1）**：分派与 probe 头解析 = 认证前允许的全部解析（固定头字段级别，probe 载荷 128B 上限）；资源分配后置（PONG 按源限速、在途表上限、认证失败零持久分配）；与 REQ-046 限速叠加（速率 vs 时机）；fuzz 语料验收（SEC-08）。实现已满足，规则由隐式升级为显式（lessons CN-05） |
 | 2026-09-01 | **REQ-046：probe 强制限速/退避（§4.3 "可选限速" → 强制，落实 CN-01）**：①**发送侧三件套**（rill-node runtime/probe.rs）：全局令牌桶 10/s 突发 20（桶空本轮不发）+ 每端点指数退避（周期开始 drain 在途探测，仍 pending = 上轮无响应 → miss+1 → `30s×2^miss` 封顶 300s；PONG 确认清零）+ 在途并发上限 64（rill-mesh `send_probe_ping` 超限拒绝，替换原 1024 清空）；②**PONG 生成按源限速**（SEC-26 节点侧，rill-mesh dispatch `pong_limiter`）：10/s 突发 20，与 coordinator 回显同值；③`EchoLimiter` 泛化为 rill-core `SourceRateLimiter`（echo 与 PONG 共用，后续 REQ-047 Register 按源限速同源复用） |
 | 2026-08-15 | 端点探测 = coordinator UDP 回显（STUN 式，零额外组件）；直连 v1 = 简单互探（专用 probe 小包）+ 中继兜底，不做对称 NAT 打洞；中继 = 三层模型（coordinator 兜底 + 自愿节点 opt-in 扩容 + 独立 relay 可选），全部零协议改动 |

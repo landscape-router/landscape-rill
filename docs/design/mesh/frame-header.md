@@ -2,10 +2,11 @@
 
 > 本文档只覆盖 `landscape-rill` 中 **mesh 模式**（自建控制面）数据面的帧头设计。
 > 不涉及 tailscale 模式（boringtun/WireGuard 协议）与控制面协议本体；控制面对数据面的接口需求见 §9。
-> 相关需求：REQ-001 / REQ-002 / REQ-003 / REQ-011 / REQ-016 / REQ-017 / REQ-028 / REQ-029 / REQ-032 / REQ-034 / REQ-035 / REQ-053 / REQ-059
+> 相关需求：REQ-001 / REQ-002 / REQ-003 / REQ-011 / REQ-016 / REQ-017 / REQ-028 / REQ-029 / REQ-032 / REQ-034 / REQ-035 / REQ-053 / REQ-054 / REQ-059
 
-**版本：v1.2（2026-09-02 修订：REQ-059——§5.1 预认证最小解析与资源分配后置纪律显式化）**
+**版本：v1.3（2026-09-02 修订：REQ-054——§2.8 underlay 传输线格式落档）**
 
+- **v1.3 underlay 传输（REQ-054）**：新增 §2.8——帧字节跨传输逐字节一致（UDP 裸帧 / 真 TCP 2B 前缀）；§8 记录传输接缝 trait、身份在帧头、链路择优、断线信号回喂等实现级决定
 - **v1.2 预认证解析纪律显式化（REQ-059）**：新增 §5.1——认证前只解析固定头字段、资源分配后置、与限速叠加（限速管速率、本规则管时机）；预认证解析入口纳入 fuzz 验收（SEC-08）。实现已满足，本版将隐式安全升级为显式硬规则
 - **v1.1 数据面 I/O 优化落档（REQ-053）**：§2.2 新增接收上限（超长帧显式丢弃）；§8 记录缓冲复用/原地加解密/零拷贝转发/golden vectors/WAN 接缝等实现级决定
 - **v1.0 新增 §2.7 v2 帧头规格（v2 路径数据面）**：42B 固定帧头（34B + 8B `path_id`），`version=0x02`；path_id 纳入 route_mac 与 AEAD AAD 输入；v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`（按路径签发、只发路径参与者）；`path_id=0` = 默认路径 = 现有 key_dst 语义（v1 兼容回退，v1 帧头不变）；v1 节点互操作 = 发送方按对端协议版本（netmap `protocol_version`）回退 34B 帧。实现落档 CONTROL_PLANE §3.11 / REQ-034
@@ -151,6 +152,18 @@ mesh 模式使用自研数据面：snow (Noise_XX) 握手派生会话密钥 + �
 - **握手/心跳/广播帧恒为 v1 帧头**（key_dst/broadcast_key 路径）——路径是已建会话后的数据面概念
 - **转发**：转发节点按 `path_id` 查 `key_path` 校验 route_mac（无授权 → 丢弃，fail-closed）；下一跳端点按路径 hops（本节点在路径中的后继）解析（§3.11 转发语义）
 
+### 2.8 underlay 传输线格式（REQ-054 实现落档）
+
+帧本体与传输解耦——**帧字节跨传输逐字节一致**，传输档只是外覆差异：
+
+| 档 | 线格式 | 定位 |
+|---|---|---|
+| 裸 UDP（默认） | 报文 = 帧本体，无前缀 | 常态 |
+| 真 TCP（兜底） | `2B BE 长度前缀 + 帧本体`，一条流上帧/probe 靠首字节分类共存 | UDP 被封禁网络的兜底（HOL 代价） |
+
+- 传输档为**节点配置维度**（`data_transport: udp\|tcp`，v1 全网同档假设）；netmap 端点不带传输标注，端点地址即连接地址——v1 直连场景成立；**非 UDP 传输的公网端点发现（TCP NAT 映射）挂账未解**（UDP echo 学不到 TCP 洞，另立需求）
+- §2.1 golden vectors 天然覆盖所有传输（帧本体不变）；传输层断言：UDP 报文逐字节 = 帧本体、TCP 线上 = 前缀 + 帧本体（专项测试钉死）
+
 ### 3.1 route_mac（轻量，转发节点校验）
 
 ```
@@ -270,6 +283,7 @@ route_mac = siphash_2-4(key_dst, 帧头[0..18] 且 ttl 置零) 的低 16 字节
 | 2026-08-31 | **v1.0（v2 路径数据面实现，REQ-034）**：新增 §2.7 v2 帧头（42B，8B path_id @18..26，route_mac @26..42）；`version=0x02`；认证输入 26B（path_id 纳入 route_mac 与 AAD）；v2 route_mac 用 `key_path = KDF(主密钥, path_id, path_epoch)`；`path_id=0` 回退 `key_dst`；互操作按 netmap `protocol_version` 回退 v1 帧头；握手/心跳/广播恒 v1 帧头；转发按 path_id 查 key_path + hops 下一跳 |
 | 2026-09-01 | **v1.1（数据面 I/O 优化，REQ-053）**：接收缓冲 `BytesMut` 跨包复用（免零初始化；超长显式丢弃，§2.2）；AEAD 与转发路径原地化——`seal_in_place`/`open_in_place` 明文写回接收缓冲、`build_frame` 单缓冲组装、转发原地 ttl-1 零拷贝扇出；**AEAD 失败不改动缓冲**（先验 tag 后解密，rekey 双窗口兜底依赖此契约，有专项测试钉死）；帧格式以偏移常量 + golden vectors 与 §2 逐字节绑定（encode/decode 对称漂移不可能无声通过）；WAN socket 触点收拢为 `MeshData` 私有原语（P4 XDP 快速路径的函数级接缝，明确不引入 trait、不引入 zerocopy crate） |
 | 2026-09-02 | **v1.2（预认证解析纪律显式化，REQ-059）**：§5.1 新增两条硬规则——认证前只解析 magic/长度/固定头字段（载荷结构化解析一律后置于 route_mac/AEAD/握手认证），资源分配后置（认证失败路径除读缓冲外零持久分配）；与 REQ-046/047 限速叠加（限速管速率、本规则管时机）；预认证解析入口配 fuzz 语料验收（SEC-08）。实现已满足，规则由隐式升级为显式（lessons CN-05） |
+| 2026-09-02 | **v1.3（underlay 传输抽象，REQ-054，延伸 REQ-053 决策 6 的函数级接缝）**：①**报文语义 trait**（rill-mesh data/transport.rs，rill-core 保持 I/O-free）：`send_frame/recv_frame/local_endpoint`，buffer 传参与 053 BytesMut 对齐；裸 UDP（默认）/真 TCP（兜底）两档，§2.8 线格式；②**身份在帧头（只信任帧）**：线上身份由帧头承载、信任来自 route_mac/AEAD 而非传输连接状态；连接管理（惰性 connect、无退避——失败交给端点 miss 机器、连接表 1024 上限溢出清空、发送失败移除重连）全为实现内部细节；③**relay 链路择优**：端点选择统一走 `order_endpoints`（活性置后/轮转，修复 v1 直连与 v2 path_next_hop 固定 `.first()` 缺口）；传输维度并入链路自由度（v1 全网同档，多传输择优挂 REQ-055 谱系）；④**断线信号回喂**：TCP send 失败移除死连接并显式报错，喂端点 miss/健康机器（流式链路健康由推断升级为实报）；⑤**开放问题实际形态**：netmap 端点不带传输标注（配置维度全网同档）、TCP NAT 公网端点发现挂账、连接生命周期 = 惰性 connect + miss 驱动。验收：帧字节断言 + TCP 全栈单测 + `MESH_E2E_TRANSPORT=tcp` e2e |
 
 ## 9. 控制面接口（见 CONTROL_PLANE.md）
 
