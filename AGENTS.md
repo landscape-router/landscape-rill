@@ -4,6 +4,7 @@
 
 - Use English for commit messages
 - Keep commit descriptions simple
+- Never create PRs proactively; only create one when the user explicitly asks.
 
 ## Comments
 
