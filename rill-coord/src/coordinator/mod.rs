@@ -667,6 +667,29 @@ impl Coordinator {
             .map(|e| e.identity_binding.clone())
     }
 
+    /// auth key 只读校验（REQ-060 新建类挑战前置）：格式/过期/归域/注册表存在；
+    /// 不消费——消费只发生在 PoP 通过后的注册准入
+    pub fn auth_key_admissible(&self, auth_key: &str) -> bool {
+        let Ok(parsed) = crate::authkey::parse_auth_key(auth_key) else {
+            return false;
+        };
+        if parsed.1 != 0 && unix_seconds() > parsed.1 {
+            return false;
+        }
+        self.domains
+            .iter()
+            .any(|d| d.name == parsed.0 && d.registry.contains_auth_key(auth_key))
+    }
+
+    /// 恢复类幂等比对（REQ-060，PoP 之后调用）：REGISTER 的 capabilities/routes
+    /// 与存储条目一致才允许按原身份恢复；不一致 = 注册信息变更，拒绝
+    pub fn resume_matches(&self, node_id: u32, capabilities: u32, routes: &[String]) -> bool {
+        self.domain_of_node(node_id)
+            .and_then(|d| d.registry.entry(node_id))
+            .map(|e| e.capabilities == capabilities && e.routes == routes)
+            .unwrap_or(false)
+    }
+
     pub fn verifier(&self) -> ed25519_dalek::VerifyingKey {
         self.signer.verifier()
     }

@@ -195,6 +195,11 @@ impl Registry {
         Ok(RegisterOutcome::NewNode(node_id))
     }
 
+    /// key 是否在册（REQ-060：新建类挑战前只读校验；消费仍只在准入时发生）
+    pub fn contains_auth_key(&self, auth_key: &str) -> bool {
+        self.auth_keys.contains_key(auth_key)
+    }
+
     pub fn entry(&self, node_id: u32) -> Option<&NodeEntry> {
         self.entries.get(&node_id)
     }

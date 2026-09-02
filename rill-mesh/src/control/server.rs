@@ -37,20 +37,34 @@ struct ChallengeState {
     eph_priv: [u8; 32],
     nonce: Vec<u8>,
     issued_at: u64,
-    /// 挑战绑定的身份（REQ-057）：发起时由触发 REGISTER 的 pubkey 解析——
-    /// 验证不信任 ACK 自报 node_id，以服务端存储为准（CP-02）
+    /// 挑战绑定的身份：恢复类 = 存储 pubkey 解析值（REQ-057，CP-02）；新建类 = 0
+    /// （REQ-060：身份在 PoP 通过后的准入时才分配，由 REGISTER_RESPONSE 携带）
     node_id: u32,
+    /// 验证锚：恢复类 = 存储 pubkey（不信任自报）；新建类 = REGISTER 自报 pubkey
+    /// （PoP 的目标就是这把钥匙——绑定的是它，冒充他人无从谈起）
     pubkey: [u8; 32],
+    pending: PendingRegister,
+}
+
+/// 挑战期间保留的注册数据（REQ-060）：PoP 通过后才执行对应完成语义
+struct PendingRegister {
+    auth_key: String,
+    capabilities: u32,
+    routes: Vec<String>,
+    protocol_version: u32,
+    /// true = 恢复类（pubkey 已注册表命中）；false = 新建类
+    resume: bool,
 }
 
 impl ChallengeState {
-    fn new(node_id: u32, pubkey: [u8; 32]) -> Self {
+    fn new(node_id: u32, pubkey: [u8; 32], pending: PendingRegister) -> Self {
         Self {
             eph_priv: rand::random::<[u8; 32]>(),
             nonce: rand::random::<[u8; 16]>().to_vec(),
             issued_at: unix_seconds(),
             node_id,
             pubkey,
+            pending,
         }
     }
 }
@@ -298,91 +312,57 @@ impl CoordinatorServer {
                 } else {
                     req.routes.iter().map(|r| r.to_string()).collect()
                 };
-                match self.coordinator.register(
-                    req.auth_key.as_ref(),
-                    &pubkey,
-                    req.capabilities,
+                // 统一挑战触发（REQ-060）：无持有证明不发身份。注册不在此处准入，
+                // 只做分类（pubkey 是否在册）；key 校验/消费全部后置到 PoP 之后
+                let pending = PendingRegister {
+                    auth_key: req.auth_key.to_string(),
+                    capabilities: req.capabilities,
                     routes,
-                ) {
-                    Ok(data) => {
-                        if let Some(ip) = peer_ip {
-                            self.register_lockout.remove(&ip);
-                        }
-                        self.coordinator
-                            .set_protocol_version(data.node_id, req.protocol_version);
-                        // e2e 故障注入（REQ-057）：注册已消费、响应丢弃并断连——
-                        // 客户端须走退避重连 + 挑战恢复（ack 丢失模拟）
-                        if self.drop_first_register_response {
-                            self.drop_first_register_response = false;
-                            tracing::warn!(
-                                "[coord] e2e injection: first REGISTER_RESPONSE dropped"
-                            );
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::ConnectionAborted,
-                                "e2e: first register response dropped",
-                            )
-                            .into());
-                        }
-                        let resp = RegisterResponse {
-                            node_id: data.node_id,
-                            network_id: data.network_id,
-                            identity_binding: Cow::Owned(data.identity_binding),
-                            leader_redirect: None,
-                        };
-                        write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp))
-                            .await?;
-                        state.registered = Some(data.node_id);
-                        self.coordinator.heartbeat(data.node_id, unix_seconds());
-                        self.push_snapshot(
-                            stream,
-                            self.coordinator.network_id_of(data.node_id).unwrap_or(0),
-                        )
-                        .await?;
-                        state.challenge = None;
-                    }
-                    Err(landscape_rill_core::control::registry::RegisterError::InvalidAuthKey) => {
-                        // 可能的重连/注册响应丢失恢复：auth key 失效（一次性已消费）
-                        // + 公钥已知 → 挑战认证（合法恢复路径，不计失败锁定；
-                        // 锁定闸门在其之前已拦截）
-                        match self.coordinator.node_id_by_pubkey(&pubkey) {
-                            Some(node_id) => {
-                                let ch = ChallengeState::new(node_id, pubkey);
-                                let msg = Challenge {
-                                    eph_pub: Cow::Owned(
-                                        x25519_dalek::PublicKey::from(
-                                            &x25519_dalek::StaticSecret::from(ch.eph_priv),
-                                        )
-                                        .to_bytes()
-                                        .to_vec(),
-                                    ),
-                                    nonce: Cow::Borrowed(&ch.nonce),
-                                    issued_at: ch.issued_at,
-                                    node_id,
-                                };
-                                write_msg(stream, MsgType::CHALLENGE, &envelope_body(&msg)).await?;
-                                state.challenge = Some(ch);
-                            }
-                            None => {
+                    protocol_version: req.protocol_version,
+                    resume: false,
+                };
+                let (node_id, ch_pubkey, pending) =
+                    match self.coordinator.node_id_by_pubkey(&pubkey) {
+                        // 恢复类：key 有效性不参与（PoP 强于共享 key 的成员资格证明），
+                        // 不计失败锁定（合法恢复路径，§3.9）
+                        Some(node_id) => (
+                            node_id,
+                            pubkey,
+                            PendingRegister {
+                                resume: true,
+                                ..pending
+                            },
+                        ),
+                        // 新建类：key 只读校验（格式/过期/归域/在册），失败计入锁定闸门
+                        None => {
+                            if !self.coordinator.auth_key_admissible(&pending.auth_key) {
                                 if let Some(ip) = peer_ip {
                                     self.note_register_failure(ip, Instant::now());
                                 }
                                 return Err(std::io::Error::new(
                                     std::io::ErrorKind::PermissionDenied,
-                                    "unknown pubkey",
+                                    "invalid auth key",
                                 )
                                 .into());
                             }
+                            (0, pubkey, pending)
                         }
-                    }
-                    Err(e) => {
-                        // 逐条输出 → 周期摘要（LOGGING §5；run_coord 打印）
-                        if let Some(ip) = peer_ip {
-                            self.note_register_failure(ip, Instant::now());
-                        }
-                        self.register_rejected.tick();
-                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e).into());
-                    }
-                }
+                    };
+                let ch = ChallengeState::new(node_id, ch_pubkey, pending);
+                let msg = Challenge {
+                    eph_pub: Cow::Owned(
+                        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(
+                            ch.eph_priv,
+                        ))
+                        .to_bytes()
+                        .to_vec(),
+                    ),
+                    nonce: Cow::Borrowed(&ch.nonce),
+                    issued_at: ch.issued_at,
+                    node_id: ch.node_id,
+                };
+                write_msg(stream, MsgType::CHALLENGE, &envelope_body(&msg)).await?;
+                state.challenge = Some(ch);
             }
             MsgType::CHALLENGE_ACK => {
                 let mut reader = BytesReader::from_bytes(body);
@@ -394,32 +374,48 @@ impl CoordinatorServer {
                     )
                     .into());
                 };
-                // 身份以挑战绑定的存储状态为准（REQ-057）：node_id 来自发起时
-                // pubkey 解析，不信任 ACK 自报；条目须仍存在且 pubkey 一致
-                // （吊销/重注册后旧挑战失效）
-                let node_id = ch.node_id;
-                let Some(entry_pub) = self.coordinator.static_pubkey_of(node_id) else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "unknown node in challenge ack",
+                // 拷贝挑战态后立即释放借用；验证锚为挑战绑定的 pubkey（REQ-057/060：
+                // 恢复类 = 服务端存储，不信任自报；新建类 = REGISTER 自报的 PoP 目标）
+                let ch_node = ch.node_id;
+                let ch_pub = ch.pubkey;
+                let eph_priv = ch.eph_priv;
+                let nonce = ch.nonce.clone();
+                let issued_at = ch.issued_at;
+                let (auth_key, capabilities, routes, protocol_version, resume) = {
+                    let p = &ch.pending;
+                    (
+                        p.auth_key.clone(),
+                        p.capabilities,
+                        p.routes.clone(),
+                        p.protocol_version,
+                        p.resume,
                     )
-                    .into());
                 };
-                if entry_pub != ch.pubkey {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "challenge pubkey mismatch",
-                    )
-                    .into());
+                // 恢复类前置检查：条目须仍存在且 pubkey 一致（吊销/重注册后旧挑战失效）
+                if resume {
+                    let Some(entry_pub) = self.coordinator.static_pubkey_of(ch_node) else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "unknown node in challenge ack",
+                        )
+                        .into());
+                    };
+                    if entry_pub != ch_pub {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "challenge pubkey mismatch",
+                        )
+                        .into());
+                    }
                 }
                 let ok = landscape_rill_core::control::challenge::verify_tag(
-                    &entry_pub,
-                    &ch.eph_priv,
-                    &ch.nonce,
-                    node_id,
+                    &ch_pub,
+                    &eph_priv,
+                    &nonce,
+                    ch_node,
                     ack.tag.as_ref(),
                 ) && landscape_rill_core::control::challenge::within_window(
-                    ch.issued_at,
+                    issued_at,
                     unix_seconds(),
                     30,
                 );
@@ -430,30 +426,98 @@ impl CoordinatorServer {
                     )
                     .into());
                 }
-                state.registered = Some(node_id);
-                self.coordinator.heartbeat(node_id, unix_seconds());
-                tracing::info!("[coord] challenge ok: node_id={node_id}");
-                let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
-                // 补发 REGISTER_RESPONSE（REQ-057）：注册响应丢失的客户端（Fresh
-                // 态）走既有注册处理链完成完整初始化（handshake ctx 等）；
-                // 重连客户端对同一 node_id 幂等。条目校验刚通过，binding 缺失
-                // 属不变量破坏——fail-closed 而非空绑定静默降级
-                let Some(identity_binding) = self.coordinator.identity_binding_of(node_id) else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "challenge entry binding missing",
-                    )
-                    .into());
-                };
-                let resp = RegisterResponse {
-                    node_id,
-                    network_id,
-                    identity_binding: Cow::Owned(identity_binding),
-                    leader_redirect: None,
-                };
-                write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp)).await?;
-                self.push_snapshot(stream, network_id).await?;
                 state.challenge = None;
+                if resume {
+                    // 恢复完成（REQ-060）：幂等比对在 PoP 之后；不走注册准入、
+                    // 不校验 key 有效性（吊销以条目移除为准）
+                    if !self
+                        .coordinator
+                        .resume_matches(ch_node, capabilities, &routes)
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "registration changed (capabilities/routes)",
+                        )
+                        .into());
+                    }
+                    tracing::info!("[coord] challenge ok: node_id={ch_node}");
+                    state.registered = Some(ch_node);
+                    self.coordinator.heartbeat(ch_node, unix_seconds());
+                    self.coordinator
+                        .set_protocol_version(ch_node, protocol_version);
+                    let network_id = self.coordinator.network_id_of(ch_node).unwrap_or(0);
+                    // binding 缺失属不变量破坏——fail-closed 而非空绑定静默降级
+                    let Some(identity_binding) = self.coordinator.identity_binding_of(ch_node)
+                    else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "challenge entry binding missing",
+                        )
+                        .into());
+                    };
+                    let resp = RegisterResponse {
+                        node_id: ch_node,
+                        network_id,
+                        identity_binding: Cow::Owned(identity_binding),
+                        leader_redirect: None,
+                    };
+                    write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp)).await?;
+                    self.push_snapshot(stream, network_id).await?;
+                } else {
+                    // 新建类完成（REQ-060）：准入（白名单/分配/binding/一次性 key 消费）
+                    // 全部后置到 PoP 之后；失败仍 fail-closed
+                    match self
+                        .coordinator
+                        .register(&auth_key, &ch_pub, capabilities, routes)
+                    {
+                        Ok(data) => {
+                            if let Some(ip) = peer_ip {
+                                self.register_lockout.remove(&ip);
+                            }
+                            self.coordinator
+                                .set_protocol_version(data.node_id, protocol_version);
+                            // e2e 故障注入（REQ-057）：注册已消费、响应丢弃并断连——
+                            // 客户端须走退避重连 + 挑战恢复（ack 丢失模拟）
+                            if self.drop_first_register_response {
+                                self.drop_first_register_response = false;
+                                tracing::warn!(
+                                    "[coord] e2e injection: first REGISTER_RESPONSE dropped"
+                                );
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionAborted,
+                                    "e2e: first register response dropped",
+                                )
+                                .into());
+                            }
+                            tracing::info!("[coord] challenge ok: node_id={}", data.node_id);
+                            state.registered = Some(data.node_id);
+                            self.coordinator.heartbeat(data.node_id, unix_seconds());
+                            let resp = RegisterResponse {
+                                node_id: data.node_id,
+                                network_id: data.network_id,
+                                identity_binding: Cow::Owned(data.identity_binding),
+                                leader_redirect: None,
+                            };
+                            write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp))
+                                .await?;
+                            self.push_snapshot(
+                                stream,
+                                self.coordinator.network_id_of(data.node_id).unwrap_or(0),
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            // 准入在 PoP 后失败：按注册失败计（LOGGING §5 周期摘要）
+                            if let Some(ip) = peer_ip {
+                                self.note_register_failure(ip, Instant::now());
+                            }
+                            self.register_rejected.tick();
+                            return Err(
+                                std::io::Error::new(std::io::ErrorKind::InvalidData, e).into()
+                            );
+                        }
+                    }
+                }
             }
             MsgType::HEARTBEAT => {
                 let mut reader = BytesReader::from_bytes(body);
@@ -602,6 +666,7 @@ mod tests {
     use crate::control::codec::envelope_bytes;
     use crate::control::codec::read_envelope;
     use crate::control::tls::{client_tls_stream, server_tls_stream};
+    use crate::control::PROTOCOL_VERSION;
     use crate::framing;
     use landscape_rill_coord::signer::verify_binding;
     use landscape_rill_core::control::registry::AuthKeyPolicy;
@@ -655,6 +720,12 @@ mod tests {
         };
         let reg = client.register_request(&config);
         framing::write_frame(&mut tls, &reg).await.unwrap();
+        let owned = answer_challenge(&mut tls, &client).await;
+        assert_eq!(
+            owned.proto().node_id,
+            0,
+            "新建类挑战 node_id=0（身份在 PoP 后的准入时分配）"
+        );
         let (mt, body) = read_envelope(&mut tls).await.unwrap();
         assert_eq!(mt, MsgType::REGISTER_RESPONSE);
         let mut reader = BytesReader::from_bytes(&body);
@@ -697,6 +768,25 @@ mod tests {
             capabilities: 0x01,
             announce_routes: vec![],
         }
+    }
+
+    /// 读取 CHALLENGE 并回 ack（REQ-060：所有注册先过挑战）；返回挑战内容供断言
+    async fn answer_challenge<RW>(tls: &mut RW, client: &MeshClient) -> ChallengeOwned
+    where
+        RW: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
+    {
+        let (mt, body) = read_envelope(tls).await.unwrap();
+        assert_eq!(mt, MsgType::CHALLENGE, "注册必须先收到挑战（REQ-060）");
+        let owned = ChallengeOwned::try_from(body).unwrap();
+        let challenge = Challenge {
+            eph_pub: Cow::Borrowed(owned.proto().eph_pub.as_ref()),
+            nonce: Cow::Borrowed(owned.proto().nonce.as_ref()),
+            issued_at: owned.proto().issued_at,
+            node_id: owned.proto().node_id,
+        };
+        let ack = client.challenge_ack(&challenge);
+        framing::write_frame(tls, &ack).await.unwrap();
+        owned
     }
 
     /// 连接级消息限速（REQ-047）：桶空 → 断连该连接（SEC-19 速率维度）
@@ -800,6 +890,7 @@ mod tests {
         let client = MeshClient::new([0x33; 32]);
         let reg = client.register_request(&bad_leg_config(&ak, 0x33));
         framing::write_frame(&mut tls, &reg).await.unwrap();
+        answer_challenge(&mut tls, &client).await;
         // 消费注册响应 + 初始快照（NETMAP_PUSH + KEY_DIST）
         assert_eq!(
             read_envelope(&mut tls).await.unwrap().0,
@@ -825,9 +916,9 @@ mod tests {
         let _ = server.await;
     }
 
-    /// REQ-057：注册响应丢失（等价进程重启）→ Fresh 客户端重发已消费 key →
-    /// 挑战携带 node_id → 按消息 node_id 计算 tag → 验证通过补发
-    /// REGISTER_RESPONSE（同 node_id，完整初始化链）
+    /// REQ-057/060：首注册（新建类，key 消费在 PoP 后）→ 响应丢弃等价重启 →
+    /// 重发已消费 key 进恢复类 → 挑战携带 node_id → 按消息 node_id 计算 tag →
+    /// 验证通过按条目补发 REGISTER_RESPONSE（同 node_id，无新注册）
     #[tokio::test]
     async fn register_ack_loss_challenge_recovery() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -874,11 +965,13 @@ mod tests {
         framing::write_frame(&mut tls1, &c1.register_request(&config))
             .await
             .unwrap();
+        answer_challenge(&mut tls1, &c1).await;
         let (mt, _body) = read_envelope(&mut tls1).await.unwrap();
         assert_eq!(mt, MsgType::REGISTER_RESPONSE);
         drop(tls1);
 
         // 连接 2：Fresh 客户端（同静态密钥 = ack 丢失/重启等价）重发同一已消费 key
+        // → 恢复类（pubkey 命中）：仍须挑战，验证通过按条目恢复原身份
         let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
             .await
             .unwrap();
@@ -948,6 +1041,7 @@ mod tests {
         framing::write_frame(&mut tls1, &c1.register_request(&config))
             .await
             .unwrap();
+        answer_challenge(&mut tls1, &c1).await;
         let (mt, _) = read_envelope(&mut tls1).await.unwrap();
         assert_eq!(mt, MsgType::REGISTER_RESPONSE);
         drop(tls1);
@@ -1018,11 +1112,13 @@ mod tests {
         framing::write_frame(&mut tls1, &c1.register_request(&config1))
             .await
             .unwrap();
+        answer_challenge(&mut tls1, &c1).await;
         let (mt, _) = read_envelope(&mut tls1).await.unwrap();
         assert_eq!(mt, MsgType::REGISTER_RESPONSE);
         drop(tls1);
 
-        // 不同静态密钥的身份复用同一 key：不得进入挑战分支
+        // 不同静态密钥的身份复用同一 key：pubkey 未命中 → 新建类 key 只读校验
+        // 失败（已消费 = 不在册）→ 拒绝（tombstone 语义不变）
         let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
             .await
             .unwrap();
@@ -1040,6 +1136,245 @@ mod tests {
             .unwrap();
         let r = read_envelope(&mut tls2).await;
         assert!(r.is_err(), "unknown pubkey 必须断连");
+        drop(tls2);
+        server.await.unwrap();
+    }
+
+    // ==================== 注册挑战统一（REQ-060，CTL-20） ====================
+
+    /// REQ-060 恢复类对抗：有效 reusable key + 受害者 pubkey（公开）+ 精确复制
+    /// caps/routes → 仍须挑战；无私钥 → tag 必败，身份与 binding 不发放
+    #[tokio::test]
+    async fn register_resume_with_valid_key_still_requires_pop() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
+        let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
+            let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            server
+        }));
+        let coord_check = coordinator.clone();
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            for _ in 0..2 {
+                let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+                let mut server = coordinator.lock().await;
+                let _ = server.handle_connection(&mut tls).await;
+            }
+        });
+        let host = addr.ip().to_string();
+
+        // 受害者正常注册（caps=0x01）
+        let mut tls1 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c1 = MeshClient::new([0x33; 32]);
+        let config = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x33; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls1, &c1.register_request(&config))
+            .await
+            .unwrap();
+        answer_challenge(&mut tls1, &c1).await;
+        assert_eq!(
+            read_envelope(&mut tls1).await.unwrap().0,
+            MsgType::REGISTER_RESPONSE
+        );
+        drop(tls1);
+
+        // 攻击者：持同一有效 key，REGISTER 自报受害者 pubkey + 精确 caps/routes
+        let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let attacker_key = [0x44; 32];
+        let victim_pubkey =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([0x33u8; 32]))
+                .to_bytes();
+        let spoof = RegisterRequest {
+            auth_key: Cow::Owned(ak_loop.clone()),
+            static_pubkey: Cow::Owned(victim_pubkey.to_vec()),
+            capabilities: 0x01,
+            protocol_version: PROTOCOL_VERSION,
+            hostname: Cow::Borrowed(""),
+            os: Cow::Borrowed(""),
+            routes: Vec::new(),
+        };
+        framing::write_frame(&mut tls2, &envelope_bytes(MsgType::REGISTER, &spoof))
+            .await
+            .unwrap();
+        let (mt2, body2) = read_envelope(&mut tls2).await.unwrap();
+        assert_eq!(mt2, MsgType::CHALLENGE, "恢复类：key 有效也必须先证持有");
+        let mut reader2 = BytesReader::from_bytes(&body2);
+        let ch = Challenge::from_reader(&mut reader2, &body2).unwrap();
+        assert_eq!(ch.node_id, 1, "挑战绑定服务端解析的受害者身份");
+        // 攻击者以自己的私钥构造 tag（服务端按受害者存储 pubkey 验证 → 必败）
+        let attacker = MeshClient::new(attacker_key);
+        framing::write_frame(&mut tls2, &attacker.challenge_ack(&ch))
+            .await
+            .unwrap();
+        assert!(
+            read_envelope(&mut tls2).await.is_err(),
+            "无私钥不得通过恢复挑战"
+        );
+        drop(tls2);
+        server.await.unwrap();
+        // 身份与凭据无扰动
+        let srv = coord_check.lock().await;
+        assert_eq!(
+            srv.coordinator.node_id_by_pubkey(&victim_pubkey),
+            Some(1),
+            "受害者身份未被夺取或漂移"
+        );
+    }
+
+    /// REQ-060 新建类：key 消费后置于 PoP——挑战未通过（连接丢弃）前 key 不消费，
+    /// 同 key 仍可再次进入挑战；PoP 通过后才准入分配身份
+    #[tokio::test]
+    async fn register_one_time_key_consumed_only_after_pop() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
+        let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
+            let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            server
+        }));
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            for _ in 0..2 {
+                let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+                let mut server = coordinator.lock().await;
+                let _ = server.handle_connection(&mut tls).await;
+            }
+        });
+        let host = addr.ip().to_string();
+
+        // 连接 1：REGISTER → 挑战（node_id=0）→ 不应答直接丢弃
+        let mut tls1 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c1 = MeshClient::new([0x33; 32]);
+        let config = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x33; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls1, &c1.register_request(&config))
+            .await
+            .unwrap();
+        let (mt, body) = read_envelope(&mut tls1).await.unwrap();
+        assert_eq!(mt, MsgType::CHALLENGE);
+        let mut reader = BytesReader::from_bytes(&body);
+        let ch = Challenge::from_reader(&mut reader, &body).unwrap();
+        assert_eq!(ch.node_id, 0, "新建类挑战不携带身份（尚未分配）");
+        drop(tls1);
+
+        // 连接 2：同 key 同密钥对 → key 未被消费，仍进挑战；PoP 通过后准入
+        let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c2 = MeshClient::new([0x33; 32]);
+        framing::write_frame(&mut tls2, &c2.register_request(&config))
+            .await
+            .unwrap();
+        let owned = answer_challenge(&mut tls2, &c2).await;
+        assert_eq!(owned.proto().node_id, 0);
+        let (mt3, _body3) = read_envelope(&mut tls2).await.unwrap();
+        assert_eq!(mt3, MsgType::REGISTER_RESPONSE, "PoP 通过后才准入发放身份");
+        drop(tls2);
+        server.await.unwrap();
+    }
+
+    /// REQ-060 恢复类：幂等比对后置——PoP 通过但 capabilities 变更 → 拒绝，
+    /// 原身份不随重注册漂移
+    #[tokio::test]
+    async fn register_resume_caps_mismatch_rejected_after_pop() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak_loop.clone();
+        let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
+            let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            server
+        }));
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            for _ in 0..2 {
+                let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+                let mut server = coordinator.lock().await;
+                let _ = server.handle_connection(&mut tls).await;
+            }
+        });
+        let host = addr.ip().to_string();
+
+        let mut tls1 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let c1 = MeshClient::new([0x33; 32]);
+        let config = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: addr.port(),
+            auth_key: ak_loop.clone(),
+            static_key: [0x33; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        };
+        framing::write_frame(&mut tls1, &c1.register_request(&config))
+            .await
+            .unwrap();
+        answer_challenge(&mut tls1, &c1).await;
+        assert_eq!(
+            read_envelope(&mut tls1).await.unwrap().0,
+            MsgType::REGISTER_RESPONSE
+        );
+        drop(tls1);
+
+        // 同密钥对（PoP 可过）但 caps 变更 → 恢复完成前拒绝
+        let mut tls2 = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let changed = MeshLegConfig {
+            capabilities: 0x03,
+            ..config
+        };
+        framing::write_frame(&mut tls2, &c1.register_request(&changed))
+            .await
+            .unwrap();
+        let (mt2, body2) = read_envelope(&mut tls2).await.unwrap();
+        assert_eq!(mt2, MsgType::CHALLENGE);
+        let mut reader2 = BytesReader::from_bytes(&body2);
+        let ch = Challenge::from_reader(&mut reader2, &body2).unwrap();
+        framing::write_frame(&mut tls2, &c1.challenge_ack(&ch))
+            .await
+            .unwrap();
+        assert!(
+            read_envelope(&mut tls2).await.is_err(),
+            "caps/routes 变更须在 PoP 后拒绝"
+        );
         drop(tls2);
         server.await.unwrap();
     }
