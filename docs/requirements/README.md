@@ -29,7 +29,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
-| [REQ-060](./REQ-060-existing-path-possession.md) | 需求 | 📌 proposed | P1 | 09-02 | — |
+| [REQ-060](./REQ-060-existing-path-possession.md) | 需求 | ✅ merged | — | 09-02 | CONTROL_PLANE §2/§3.1/§3.9/§5.1 |
 | [REQ-058](./REQ-058-revocation-canonical-keying.md) | 需求 | 📌 proposed | P1 | 09-02 | — |
 | [REQ-059](./REQ-059-preauth-parse-alloc.md) | 需求 | 📌 proposed | P1 | 09-02 | — |
 | [REQ-040](./REQ-040.md) | 需求 | 📌 proposed | P2 | 08-15 | — |

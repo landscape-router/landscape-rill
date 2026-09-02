@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-056 / REQ-057 / REQ-060
 
-**版本：v0.9（2026-09-02 修订：REQ-056——§2 重连退避语义；REQ-057——§3.9 挑战携带 node_id 与注册响应丢失恢复 + §5.1 恢复流程）**
+**版本：v0.10（2026-09-02 修订：REQ-056——§2 重连退避语义；REQ-057——§3.9 挑战携带 node_id 与注册响应丢失恢复 + §5.1 恢复流程；REQ-060——§2/§3.1/§3.9/§5.1 挑战统一触发：无持有证明不发身份）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -62,7 +62,7 @@
 
 **版本协商（首消息协商）**：TLS 握手后首条消息携带协议版本 + 能力位，双方取交集；不兼容**明确报错**（而非静默失败）；与帧头 `version`（FRAME_HEADER §2.1）相互独立。
 
-**重连认证（X25519 静态密钥 DH 挑战）**：auth key 一次性时首注后即失效，重连必须独立认证。不用签名（Noise 静态密钥是 X25519 ECDH 密钥，无法签名），改用**静态密钥持有证明**（DH 挑战）：
+**重连认证（X25519 静态密钥 DH 挑战）**：auth key 一次性时首注后即失效，重连必须独立认证；REQ-060 起触发条件统一——**凡 REGISTER 且本连接未证明静态私钥持有，一律挑战（含首次注册）**：TLS 只认证服务端、auth key 只证成员资格，均不构成身份证明；身份发放（新铸或恢复）一律后置于持有证明。不用签名（Noise 静态密钥是 X25519 ECDH 密钥，无法签名），改用**静态密钥持有证明**（DH 挑战）：
 
 ```
 coordinator 生成临时 X25519 密钥对 (eph_priv, eph_pub)
@@ -111,6 +111,8 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 - 非主 coordinator（Raft 期）：以 `LeaderRedirect`（§3.6）替代
 
 **幂等**：相同 `auth_key + static_pubkey` 重复注册返回相同 `node_id` 与绑定。
+
+**身份发放前置（REQ-060）**：新注册（NewNode）与幂等恢复（Existing）一律先经 §3.9 挑战取得持有证明，验证通过后才发放 node_id/绑定并执行准入副作用（白名单校验、node_id 分配、binding 签发、一次性 key 消费）——**无持有证明不发身份，无例外**。闭合成员间横向冒用：auth key（成员资格）+ 公开 pubkey + 配置猜测不再构成身份；公钥抢注（squatting）同被阻断。
 
 ### 3.2 NetmapPush（全网拓扑）
 
@@ -173,8 +175,10 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 **Challenge**（coordinator → 节点）
 - `eph_pub`：coordinator 一次性临时 X25519 公钥（32B）
 - `nonce`：随机值（建议 16B）；`issued_at`：时间戳（服务端校验时间窗口，防重放）
-- `node_id`（4B，REQ-057）：服务端按注册表解析的目标身份。重连场景与客户端已知值一致；**注册响应丢失恢复场景**客户端尚不知道自己的 node_id，由本字段携带——node_id 非机密（netmap 本就下发），tag 的安全锚是私钥持有证明
-- 触发条件除重连外含**注册响应丢失恢复**（见下），均要求注册表存在该 node_id
+- `node_id`（4B，REQ-057）：恢复类 = 服务端按注册表解析的目标身份（重连场景与客户端已知值一致；**注册响应丢失恢复场景**客户端尚不知道自己的 node_id，由本字段携带）；新建类 = `0`（身份在验证通过后才分配）——node_id 非机密（netmap 本就下发），tag 的安全锚是私钥持有证明
+- 触发条件（REQ-060 统一）：凡 REGISTER 且本连接未证明持有 → 一律挑战，分两类完成语义：
+  - **恢复类**（pubkey 注册表命中）：Challenge 绑定**存储 pubkey** 与解析 node_id；验证通过后做幂等比对（capabilities/routes 一致 → 按条目回 REGISTER_RESPONSE；不一致 → 拒绝），不走注册准入、不校验 key 有效性（PoP 强于共享 key 的成员资格证明；吊销以条目移除为准——验证时条目须仍在且 pubkey 一致）
+  - **新建类**（pubkey 未命中）：key 只读校验（格式/过期/归域）通过即挑战，Challenge 绑定自报 pubkey、node_id=0；验证通过后执行完整注册准入（白名单、分配、binding 签发、一次性 key 消费——**消费后置于 PoP**；准入失败仍 fail-closed，只读校验失败计入失败锁定）
 
 **ChallengeAck**（节点 → coordinator）
 - `node_id`（4B）
@@ -183,12 +187,11 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 
 **安全属性**：只有持节点静态私钥者能构造合法 tag（持有证明，强度等价签名）；nonce 一次性（时间窗口内使用，重放拒绝）；coordinator 临时密钥一次性（eph_priv 用完即弃）；吊销自然生效（注册表移除 → 验签失败）；幂等（验证无副作用，重试安全）。
 
-**注册响应丢失恢复（REQ-057）**：one-time key 消费先于响应写出（tombstone 持久化），响应丢失后客户端（Fresh 态，node_id 未知）重发同一 key 进入恢复：
+**注册响应丢失恢复（REQ-057）**：one-time key 消费于准入时持久化（tombstone），响应丢失后客户端（Fresh 态，node_id 未知）重发同一 key 进入恢复（REQ-060 下按 pubkey 命中归类为恢复类）：
 
 ```
-Register(已消费 key, pubkey) → InvalidAuthKey（tombstone 遮蔽 pubkey 幂等路径）
-  → 服务端按 pubkey 查注册表命中 → Challenge(node_id)
-    （挑战状态绑定该 pubkey；不计失败锁定——合法恢复路径）
+Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类挑战 Challenge(node_id)
+    （挑战状态绑定存储 pubkey；不计失败锁定——合法恢复路径）
   → 客户端以消息 node_id 计算 tag + RegisterOk{node_id} 写入会话
   → ChallengeAck → 服务端按存储 pubkey 解析身份验证 tag
   → registered + 重推 netmap → 恢复完成（node_id 与首次注册一致，无新注册）
@@ -368,6 +371,7 @@ Register(已消费 key, pubkey) → InvalidAuthKey（tombstone 遮蔽 pubkey 幂
 auth_key 预生成
   → TLS 连接 coordinator
   → Register(auth_key, static_pubkey, capabilities)
+  → Challenge/ChallengeAck（持有证明，REQ-060——含首次注册）
   → 校验 auth_key → 分配 node_id → 签发身份绑定
   → NetmapPush(全量, 含自身条目)
   → KeyDist(自身 key_dst；广播密钥 opt-in 时随带)
