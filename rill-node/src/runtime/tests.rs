@@ -86,12 +86,16 @@ async fn start_coord() -> (String, String) {
 }
 
 fn node_config(url: &str, ca_path: &str, seed: u8, routes: Vec<String>) -> Config {
+    node_config_caps(url, ca_path, seed, routes, 0x21)
+}
+
+fn node_config_caps(url: &str, ca_path: &str, seed: u8, routes: Vec<String>, caps: u32) -> Config {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]);
     Config {
         coordinator_url: url.into(),
         auth_key: auth_test_key(),
         static_key_seed: [seed; 32],
-        capabilities: 0x01,
+        capabilities: caps,
         announce_routes: routes,
         coord_signing_pubkey: VerifyingKey::from(&signing_key).to_bytes(),
         ca_cert_path: ca_path.into(),
@@ -267,6 +271,31 @@ async fn multicast_flooded_across_nodes() {
         LanOutcome::Flooded { peers: 1 }
     );
     assert_eq!(b.pump_mesh().await.expect("B 应收到广播解密载荷"), ns);
+}
+
+/// REQ-035/CTL-14：未 opt-in 节点 keydist 不带 broadcast_key，
+/// 本地 LAN 组播不泛洪（无 key 无法构建广播帧）
+#[tokio::test]
+async fn broadcast_opt_out_node_gets_no_key_and_no_flood() {
+    let (url, ca) = start_coord().await;
+    let mut a = Node::new(
+        node_config_caps(&url, &ca, 1, vec!["10.0.0.0/24".into()], 0x01),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    a.connect_control().await.unwrap();
+    pump_until_all(&mut [&mut a], "registered", |n| n.registered()).await;
+    // keydist 已消费（自身 key 到位）但 broadcast_key 不出现
+    pump_until_all(&mut [&mut a], "keydst", |n| n.mesh.has_key_dst(1)).await;
+    assert!(a.broadcast_key.is_none());
+    let ns = v6_multicast_packet([
+        0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0x00, 0x00, 0x02,
+    ]);
+    assert_eq!(
+        a.pump_lan_packet(&ns).await,
+        LanOutcome::Flooded { peers: 0 }
+    );
 }
 
 #[tokio::test]

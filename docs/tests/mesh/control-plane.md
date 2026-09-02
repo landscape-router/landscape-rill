@@ -110,9 +110,9 @@
 
 - 关联 REQ：REQ-035
 - 测试层：单测 + e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：keydist 按能力位按需下发 broadcast_key 未实现（REQ-035 实现待落地）
+- 状态：`已覆盖`
+- 证据：rill-coord/src/coordinator/、rill-node/src/runtime/、e2e/setup.sh
+- 说明：broadcast_key 仅向能力位含 broadcast（0x20）的节点携带（keydist_broadcast_key_opt_in_only）；未 opt-in 节点不持 key（fail-closed）、本地组播不泛洪（broadcast_opt_out_node_gets_no_key_and_no_flood）；e2e 默认 capabilities=33
 
 ## CTL-15 路径服务（v1.5 + v2 数据面）
 
@@ -153,7 +153,7 @@
 - [ ] CTL-11：离线后 routes[] 随可达性撤销（待实现）
 - [ ] CTL-12：主切换幂等重注册、软状态重建（P2）
 - [x] CTL-13：DH 挑战闭环、时间窗口防重放
-- [ ] CTL-14：未 opt-in 节点 keydist 不带 broadcast_key（待实现）
+- [x] CTL-14：未 opt-in 节点 keydist 不带 broadcast_key（keydist_broadcast_key_opt_in_only）；opt-out 节点本地组播不泛洪（broadcast_opt_out_node_gets_no_key_and_no_flood）；e2e 默认 capabilities=33（relay+broadcast）
 - [x] CTL-15：Path* 消息族 + 候选路径（直连 + relay，幂等）/flow hash 选择/主路径 miss 快速切换/key_path 参与者全量签发/吊销联动撤销/path_id=0 回退 key_dst（v2 帧头 42B 纳入 route_mac 与 AAD）
   - relay docker e2e：a—b—c 线形（b 双网卡，a↔c 无直连可达性），直连候选 miss → 快速切换经 b 中继建立会话 + 数据双向（e2e/mesh/relay/，b 日志 relayed frame 为证据）
 - [x] CTL-16：coordinator 持久化——单测（roundtrip 恢复/一次性 key 消费存活/node_id+path_id 单调/损坏与不一致 fail-closed/重载不复活）+ docker e2e（coord 重启 → a↔b 恢复、node-c 挑战重连无新注册、node-d 复用已消费 key 被拒，e2e/mesh/persist/）

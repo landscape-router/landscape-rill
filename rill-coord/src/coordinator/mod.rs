@@ -25,6 +25,8 @@ use tracing::{error, warn};
 
 /// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
 pub const CAPABILITY_RELAY: u32 = 0x01;
+/// 能力位：broadcast（L2 广播/组播泛洪 opt-in，CONTROL_PLANE §3.1 / FRAME_HEADER §2.6）
+pub const CAPABILITY_BROADCAST: u32 = 0x20;
 
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -45,7 +47,8 @@ pub struct KeyDistData {
     pub to_node_id: u32,
     pub key: [u8; KEY_DST_LEN],
     pub key_version: u32,
-    pub broadcast_key: [u8; KEY_DST_LEN],
+    /// 按需下发（REQ-035）：仅接收节点能力位含 broadcast 时携带
+    pub broadcast_key: Option<[u8; KEY_DST_LEN]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,13 +462,16 @@ impl Coordinator {
         })
     }
 
+    /// keydist（CONTROL_PLANE §3.3）：broadcast_key 按接收节点能力位按需下发（REQ-035）
     pub fn key_dist(&self, node_id: u32) -> Option<KeyDistData> {
         let domain = self.domain_of_node(node_id)?;
+        let capabilities = domain.registry.entry(node_id)?.capabilities;
         Some(KeyDistData {
             to_node_id: node_id,
             key: domain.keys.key_for(node_id),
             key_version: domain.keys.version(),
-            broadcast_key: domain.keys.broadcast_key(),
+            broadcast_key: (capabilities & CAPABILITY_BROADCAST != 0)
+                .then(|| domain.keys.broadcast_key()),
         })
     }
 

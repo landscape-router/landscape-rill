@@ -85,7 +85,7 @@
 | REQ-032 | FRM-08 / FRM-10 | 部分覆盖 | e2e/run_e2e.sh |
 | REQ-033 | TSL-01 | 已覆盖 | e2e/p0_tailscale/run_p0.sh |
 | REQ-034 | CTL-15 | 已覆盖 | rill-core/src/frame/、rill-coord/src/path_service.rs、rill-mesh/src/data/、e2e/run_e2e.sh、e2e/mesh/relay/ |
-| REQ-035 | FRM-08 / CTL-14 | 待补充 | — |
+| REQ-035 | FRM-08 / CTL-14 | 已覆盖 | rill-coord/src/coordinator/、rill-mesh/src/data/、rill-node/src/runtime/、e2e/setup.sh |
 | REQ-036 | ADM-04 / ADM-05 | 已覆盖 | rill-coord/src/config/、rill-core/src/control/registry.rs |
 | REQ-037 | CTL-16 | 已覆盖 | rill-coord/src/store/、rill-coord/src/coordinator/、e2e/run_e2e.sh、e2e/mesh/persist/ |
 | REQ-038 | ADM-01 / ADM-02 | 已覆盖 | rill-coord/src/config/、rill-core/src/control/registry.rs、e2e/run_e2e.sh |

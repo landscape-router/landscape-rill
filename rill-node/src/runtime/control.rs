@@ -72,7 +72,7 @@ impl Node {
                     self.mesh.set_key_dst(to_node_id, k);
                     self.key_versions.insert(to_node_id, key_version);
                 }
-                // 广播密钥随每条 KeyDist 携带（网络级共享，FRAME_HEADER §2.6）
+                // 广播密钥按需下发（REQ-035）：仅 opt-in 节点收到，空 = 未 opt-in
                 if broadcast_key.len() == 32 {
                     let mut b = [0u8; 32];
                     b.copy_from_slice(&broadcast_key);
@@ -93,6 +93,7 @@ impl Node {
                 self.mesh.remove_peer_static(node_id);
                 self.mesh.remove_key_dst(node_id);
                 self.mesh.remove_endpoint(node_id);
+                self.mesh.remove_peer_capabilities(node_id);
                 self.mesh.remove_paths_for(node_id);
                 self.engine.remove_mesh_node(node_id);
                 self.netmap_peers.remove(&node_id);
@@ -188,6 +189,9 @@ impl Node {
             fresh.insert(entry.node_id);
             self.mesh
                 .set_peer_static(entry.node_id, entry.static_pubkey);
+            // 能力位（泛洪目标 opt-in 过滤依据，FRAME_HEADER §2.6 v0.9）
+            self.mesh
+                .set_peer_capabilities(entry.node_id, entry.capabilities);
             let mut addrs: Vec<SocketAddr> = Vec::new();
             for ep in &entry.endpoints {
                 if let Ok(addr) = ep.parse::<SocketAddr>() {
@@ -214,6 +218,7 @@ impl Node {
         for stale in self.netmap_peers.difference(&fresh) {
             self.mesh.remove_peer_static(*stale);
             self.mesh.remove_endpoint(*stale);
+            self.mesh.remove_peer_capabilities(*stale);
             self.mesh.drop_session(*stale);
             self.mesh.remove_paths_for(*stale);
             self.engine.remove_mesh_node(*stale);

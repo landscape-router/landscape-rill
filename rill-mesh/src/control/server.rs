@@ -88,7 +88,11 @@ fn key_dist_message(coordinator: &Coordinator, node_id: u32) -> Option<Vec<u8>> 
         to_node_id: data.to_node_id,
         key: Cow::Owned(data.key.to_vec()),
         key_version: data.key_version,
-        broadcast_key: Cow::Owned(data.broadcast_key.to_vec()),
+        // 空 bytes = 未 opt-in（REQ-035，CONTROL_PLANE §3.3 按需下发）
+        broadcast_key: data
+            .broadcast_key
+            .map(|k| Cow::Owned(k.to_vec()))
+            .unwrap_or(Cow::Borrowed(&[])),
     };
     Some(envelope_body(&msg))
 }
@@ -209,9 +213,6 @@ impl CoordinatorServer {
             if let Some(body) = key_dist_message(&self.coordinator, node_id) {
                 write_msg(stream, MsgType::KEY_DIST, &body).await?;
             }
-        }
-        if let Some(body) = key_dist_message(&self.coordinator, 0xFFFF_FFFF) {
-            write_msg(stream, MsgType::KEY_DIST, &body).await?;
         }
         Ok(())
     }

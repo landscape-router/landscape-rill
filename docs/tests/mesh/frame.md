@@ -63,10 +63,9 @@
 
 - 关联 REQ：REQ-032 / REQ-035
 - 测试层：单测 + e2e
-- 状态：`部分覆盖`
+- 状态：`已覆盖`
 - 证据：rill-mesh/src/data/、e2e/run_e2e.sh
-- 缺口：**广播 opt-in（REQ-035）实现待落地**——keydist 按需下发 broadcast_key、泛洪目标收窄未实现；当前仅为 v0.7 全量下发语义
-- 说明：去重 30s、ttl 不向源回泛、令牌桶 64/16/s、组播指纹防再泛洪已闭环
+- 说明：keydist 按需下发 broadcast_key（仅 opt-in 节点）；泛洪目标收窄 = opt-in 端点（flood_targets_only_opt_in_peers / relay_flood_targets_only_opt_in_peers，无能力记录按未 opt-in fail-closed）；去重 30s、ttl 不向源回泛、令牌桶 64/16/s、组播指纹防再泛洪；e2e 节点默认 capabilities=33，ping6 ND 组播泛洪走 opt-in 路径
 
 ## FRM-09 数据面转发路径 relay()
 
@@ -109,7 +108,7 @@
 - [x] FRM-05：seq 重放窗口拦截，回绕语义正确
 - [x] FRM-06：rekey 双窗口 5s 交叠语义（残留内可解、过期丢弃）
 - [x] FRM-07：心跳仅会话对、AEAD 空载荷、3 次 miss 拆会话
-- [ ] FRM-08：未 opt-in 节点不收 broadcast_key；泛洪只达 opt-in 端点（REQ-035 待落地）
+- [x] FRM-08：未 opt-in 节点不收 broadcast_key；泛洪只达 opt-in 端点（flood_targets / relay 转发双侧过滤，无能力记录 fail-closed）
 - [x] FRM-09：转发路径丢弃原因显式化，ttl 递减不重签
 - [x] FRM-10：IPv4 + IPv6 全链路 0% 丢包
 - [x] FRM-11：注册→握手→加密帧全链路主机闭环

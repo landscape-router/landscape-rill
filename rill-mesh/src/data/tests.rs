@@ -1116,6 +1116,8 @@ async fn broadcast_setup(ids: &[u32]) -> Vec<MeshData> {
                 continue;
             }
             node.set_endpoint(*peer, *addr);
+            // 默认全 opt-in（REQ-035 泛洪目标过滤的正例基线）
+            node.set_peer_capabilities(*peer, 0x21);
         }
     }
     nodes
@@ -1311,6 +1313,40 @@ async fn flood_sends_to_all_peers() {
     ));
     assert!(matches!(
         nodes[2].handle_incoming().await.unwrap(),
+        IncomingEvent::Broadcast { from: 1, .. }
+    ));
+}
+
+/// REQ-035/FRM-08：泛洪只达 opt-in 端点——未 opt-in 与无能力记录（fail-closed）
+/// 的端点不发送
+#[tokio::test]
+async fn flood_targets_only_opt_in_peers() {
+    let mut nodes = broadcast_setup(&[1, 2, 3, 4]).await;
+    // node 3 未 opt-in（仅 relay 位）；node 4 抹掉能力记录（fail-closed 路径）
+    nodes[0].set_peer_capabilities(3, 0x01);
+    nodes[0].remove_peer_capabilities(4);
+    assert_eq!(nodes[0].flood_targets(1), vec![2]);
+    assert_eq!(nodes[0].flood(b"opt-in only").await, 1);
+    assert!(matches!(
+        nodes[1].handle_incoming().await.unwrap(),
+        IncomingEvent::Broadcast { from: 1, .. }
+    ));
+}
+
+/// REQ-035/FRM-08：转发侧同样过滤——relay 泛洪不发给未 opt-in / 无记录端点
+#[tokio::test]
+async fn relay_flood_targets_only_opt_in_peers() {
+    let mut nodes = broadcast_setup(&[1, 2, 3, 4, 5]).await;
+    nodes[1].set_peer_capabilities(3, 0x01);
+    nodes[1].remove_peer_capabilities(4);
+    let mut frame = nodes[0].build_broadcast_frame(b"via relay").unwrap();
+    nodes[0].send_to_node(2, &frame).await.unwrap();
+    match nodes[1].relay(&mut frame).await {
+        RelayOutcome::Flooded { forwarded, .. } => assert_eq!(forwarded, vec![5]),
+        other => panic!("expected flood, got {:?}", other),
+    }
+    assert!(matches!(
+        nodes[4].handle_incoming().await.unwrap(),
         IncomingEvent::Broadcast { from: 1, .. }
     ));
 }

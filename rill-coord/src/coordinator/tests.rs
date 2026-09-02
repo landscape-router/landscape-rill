@@ -32,7 +32,11 @@ fn two_networks() -> (Coordinator, String, String) {
 }
 
 fn register_node(c: &mut Coordinator, ak: &str, seed: u8) -> u32 {
-    c.register(ak, &pubkey(seed), 0x01, vec![]).unwrap().node_id
+    register_node_caps(c, ak, seed, 0x01)
+}
+
+fn register_node_caps(c: &mut Coordinator, ak: &str, seed: u8, caps: u32) -> u32 {
+    c.register(ak, &pubkey(seed), caps, vec![]).unwrap().node_id
 }
 
 #[test]
@@ -235,9 +239,9 @@ fn auth_key_scoped_to_network() {
 #[test]
 fn key_dst_isolated_per_network() {
     let (mut c, ak_a, ak_b) = two_networks();
-    let a1 = register_node(&mut c, &ak_a, 1);
-    let a2 = register_node(&mut c, &ak_a, 2);
-    let b1 = register_node(&mut c, &ak_b, 3);
+    let a1 = register_node_caps(&mut c, &ak_a, 1, 0x21);
+    let a2 = register_node_caps(&mut c, &ak_a, 2, 0x21);
+    let b1 = register_node_caps(&mut c, &ak_b, 3, 0x21);
     let ka1 = c.key_dist(a1).unwrap();
     let ka2 = c.key_dist(a2).unwrap();
     let kb1 = c.key_dist(b1).unwrap();
@@ -245,12 +249,25 @@ fn key_dst_isolated_per_network() {
     assert_ne!(ka1.key, ka2.key);
     // 跨网络即使 node_id 相同也不得同 key（主密钥独立）
     assert_ne!(ka1.key, kb1.key);
-    // 广播密钥按网络独立
-    let b2 = register_node(&mut c, &ak_b, 4);
+    // 广播密钥按网络独立（opt-in 节点，REQ-035 按需下发语义）
+    let b2 = register_node_caps(&mut c, &ak_b, 4, 0x21);
     let kb2 = c.key_dist(b2).unwrap();
     assert_eq!(ka1.broadcast_key, ka2.broadcast_key);
     assert_eq!(kb1.broadcast_key, kb2.broadcast_key);
     assert_ne!(ka1.broadcast_key, kb1.broadcast_key);
+}
+
+/// REQ-035/CTL-14：broadcast_key 按能力位按需下发——未 opt-in 节点不携带
+#[test]
+fn keydist_broadcast_key_opt_in_only() {
+    let (mut c, ak) = setup();
+    let opted_in = register_node_caps(&mut c, &ak, 1, CAPABILITY_BROADCAST);
+    let relay_only = register_node(&mut c, &ak, 2);
+    assert!(c.key_dist(opted_in).unwrap().broadcast_key.is_some());
+    assert!(c.key_dist(relay_only).unwrap().broadcast_key.is_none());
+    // 混合能力位（relay + broadcast）同样下发
+    let mixed = register_node_caps(&mut c, &ak, 3, CAPABILITY_RELAY | CAPABILITY_BROADCAST);
+    assert!(c.key_dist(mixed).unwrap().broadcast_key.is_some());
 }
 
 /// SEC-25：前缀公告白名单按网络分域——A 网白名单不影响 B 网

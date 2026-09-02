@@ -20,8 +20,9 @@ impl MeshData {
         build_frame(&header, &bkey, &bkey, 0, payload).map_err(|_| SendError::Aead)
     }
 
-    /// 组播泛洪：向全部已知端点（除自己）发送广播帧。无会话端点直接发送
+    /// 组播泛洪：向 opt-in 端点（除自己）发送广播帧。无会话端点直接发送
     /// （广播帧不依赖逐对会话密钥，不触发懒握手）。返回成功发送数。
+    /// 目标收窄（REQ-035）：仅能力位含 broadcast 的端点，未 opt-in 不发。
     pub async fn flood(&mut self, payload: &[u8]) -> usize {
         if !self.flood_bucket.take() {
             return 0;
@@ -30,7 +31,7 @@ impl MeshData {
             return 0;
         };
         let mut sent = 0;
-        for peer in self.endpoint_ids() {
+        for peer in self.flood_targets(self.self_node_id) {
             if self.send_to_node(peer, &frame).await.unwrap_or(false) {
                 sent += 1;
             }
@@ -38,11 +39,13 @@ impl MeshData {
         sent
     }
 
-    pub(super) fn endpoint_ids(&self) -> Vec<u32> {
+    /// 泛洪目标（FRAME_HEADER §2.6 v0.9）：endpoint_table 中除自己与源外、
+    /// 且能力位含 broadcast 的端点；无能力记录按未 opt-in（fail-closed）
+    pub(super) fn flood_targets(&self, source: u32) -> Vec<u32> {
         self.endpoint_table
             .keys()
             .copied()
-            .filter(|id| *id != self.self_node_id)
+            .filter(|id| *id != self.self_node_id && *id != source && self.broadcast_opted_in(*id))
             .collect()
     }
 
@@ -134,12 +137,13 @@ impl MeshData {
             .insert((header.from_node_id, header.seq), Instant::now());
         let mut forwarded = Vec::new();
         if self.flood_bucket.take() {
-            // 原地 TTL 递减后直接从接收缓冲泛洪（REQ-053：转发零拷贝）
+            // 原地 TTL 递减后直接从接收缓冲泛洪（REQ-053：转发零拷贝）；
+            // 目标收窄（REQ-035）：仅 opt-in 端点（发送侧过滤的转发侧对应）
             decrement_ttl(frame);
-            for (id, addrs) in &self.endpoint_table {
-                if *id == self.self_node_id || *id == header.from_node_id {
+            for id in self.flood_targets(header.from_node_id) {
+                let Some(addrs) = self.endpoint_table.get(&id) else {
                     continue;
-                }
+                };
                 let mut ok = false;
                 for ep in addrs {
                     if self.wan_send(&frame[..], *ep).await.is_ok() {
@@ -148,7 +152,7 @@ impl MeshData {
                     }
                 }
                 if ok {
-                    forwarded.push(*id);
+                    forwarded.push(id);
                 }
             }
         }

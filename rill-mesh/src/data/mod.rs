@@ -1,4 +1,5 @@
 use bytes::{Bytes, BytesMut};
+use landscape_rill_coord::coordinator::CAPABILITY_BROADCAST;
 use landscape_rill_core::frame::{
     build_frame, build_handshake_frame, decrement_ttl, frame_payload, header_len,
     open_frame_in_place, packet_type, MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN,
@@ -92,6 +93,9 @@ pub struct MeshData {
     broadcast_replay: HashMap<u32, ReplayWindow>,
     /// relay 泛洪去重集：(from_node_id, seq) → 首次见时间
     flood_seen: HashMap<(u32, u32), Instant>,
+    /// peer 能力位（netmap 注入）：泛洪目标过滤依据（FRAME_HEADER §2.6 v0.9）；
+    /// 无记录按未 opt-in 处理（fail-closed）
+    peer_capabilities: HashMap<u32, u32>,
     /// 泛洪出口令牌桶（发送与转发共用）
     flood_bucket: TokenBucket,
     /// v2 路径授权密钥：path_id → key_path（coordinator 签发，只发路径参与者）
@@ -230,6 +234,7 @@ impl MeshData {
             broadcast_seq: 0,
             broadcast_replay: HashMap::new(),
             flood_seen: HashMap::new(),
+            peer_capabilities: HashMap::new(),
             flood_bucket: TokenBucket::new(FLOOD_BUCKET_RATE_PER_SEC, FLOOD_BUCKET_CAPACITY),
             key_path_table: HashMap::new(),
             path_table: HashMap::new(),
@@ -309,6 +314,22 @@ impl MeshData {
 
     pub fn remove_peer_static(&mut self, peer: u32) {
         self.peer_statics.remove(&peer);
+    }
+
+    /// netmap 注入：peer 能力位（泛洪目标 opt-in 过滤，FRAME_HEADER §2.6 v0.9）
+    pub fn set_peer_capabilities(&mut self, peer: u32, capabilities: u32) {
+        self.peer_capabilities.insert(peer, capabilities);
+    }
+
+    pub fn remove_peer_capabilities(&mut self, peer: u32) {
+        self.peer_capabilities.remove(&peer);
+    }
+
+    /// 广播 opt-in 判定（REQ-035）：无能力记录按未 opt-in（fail-closed）
+    pub(super) fn broadcast_opted_in(&self, node_id: u32) -> bool {
+        self.peer_capabilities
+            .get(&node_id)
+            .is_some_and(|c| c & CAPABILITY_BROADCAST != 0)
     }
 
     pub fn remove_endpoint(&mut self, peer: u32) {

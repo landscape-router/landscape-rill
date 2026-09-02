@@ -96,8 +96,8 @@ echo "==> 4/6 生成配置"
 NODE_A_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_C_AUTHKEY=$("$OVERLAY" authkey --network lab)
-gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认1)
-  CAP="${7:-1}"
+gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认33=relay+broadcast，REQ-035)
+  CAP="${7:-33}"
   # 数据面 underlay（REQ-054）：MESH_E2E_TRANSPORT=tcp 时节点走真 TCP 兜底档
   DT="${MESH_E2E_TRANSPORT:-udp}"
   cat > "$BUILD_DIR/$1" <<EOF
