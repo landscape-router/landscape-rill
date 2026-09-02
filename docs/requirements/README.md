@@ -29,7 +29,6 @@ proposed（提出：日期 + 动机 + 验收草案）
 
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
-| [REQ-047](./REQ-047-control-plane-ratelimit.md) | 需求 | 📌 proposed | P1 | 09-01 | — |
 | [REQ-040](./REQ-040.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
 | [REQ-041](./REQ-041.md) | 需求 | 📌 proposed | P2 | 08-15 | — |
 | [REQ-045](./REQ-045-acl-policy.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
@@ -83,6 +82,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-043](./REQ-043.md) | 需求 | ✅ merged | — | 08-31 | CONTROL_PLANE §6/§3.1/§3.12 |
 | [REQ-053](./REQ-053-data-plane-io.md) | 决策 | ✅ merged | — | 09-01 | FRAME_HEADER §2.2/§8 |
 | [REQ-046](./REQ-046-probe-mandatory-ratelimit.md) | 需求 | ✅ merged | — | 09-01 | CONNECTIVITY §2.1/§2.2/§4.3 |
+| [REQ-047](./REQ-047-control-plane-ratelimit.md) | 需求 | ✅ merged | — | 09-01 | CONTROL_PLANE §3.13 |
 
 ## 4. 维护规则
 

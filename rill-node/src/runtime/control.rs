@@ -234,10 +234,14 @@ impl Node {
         }
     }
 
-    /// 登记待发路径请求（netmap 全量替换每次都会触发，幂等：重复请求 = 刷新路径集）
-    fn request_paths_for(&mut self, dest: u32) {
+    /// 登记待发路径请求（netmap 全量替换每次都会触发，幂等：重复请求 = 刷新路径集）。
+    /// 上限 PATH_REQUEST_PENDING_MAX（REQ-047：防大规模 netmap 内存放大；饱和丢弃，
+    /// 未登记 dest 随下个 netmap/心跳重触发）
+    pub(super) fn request_paths_for(&mut self, dest: u32) {
         self.path_requested.insert(dest);
-        if !self.pending_path_requests.contains(&dest) {
+        if !self.pending_path_requests.contains(&dest)
+            && self.pending_path_requests.len() < PATH_REQUEST_PENDING_MAX
+        {
             self.pending_path_requests.push(dest);
         }
     }

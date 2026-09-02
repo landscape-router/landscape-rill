@@ -41,7 +41,7 @@
 | dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
 | 路由引擎 | [routing.md](./routing.md) | `RTE-01` ~ `RTE-08` |
 | 帧层对抗 | [security/frame-attacks.md](./security/frame-attacks.md) | `SEC-01` ~ `SEC-11` |
-| 控制面对抗 | [security/control-plane-attacks.md](./security/control-plane-attacks.md) | `SEC-12` ~ `SEC-20` |
+| 控制面对抗 | [security/control-plane-attacks.md](./security/control-plane-attacks.md) | `SEC-12` ~ `SEC-20` / `SEC-29` |
 | 租户边界 | [security/tenancy.md](./security/tenancy.md) | `SEC-21` ~ `SEC-28` |
 | 管理面与配置 | [admin.md](./admin.md) | `ADM-01` ~ `ADM-06` |
 | 日志治理 | [admin.md](./admin.md) | `LOG-01` ~ `LOG-03` |
@@ -98,7 +98,7 @@
 | REQ-044 | — | 📌 proposed（无验收场景） | — |
 | REQ-045 | — | 📌 proposed（无验收场景） | — |
 | REQ-046 | SEC-07 / SEC-26 / CON-10 | 已覆盖 | rill-node/src/runtime/、rill-mesh/src/data/、rill-core/src/rate.rs、rill-core/src/probe.rs、e2e/run_e2e.sh（probe 场景） |
-| REQ-047 | — | 📌 proposed（无验收场景） | — |
+| REQ-047 | SEC-20 / SEC-29 | 已覆盖 | rill-mesh/src/control/server.rs、rill-node/src/runtime/、rill-coord/src/path_service.rs、rilld/src/coord_run.rs |
 | REQ-048 | — | 📌 proposed（无验收场景） | — |
 | REQ-049 | — | 📌 proposed（无验收场景） | — |
 | REQ-050 | — | 📌 proposed（无验收场景） | — |

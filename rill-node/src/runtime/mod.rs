@@ -35,6 +35,8 @@ pub const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// mesh→LAN 广播帧写入 land0 后被内核回送入 tun 的防再泛洪窗口
 /// （组播包指纹，FRAME_HEADER §2.6 防环）
 pub const MULTICAST_REWRITE_GUARD: Duration = Duration::from_secs(2);
+/// 待发路径请求上限（REQ-047：防大规模 netmap 内存放大；饱和丢弃靠重触发收敛）
+pub const PATH_REQUEST_PENDING_MAX: usize = 256;
 
 /// 本机非 loopback、非 tun 接口的 IPv4/IPv6 地址（端点通告用；失败回退空列表）
 async fn collect_local_ips() -> Vec<IpAddr> {

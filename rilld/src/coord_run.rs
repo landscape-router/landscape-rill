@@ -79,6 +79,11 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
                         warn!("[coord] register rejected: {n} in last 1s");
                     }
                 }
+                if let Some(n) = guard.rate_limited.poll(Instant::now()) {
+                    if n > 0 {
+                        warn!("[coord] control rate-limited: {n} in last 1s (REQ-047)");
+                    }
+                }
             }
             next = accept_next(&mut listener, &cert, &key) => {
                 // 单连接 TLS 错误不得杀死 coordinator（恶意/畸形握手 → 计数摘要后继续监听）

@@ -36,6 +36,12 @@ async fn start_coord() -> (String, String) {
     let master = [0x11; 32];
     let seed = [0x22; 32];
     let server = Arc::new(Mutex::new(CoordinatorServer::new(master, seed)));
+    {
+        // 控制面限速参数测试放大（REQ-047）：主机测试 300ms 心跳泵 + localhost 共源
+        let mut s = server.lock().await;
+        s.heartbeat_min_interval = Duration::from_millis(100);
+        s.register_limiter = landscape_rill_core::rate::SourceRateLimiter::new(100.0, 100);
+    }
     let ak = auth_test_key();
     server
         .lock()
@@ -375,4 +381,19 @@ async fn probe_backoff_exponential_and_reset() {
     // PONG 确认 → 退避清零（下周期可立即探测）
     a.handle_probe_pong(2, ep, Vec::new()).await;
     assert!(!a.probe_backoff.contains_key(&ep));
+}
+
+// ==================== 控制面限速/准入（REQ-047） ====================
+
+/// 待发路径请求上限（REQ-047）：饱和丢弃，重复 dest 幂等
+#[tokio::test]
+async fn path_request_pending_capped() {
+    let mut a = bare_node(1).await;
+    for dest in 0..(PATH_REQUEST_PENDING_MAX as u32 + 10) {
+        a.request_paths_for(dest);
+    }
+    assert_eq!(a.pending_path_requests.len(), PATH_REQUEST_PENDING_MAX);
+    // 重复 dest 不增长
+    a.request_paths_for(0);
+    assert_eq!(a.pending_path_requests.len(), PATH_REQUEST_PENDING_MAX);
 }

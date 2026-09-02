@@ -10,6 +10,9 @@ use std::collections::HashMap;
 
 /// 路径活性租约时长（unix 秒）；过期后节点侧从候选剔除（重新请求刷新）
 pub const PATH_DEFAULT_TTL: u64 = 3600;
+/// per-source 待推送事件上限（REQ-047：防 pending 无界内存放大；饱和丢弃，
+/// 节点随心跳重发请求 → 幂等刷新重建，最终一致）
+pub const PENDING_EVENTS_MAX: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathCandidate {
@@ -128,25 +131,33 @@ impl PathService {
     }
 
     /// 路径集事件推给全部参与者（source/dest/relay）；source 也推——即时
-    /// PathResponse 可能丢失，心跳推送通道是权威下发路径
-    /// 路径集事件推给全部参与者（source/dest/relay）；source 也推——即时
-    /// PathResponse 可能丢失，心跳推送通道是权威下发路径
+    /// PathResponse 可能丢失，心跳推送通道是权威下发路径。
+    /// per-source 上限 PENDING_EVENTS_MAX（REQ-047：防 pending 无界放大；
+    /// 饱和丢弃，节点随心跳重发请求最终一致）
     fn push_to_participants(&mut self, source: u32, dest: u32, relays: &[u32], set: &PathSet) {
         let event = PathEvent::Update {
             source,
             dest,
             set: set.clone(),
         };
-        self.pending.entry(source).or_default().push(event);
+        self.push_event(source, event);
         for participant in std::iter::once(dest).chain(relays.iter().copied()) {
-            self.pending
-                .entry(participant)
-                .or_default()
-                .push(PathEvent::Update {
+            self.push_event(
+                participant,
+                PathEvent::Update {
                     source,
                     dest,
                     set: set.clone(),
-                });
+                },
+            );
+        }
+    }
+
+    /// 入队一条待推送事件（per-source 饱和，REQ-047）
+    fn push_event(&mut self, node: u32, event: PathEvent) {
+        let queue = self.pending.entry(node).or_default();
+        if queue.len() < PENDING_EVENTS_MAX {
+            queue.push(event);
         }
     }
 
@@ -283,6 +294,20 @@ mod tests {
         // 排除 source(1) 与 dest(2)：只剩 direct + relay3
         assert_eq!(cands.len(), 2);
         assert_eq!(cands[1].hops, vec![3, 2]);
+    }
+
+    /// per-source 待推送事件上限（REQ-047）：饱和丢弃，取走后恢复接收
+    #[test]
+    fn pending_events_capped_per_source() {
+        let mut ps = PathService::new();
+        for dest in 1..=(PENDING_EVENTS_MAX as u32 + 50) {
+            ps.request(1, dest, 2, 0);
+        }
+        assert_eq!(ps.pending.get(&1).unwrap().len(), PENDING_EVENTS_MAX);
+        // 取走（心跳推送）后恢复接收
+        let _ = ps.take_events(1);
+        ps.request(1, 9, 2, 0); // 幂等命中同样入队 refresh 事件
+        assert_eq!(ps.pending.get(&1).unwrap().len(), 1);
     }
 
     #[test]

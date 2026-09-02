@@ -4,12 +4,33 @@ use crate::control::codec::{envelope_body, read_envelope, write_msg};
 use crate::control::BoxResult;
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
-use landscape_rill_core::rate::{RateCounter, RATE_SUMMARY_PERIOD};
+use landscape_rill_core::rate::{RateCounter, SourceRateLimiter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+
+/// 连接级消息限速（REQ-047，SEC-19 速率维度）：每 TLS 连接令牌桶，
+/// 桶空 → 断连（复用单连接隔离语义，其他连接不受影响）。
+/// 正常负载 ~0.1 msg/s（心跳 10s + 快照推送），200 倍余量
+pub const CONN_MSG_RATE_PER_SEC: f64 = 20.0;
+pub const CONN_MSG_CAPACITY: u32 = 40;
+/// Register 准入限速（REQ-047，SEC-20）：per-源 IP 令牌桶（注册是重操作：
+/// node_id 分配 + redb 快照整写，防可复用 key + 不同公钥风暴放大）
+pub const REGISTER_RATE_PER_SEC: f64 = 0.5;
+pub const REGISTER_CAPACITY: u32 = 5;
+/// auth key 验证失败递增锁定：连续失败达阈值 → 锁定时长 30s×2^n（封顶 1h），
+/// 成功注册清零；已知 pubkey 的挑战认证不计失败（合法重连路径）
+pub const REGISTER_LOCKOUT_FAILS: u32 = 5;
+pub const REGISTER_LOCKOUT_BASE: Duration = Duration::from_secs(30);
+pub const REGISTER_LOCKOUT_MAX: Duration = Duration::from_secs(3600);
+/// 心跳最小间隔（REQ-047）：更近的心跳直接忽略（零成本——不更新 last_seen、
+/// 不推快照、不回 LEASE），租约/离线判定语义不变；默认 = 心跳间隔/2
+pub const HEARTBEAT_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 单连接挑战状态（重连认证，CONTROL_PLANE §3.9）
 struct ChallengeState {
@@ -76,13 +97,52 @@ pub struct CoordinatorServer {
     pub coordinator: Coordinator,
     /// 注册拒绝计数（LOGGING §5：周期摘要；run_coord 周期取走打印）
     pub register_rejected: RateCounter,
+    /// 控制面限速/锁定触发计数（LOGGING §5；run_coord 周期取走打印，SEC-20 证据）
+    pub rate_limited: RateCounter,
+    /// Register 准入 per-源 IP 限速（REQ-047）；测试可调（localhost 共源场景放大）
+    pub register_limiter: SourceRateLimiter,
+    /// Register 连续失败锁定（REQ-047）：源 IP → (连续失败数, 锁定截止)
+    pub(crate) register_lockout: HashMap<IpAddr, (u32, Instant)>,
+    /// 心跳最小间隔（REQ-047，超频忽略）；测试可调（主机测试 300ms 心跳泵）
+    pub heartbeat_min_interval: Duration,
 }
 
 impl CoordinatorServer {
+    fn default_limiter() -> SourceRateLimiter {
+        SourceRateLimiter::new(REGISTER_RATE_PER_SEC, REGISTER_CAPACITY)
+    }
+
+    /// Register 失败锁定判定（REQ-047/SEC-20）：锁定期间一律拒绝（含挑战路径——
+    /// 严格优先，NAT 共源受害节点靠锁过期 + 重连退避恢复）
+    pub(crate) fn register_locked(&self, ip: IpAddr, now: Instant) -> bool {
+        self.register_lockout
+            .get(&ip)
+            .is_some_and(|(_, until)| now < *until)
+    }
+
+    /// Register 失败记账：连续失败达阈值 → 指数锁定（30s×2^n 封顶 1h）
+    pub(crate) fn note_register_failure(&mut self, ip: IpAddr, now: Instant) {
+        let fails = self
+            .register_lockout
+            .get(&ip)
+            .map_or(1u32, |(f, _)| f.saturating_add(1));
+        let until = if fails >= REGISTER_LOCKOUT_FAILS {
+            let shift = (fails - REGISTER_LOCKOUT_FAILS).min(7);
+            now + (REGISTER_LOCKOUT_BASE * (1u32 << shift)).min(REGISTER_LOCKOUT_MAX)
+        } else {
+            now // 未达阈值：无锁定（截止 = 当前时刻）
+        };
+        self.register_lockout.insert(ip, (fails, until));
+    }
+
     pub fn new(master_key: [u8; 32], signing_seed: [u8; 32]) -> Self {
         Self {
             coordinator: Coordinator::new(signing_seed),
             register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
+            rate_limited: RateCounter::new(RATE_SUMMARY_PERIOD),
+            register_limiter: Self::default_limiter(),
+            register_lockout: HashMap::new(),
+            heartbeat_min_interval: HEARTBEAT_MIN_INTERVAL,
         }
         .with_network("lab", master_key)
     }
@@ -116,6 +176,10 @@ impl CoordinatorServer {
         let mut server = Self {
             coordinator,
             register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
+            rate_limited: RateCounter::new(RATE_SUMMARY_PERIOD),
+            register_limiter: Self::default_limiter(),
+            register_lockout: HashMap::new(),
+            heartbeat_min_interval: HEARTBEAT_MIN_INTERVAL,
         };
         cfg.apply_to(&mut server.coordinator);
         Ok(server)
@@ -165,7 +229,7 @@ impl CoordinatorServer {
     }
 
     /// 单消息处理（连接循环按消息粒度持锁；共享 coordinator 多连接场景由调用方保证互斥）。
-    /// ConnectionState 保存单连接状态（注册归属/挑战），由调用方维护。
+    /// ConnectionState 保存单连接状态（注册归属/挑战/连接级限速），由调用方维护。
     pub async fn handle_message(
         &mut self,
         state: &mut ConnectionState,
@@ -173,8 +237,37 @@ impl CoordinatorServer {
         msg_type: MsgType,
         body: &[u8],
     ) -> BoxResult<()> {
+        // 连接级限速（REQ-047，SEC-19 速率维度）：桶空 → 断连该连接（隔离不扩散）
+        if !state.msg_bucket.take() {
+            self.rate_limited.tick();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "connection message rate exceeded",
+            )
+            .into());
+        }
+        let peer_ip = stream.get_ref().0.peer_addr().ok().map(|a| a.ip());
         match msg_type {
             MsgType::REGISTER => {
+                // 准入闸门（REQ-047/SEC-20）：锁定优先，其次 per-源 IP 限速
+                if let Some(ip) = peer_ip {
+                    if self.register_locked(ip, Instant::now()) {
+                        self.rate_limited.tick();
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "register locked (repeated auth key failures)",
+                        )
+                        .into());
+                    }
+                    if !self.register_limiter.allow(ip) {
+                        self.rate_limited.tick();
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "register rate limited",
+                        )
+                        .into());
+                    }
+                }
                 let mut reader = BytesReader::from_bytes(body);
                 let req = RegisterRequest::from_reader(&mut reader, body)?;
                 let mut pubkey = [0u8; 32];
@@ -196,6 +289,9 @@ impl CoordinatorServer {
                     routes,
                 ) {
                     Ok(data) => {
+                        if let Some(ip) = peer_ip {
+                            self.register_lockout.remove(&ip);
+                        }
                         self.coordinator
                             .set_protocol_version(data.node_id, req.protocol_version);
                         let resp = RegisterResponse {
@@ -217,6 +313,7 @@ impl CoordinatorServer {
                     }
                     Err(landscape_rill_core::control::registry::RegisterError::InvalidAuthKey) => {
                         // 可能的重连：auth key 失效（一次性已消费）+ 公钥已知 → 挑战认证
+                        // （合法重连路径，不计失败锁定；锁定闸门在其之前已拦截）
                         match self.coordinator.node_id_by_pubkey(&pubkey) {
                             Some(_node_id) => {
                                 let ch = ChallengeState::new();
@@ -235,16 +332,22 @@ impl CoordinatorServer {
                                 state.challenge = Some(ch);
                             }
                             None => {
+                                if let Some(ip) = peer_ip {
+                                    self.note_register_failure(ip, Instant::now());
+                                }
                                 return Err(std::io::Error::new(
                                     std::io::ErrorKind::PermissionDenied,
                                     "unknown pubkey",
                                 )
-                                .into())
+                                .into());
                             }
                         }
                     }
                     Err(e) => {
                         // 逐条输出 → 周期摘要（LOGGING §5；run_coord 打印）
+                        if let Some(ip) = peer_ip {
+                            self.note_register_failure(ip, Instant::now());
+                        }
                         self.register_rejected.tick();
                         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e).into());
                     }
@@ -296,6 +399,16 @@ impl CoordinatorServer {
                 let mut reader = BytesReader::from_bytes(body);
                 let _ = Heartbeat::from_reader(&mut reader, body)?;
                 if let Some(node_id) = state.registered {
+                    // 超频忽略（REQ-047）：间隔不足即丢弃——不更新 last_seen、
+                    // 不推快照、不回 LEASE（零成本），租约/离线判定语义不变
+                    let now = Instant::now();
+                    if state
+                        .last_heartbeat
+                        .is_some_and(|last| now.duration_since(last) < self.heartbeat_min_interval)
+                    {
+                        return Ok(());
+                    }
+                    state.last_heartbeat = Some(now);
                     self.coordinator.heartbeat(node_id, unix_seconds());
                     // 周期收敛：端点/离线等软状态随心跳广播（v1 无增量推送）
                     let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
@@ -401,11 +514,25 @@ impl CoordinatorServer {
     }
 }
 
-/// 单连接状态：注册归属 + 重连挑战（由连接循环维护，与 coordinator 互斥解耦）
-#[derive(Default)]
+/// 单连接状态：注册归属 + 重连挑战 + 连接级限速（由连接循环维护，与 coordinator 互斥解耦）
 pub struct ConnectionState {
     pub registered: Option<u32>,
     challenge: Option<ChallengeState>,
+    /// 连接级消息令牌桶（REQ-047）：桶空 → 断连
+    pub(crate) msg_bucket: TokenBucket,
+    /// 上次接受的心跳时刻（超频忽略判定，REQ-047）
+    pub(crate) last_heartbeat: Option<Instant>,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self {
+            registered: None,
+            challenge: None,
+            msg_bucket: TokenBucket::new(CONN_MSG_RATE_PER_SEC, CONN_MSG_CAPACITY),
+            last_heartbeat: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -496,5 +623,144 @@ mod tests {
         let msg = landscape_rill_core::control::registry::binding_message(7, &[0x42; 32]);
         let sig = signer.sign(&msg);
         assert!(verify_binding(&signer.verifier(), 7, &[0x42; 32], &sig));
+    }
+
+    // ==================== 控制面限速/准入（REQ-047，SEC-19/SEC-20） ====================
+
+    fn bad_leg_config(auth_key: &str, seed: u8) -> MeshLegConfig {
+        MeshLegConfig {
+            coordinator_host: String::new(),
+            coordinator_port: 0,
+            auth_key: auth_key.into(),
+            static_key: [seed; 32],
+            capabilities: 0x01,
+            announce_routes: vec![],
+        }
+    }
+
+    /// 连接级消息限速（REQ-047）：桶空 → 断连该连接（SEC-19 速率维度）
+    #[tokio::test]
+    async fn conn_message_flood_disconnects() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let master = [0x11; 32];
+        let seed = [0x22; 32];
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+            let mut server = CoordinatorServer::new(master, seed);
+            let r = server.handle_connection(&mut tls).await;
+            assert!(r.is_err(), "消息洪泛超桶容量必须断连");
+            // 推进 1s 摘要窗口（LOGGING §5）取计数
+            let later = std::time::Instant::now() + RATE_SUMMARY_PERIOD;
+            assert!(server.rate_limited.poll(later).unwrap_or(0) >= 1);
+        });
+        let host = addr.ip().to_string();
+        let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let client = MeshClient::new([0x44; 32]);
+        // 未注册心跳 = 无操作消息：纯测连接级限速
+        for _ in 0..(CONN_MSG_CAPACITY as usize + 10) {
+            framing::write_frame(&mut tls, &client.heartbeat())
+                .await
+                .unwrap();
+        }
+        let r = read_envelope(&mut tls).await;
+        assert!(r.is_err(), "服务端断连后客户端应读到 EOF");
+        server.await.unwrap();
+    }
+
+    /// auth key 爆破锁定（REQ-047/SEC-20）：连续失败（未知 key + 未知 pubkey）
+    /// 达阈值 → 源 IP 锁定，后续连接注册直接拒绝
+    #[tokio::test]
+    async fn register_failures_lockout_after_repeated_bad_keys() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let master = [0x11; 32];
+        let seed = [0x22; 32];
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            let mut server = CoordinatorServer::new(master, seed);
+            for _ in 0..=REGISTER_LOCKOUT_FAILS {
+                let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+                assert!(server.handle_connection(&mut tls).await.is_err());
+            }
+            let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+            assert!(server.register_locked(ip, std::time::Instant::now()));
+        });
+        let host = addr.ip().to_string();
+        for i in 0..=REGISTER_LOCKOUT_FAILS {
+            let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+                .await
+                .unwrap();
+            // 每次不同未知 pubkey + 垃圾 key：全部走失败路径（无挑战资格）
+            let client = MeshClient::new([0x50 + i as u8; 32]);
+            let reg =
+                client.register_request(&bad_leg_config("lrk-lab-0-badbadbad", 0x50 + i as u8));
+            framing::write_frame(&mut tls, &reg).await.unwrap();
+            assert!(
+                read_envelope(&mut tls).await.is_err(),
+                "失败/锁定注册都应被断连"
+            );
+        }
+        server.await.unwrap();
+    }
+
+    /// 心跳超频忽略（REQ-047）：间隔不足 → 零成本跳过（无快照/LEASE 推送），
+    /// 正常心跳（≥ 最小间隔）照常处理
+    #[tokio::test]
+    async fn heartbeat_overspeed_ignored() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca_cert, cert, key) = ca_pair();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let master = [0x11; 32];
+        let seed = [0x22; 32];
+        let ak = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+        let ak_server = ak.clone();
+        let server = tokio::spawn(async move {
+            let mut listener = listener;
+            let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+            let mut server = CoordinatorServer::new(master, seed);
+            server
+                .coordinator
+                .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            let _ = server.handle_connection(&mut tls).await;
+        });
+        let host = addr.ip().to_string();
+        let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let client = MeshClient::new([0x33; 32]);
+        let reg = client.register_request(&bad_leg_config(&ak, 0x33));
+        framing::write_frame(&mut tls, &reg).await.unwrap();
+        // 消费注册响应 + 初始快照（NETMAP_PUSH + KEY_DIST）
+        assert_eq!(
+            read_envelope(&mut tls).await.unwrap().0,
+            MsgType::REGISTER_RESPONSE
+        );
+        while read_envelope(&mut tls).await.unwrap().0 != MsgType::KEY_DIST {}
+        // 心跳 1（首个，间隔充分）→ 快照 + LEASE 推送
+        framing::write_frame(&mut tls, &client.heartbeat())
+            .await
+            .unwrap();
+        while read_envelope(&mut tls).await.unwrap().0 != MsgType::LEASE {}
+        // 心跳 2（紧随其后，< 最小间隔）→ 忽略：无任何推送
+        framing::write_frame(&mut tls, &client.heartbeat())
+            .await
+            .unwrap();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            read_envelope(&mut tls),
+        )
+        .await;
+        assert!(r.is_err(), "超频心跳不应产生推送");
+        drop(tls);
+        let _ = server.await;
     }
 }

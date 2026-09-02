@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047
 
-**版本：v0.7（2026-09-01 修订：§3.12 启动参数优先级通用约定 CLI > env > 默认）**
+**版本：v0.8（2026-09-01 修订：REQ-047——§3.13 消息限速与准入配额 + §5.2 心跳超频忽略）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -294,6 +294,22 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 
 配置文件内容（coord 配置字段）不在此链内——配置文件本身是唯一权威（本节）；此约定只管"进程启动时选哪份配置 / 开关怎么设"。
 
+### 3.13 消息限速与准入配额（REQ-047）
+
+控制面消息级限速/配额（数据面广播有令牌桶，控制面此前空白）——三个风险面：auth key 爆破（SEC-20）、注册风暴（可复用 key + 不同公钥 → node_id 分配 + 快照整写放大）、TLS 长连接消息洪泛（SEC-19 只有 1MB 帧上限无速率维度）。
+
+| 机制 | 参数（默认） | 行为 |
+|---|---|---|
+| **连接级消息速率** | 20/s、突发 40 | per-TLS 连接令牌桶，桶空 → **断连该连接**（复用 SEC-19 单连接隔离，其他连接不受影响、进程不 panic） |
+| **Register 准入限速** | per-源 IP 0.5/s、突发 5 | 注册是重操作（node_id 分配 + redb 快照整写），超限拒绝断连 |
+| **auth key 失败锁定** | 连续失败 ≥5 → 锁 30s×2ⁿ（封顶 1h） | 递增锁定，成功注册清零；**已知 pubkey 的挑战路径不计失败**（合法重连）；锁定含挑战一律拒绝（严格优先，NAT 共源受害者靠锁过期 + 重连退避恢复） |
+| **心跳超频忽略** | 最小间隔 5s（= 心跳间隔/2） | 更近的心跳直接忽略（零成本：不更新 last_seen、不推快照、不回 LEASE），租约/离线判定语义不变（§5.2） |
+| **PathRequest pending 上限** | 节点 256 / coordinator per-source 1024 | 饱和丢弃（幂等刷新重建，最终一致）；防大规模 netmap 下的内存放大 |
+
+- **错误响应统一措辞（SEC-20）**：不可解析 / 过期 / 未知网络 / 已消费的 auth key 一律 `InvalidAuthKey`（§3.1，无信息泄露）
+- 限速参数为常量（config 风格）；`CoordinatorServer` 暴露字段供测试放大（localhost 共源场景）
+- 复用 rill-core `TokenBucket`/`SourceRateLimiter`（与数据面泛洪/probe 限速同源，REQ-046）
+
 ## 4. 状态模型（Raft 兼容核心）
 
 ### 4.1 三分类
@@ -349,6 +365,8 @@ auth_key 预生成
 last_seen 超租约 → 标记离线（netmap 可达性变化，条目保留）
 节点复活 → 下一次心跳恢复在线标记
 ```
+
+超频心跳（< §3.13 最小间隔）直接忽略——不更新 last_seen、不推快照、不回 LEASE（零成本），租约/离线判定语义不变。
 
 ### 5.3 netmap 同步（含重连）
 
@@ -469,6 +487,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 - **路径服务实现落档（2026-08-31，REQ-034，§3.11）**：①**Path\* 消息族**（proto MsgType 11~16）：PathRequest{ destination_node_id, max_candidates } / PathResponse{ destination, candidates[], path_version } / PathUpdate / PathWithdraw / PathProbe{ path_id, nonce, issued_at } / PathProbeResponse；CandidatePath{ path_id, path_epoch, hops[], expires_at, key_path }；②**PathMap**（rill-coord path_service.rs）：(source,dest) → PathSet{ version, candidates }；**候选 = 直连（hops=[dest]）+ 每条 relay 一条中继路径（hops=[relay, dest]）**，上限 max_candidates clamp(2,4)；relay 集合 = 能力位含 relay（0x01）的节点（netmap 变更同步）；③**幂等**：request() 已有未过期路径集直接返回（不重新分配 path_id——避免参与者间路径分叉）；过期按 PATH_DEFAULT_TTL(3600s) 全过期判定重建；④**key_path 参与者全量下发**：`key_path = KDF(主密钥, path_id, path_epoch)` 随 PathResponse/PathUpdate 推给**全部参与者**（source=选择方、dest=接收校验方、relay=转发校验方）——非参与者无 key_path 无法校验/转发（fail-closed）；⑤**推送机制**：v1 无主动推送通道 → 路径事件挂 pending（按 source 归类），随该节点心跳（HEARTBEAT 处理）取走推送（PathUpdate 全量替换/PathWithdraw 单条撤销）；**PathRequest 不回即时响应**（即时写回在并发下不可靠），路径集以心跳推送通道为权威下发路径，请求方幂等刷新直至收敛；⑥**吊销联动**：revoke(node_id) → 撤销所有涉及路径（源/目的 = 整组 Withdraw；仅中继 = 撤该候选保留其余 Update）；⑦**节点侧**（data.rs PathEntry）：路径表（每目标 2~4 候选）+ key_path_table；flow hash（五元组 FNV-1a）选路径；**路径归属**：PathUpdate/PathResponse 带 `source_node_id`，发送路径表只写自己发起的路径（source=自己），作为 dest/relay 参与者仅注入 key_path（防其他源的路径覆盖污染发送选择表）；⑧**v2 数据面**：42B 帧头（FRAME_HEADER §2.7），path_id 纳入 route_mac 与 AAD；`path_id=0` 回退 key_dst；互操作按 netmap `protocol_version`（注册上报）——v2 对 v1 对端恒发 34B v1 帧；⑨**PathProbe 运行时未启用**（协议已定义，活性由数据面心跳承担，v2 挂起）
 - **路径健康落档（2026-08-31，REQ-034，§3.11 快速切换实现）**：①**逐路径入站健康**：收帧按"帧实际到达的上一跳"（UDP 发送者归属节点，直连 = 源节点自身、经中继 = relay 节点）更新路径活性——首跳 == 入站跳的路径 ok（miss 清零）、其余 miss+1；直连帧全路径 ok，经中继的帧证明中继路径存活、直连路径持续 miss（不再"收包全恢复"——中继帧续命直连路径会卡死不对称拓扑切换）；②**端点级活性**：多端点节点（多宿主通告全部）按 `(端点归属, 端点)` 维护 miss，发送排序活性差者置后、同活性轮换上次未用者（UDP 黑洞端点：sendto 成功但包被网关丢弃，无法从收包侧感知，靠无响应信号逐个排除）；③**握手重试驱动 miss**：`HANDSHAKE_RETRY_INTERVAL=2s`——上次握手尝试超时无响应 → 主路径 miss + 端点 miss + 丢弃在途发起状态，下一次调用重新发起 msg1（懒握手在黑洞下永不收敛，重试驱动快速切换收敛）；发起方与响应方均受益：响应方经中继收到重复 msg1 → 入站健康使直连持续 miss → 响应改走中继路径；④**中继日志**：转发节点记录 `relayed frame to <dest>`（e2e 中继证据）
 - **多网络隔离落档（2026-09-01，REQ-010，§1.5 实现）**：①**CoordConfig 形态**：`networks: [{ name, master_key, auth_keys, announce_whitelist }]` 列表（breaking，仓库未发布）；扁平 `network/master_key/auth_keys/announce_whitelist` 移除；storage_path/signing_seed/TLS 共享；②**network_id = FNV-1a(name)**（确定性散列，0 保留）：跨重启/重载稳定（配置顺序变化不漂移），碰撞在配置加载时 fail-closed 拒绝；③**NetworkDomain**（rill-coord/src/domain.rs）：每网络独立 Registry（auth key 空间/白名单/条目）+ KeyManager（主密钥独立 → `key_dst = KDF(网络主密钥, node_id)`，跨网伪造 route_mac 必失配）+ PathService（relay 集合/PathMap 按网络独立）+ relay_list；**node_id 全局唯一分配**（跨网络不冲突，Directory/Liveness 按 node_id 键控）；④**归域**：auth key 内嵌网络（REQ-043），admission 按 key 网络选域，未知网络 → InvalidAuthKey（fail-closed）；配置层 key 放错网络段 → 拒绝启动；⑤**netmap 隔离**：`netmap_snapshot(network_id)` 过滤 + server 按注册节点网络推送（netmap/relay 列表/key_dst 全量只含本网）；⑥**路径同网门控**：跨网络 PathRequest → 空集（netmap 隔离下源本就看不到异网节点）；⑦**持久化 schema v2**：nodes 按 network_id 归域恢复、consumed tombstone 按 key 内嵌网络分组、key_versions/path_maps/relay_lists 按网络分组；⑧**覆盖层调整（SEC-24）**：跨网绑定注入 e2e 需完整恶意客户端（Noise 握手）且 netmap 隔离已结构性阻断攻击面 → 直接验证生产验签路径 `verify_binding`（集成）+ 跨网握手 prologue 拒绝（线级）
+- **消息限速与准入落档（2026-09-01，REQ-047，§3.13）**：①**连接级限速**（rill-mesh server.rs `ConnectionState.msg_bucket` 20/s 突发 40，桶空断连——handle_message 入口收口，handle_connection 与 rilld 连接循环共用）；②**Register 准入**（`CoordinatorServer.register_limiter` per-源 IP 0.5/s 突发 5 + `register_lockout` 失败锁定 5 次 → 30s×2ⁿ 封顶 1h；源 IP 取 TLS peer addr；成功清零、挑战路径不计失败但锁定期间一律拒绝）；③**心跳超频忽略**（`ConnectionState.last_heartbeat` + `heartbeat_min_interval` 默认 5s——server 字段可配，主机测试 300ms 心跳泵需调小）；④**PathRequest pending 上限**（节点 `pending_path_requests` 256 / rill-coord path_service per-source 1024 饱和丢弃）；⑤**观测**（`rate_limited` RateCounter，run_coord 周期摘要 `control rate-limited`——SEC-20 e2e 证据）；错误措辞统一 InvalidAuthKey 原已闭环（coordinator register admission 全映射）
 
 ## 9. 与数据面文档的对照（闭合验证）
 
