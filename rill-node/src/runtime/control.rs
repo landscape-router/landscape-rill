@@ -119,7 +119,8 @@ impl Node {
                     }
                 }
                 // 发送路径表只写自己发起的路径（source = 自己）；作为 dest/relay
-                // 参与者收到的其他源路径仅注入 key_path（覆盖会污染发送选择表）
+                // 参与者收到的其他源路径仅注入 key_path（覆盖会污染发送选择表），
+                // 其中自己是 hops 参与者的写入转发路径表（中继查表用，按 path_id）
                 if source_node_id == self.node_id.unwrap_or(u32::MAX) {
                     let entries: Vec<PathEntry> = candidates
                         .iter()
@@ -134,6 +135,17 @@ impl Node {
                     // 已收敛：该 dest 的请求不再重发
                     self.pending_path_requests
                         .retain(|d| *d != destination_node_id);
+                } else if let Some(me) = self.node_id {
+                    for c in &candidates {
+                        if c.hops.contains(&me) {
+                            self.mesh.set_forward_path(PathEntry {
+                                path_id: c.path_id,
+                                path_epoch: c.path_epoch,
+                                hops: c.hops.to_vec(),
+                                expires_at: c.expires_at,
+                            });
+                        }
+                    }
                 }
                 debug!(
                     "[node] paths to {} (src {}) {:?} (kp: {:?})",
@@ -219,19 +231,29 @@ impl Node {
                     .filter_map(|ep| ep.parse::<SocketAddr>().ok().map(|a| (a, e.node_id)))
             })
             .collect();
-        self.relays = netmap
+        // relay 列表：netmap 权威全量替换；归属节点按 netmap 端点匹配解析。
+        // 挂靠确认是本地状态：成员关系随 netmap 重建，已确认端点保持确认
+        // （否则每次 netmap 刷新重置，30s 探测周期内确认窗口过短，
+        // v1 中继兜底端点反复被冲掉，CON-04 兜底无法收敛）
+        let new_relays: Vec<RelayEntry> = netmap
             .relay_list
             .iter()
             .filter_map(|ep| ep.parse::<SocketAddr>().ok())
             .map(|endpoint| RelayEntry {
                 endpoint,
                 node_id: netmap_endpoints.get(&endpoint).copied(),
-                confirmed: false,
+                confirmed: self
+                    .relays
+                    .iter()
+                    .any(|r| r.endpoint == endpoint && r.confirmed),
             })
             .collect();
+        self.relays = new_relays;
         if !self.relays.is_empty() {
             debug!("[node] relay candidates: {:?}", self.relays);
         }
+        // netmap 重建直连端点表后立即重放已确认中继兜底端点（不等下个探测周期）
+        self.apply_relay_endpoints();
     }
 
     /// 登记待发路径请求（netmap 全量替换每次都会触发，幂等：重复请求 = 刷新路径集）。

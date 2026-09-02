@@ -365,10 +365,10 @@ impl Node {
                     self.control = None;
                 }
             }
-        }
-        // 待发路径请求（netmap 发现 v2 peer 后；随控制面心跳节奏发送）。
-        // 收到对应 Paths 事件才移除——即时 PathResponse 可能丢失，靠心跳重发收敛
-        if !self.pending_path_requests.is_empty() {
+            // 待发路径请求（netmap 发现 v2 peer 后；随控制面心跳节奏发送——
+            // 无节奏闸门会以 pump_timers 周期（100ms）洪泛，打爆 REQ-047
+            // 连接级限速引发断连循环）。收到对应 Paths 事件才移除——即时
+            // PathResponse 可能丢失，靠心跳重发收敛
             if let Some(control) = self.control.as_mut() {
                 let reqs: Vec<u32> = self.pending_path_requests.clone();
                 for dest in reqs {

@@ -99,12 +99,23 @@ impl MeshData {
         }
     }
 
-    /// v2 路径转发下一跳节点：本节点在路径 hops 中的后继
+    /// v2 路径转发下一跳节点：本节点在路径 hops 中的后继。
+    /// 先查发送选择表（source = 自己），未命中查转发表（非自源路径中
+    /// 自己是 hops 参与者的条目——中继转发的正常形态）
     pub(super) fn path_next_node(&self, header: &MeshFrameHeader) -> Option<u32> {
-        let paths = self.path_table.get(&header.to_node_id)?;
-        let path = paths
-            .iter()
-            .find(|p| p.path_id == header.path_id && !p.expired(unix_seconds()))?;
+        let path = self
+            .path_table
+            .get(&header.to_node_id)
+            .and_then(|paths| {
+                paths
+                    .iter()
+                    .find(|p| p.path_id == header.path_id && !p.expired(unix_seconds()))
+                    .cloned()
+            })
+            .or_else(|| {
+                let p = self.forward_paths.get(&header.path_id)?;
+                (!p.expired(unix_seconds())).then_some(p.clone())
+            })?;
         let idx = path.hops.iter().position(|h| *h == self.self_node_id)?;
         path.hops.get(idx + 1).copied()
     }

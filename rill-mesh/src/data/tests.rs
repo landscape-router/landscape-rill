@@ -1563,3 +1563,88 @@ async fn tcp_send_failure_feeds_endpoint_miss() {
     assert!(a.send_to_node_hop(2, None, b"\x01junk").await.is_err());
     assert_eq!(a.endpoint_health.get(&(2, dead_addr)), Some(&1));
 }
+
+/// v1 直连活性推断（REQ-054 决策 5 入站证据复用）：
+/// 帧经中继到达 → 发送方直连端点 miss，回包排序让位中继兜底端点；
+/// 直连帧到达 → miss 清零自愈
+#[tokio::test]
+async fn relayed_ingress_demotes_direct_endpoints() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // 中继节点 3 的端点
+    let c_direct = UdpSocket::bind("127.0.0.1:0").await.unwrap(); // c(2) 的直连端点
+    let b_ep = b.local_addr().unwrap();
+    let c_ep = c_direct.local_addr().unwrap();
+    a.set_key_dst(1, node_key(1)); // 自身路由密钥（Delivered 校验用）
+    a.set_endpoints(3, vec![b_ep]); // b 的端点
+                                    // c 的端点表 = 直连 ++ 中继兜底（apply_relay_endpoints 效果，直连在前）
+    a.set_endpoints(2, vec![c_ep, b_ep]);
+
+    // 帧从 c(2) 发给 a(1)，经 b 的端点到达（ingress=3 ≠ from=2 → 降级直连）
+    let frame = frame_from(2, 1, b"x", 64, 1);
+    b.send_to(&frame, a.local_addr().unwrap()).await.unwrap();
+    let _ = a.handle_incoming().await.unwrap(); // Delivered → 降级（分派结果无关紧要）
+    assert_eq!(a.endpoint_health.get(&(2, c_ep)), Some(&1));
+    assert_eq!(a.endpoint_health.get(&(2, b_ep)), None); // 中继端点不受累
+
+    // 发送排序：回包让位中继兜底端点（b 收到，c 直连端点无包）
+    a.send_to_node_hop(2, None, b"\x01reply").await.unwrap();
+    let mut buf = [0u8; 64];
+    let (n, _) = b.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"\x01reply");
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        c_direct.recv_from(&mut buf)
+    )
+    .await
+    .is_err());
+
+    // 直连帧到达 → 自愈（miss 清零，排序回归直连优先）
+    let frame2 = frame_from(2, 1, b"y", 64, 2);
+    c_direct
+        .send_to(&frame2, a.local_addr().unwrap())
+        .await
+        .unwrap();
+    let _ = a.handle_incoming().await.unwrap();
+    assert_eq!(a.endpoint_health.get(&(2, c_ep)), Some(&0));
+}
+
+/// v2 中继转发表（非自源路径）：中继无发送路径表，仅持 forward_paths
+/// （自己是 hops 参与者的其他源路径）+ key_path → 按 path_id 转发成功。
+/// 此前转发只查发送表 → 中继永远 NoEndpoint（e2e probe CON-04 断链根因）
+#[tokio::test]
+async fn v2_relay_forwards_via_forward_table() {
+    let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
+        .await
+        .unwrap();
+    let dest = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dest_ep = dest.local_addr().unwrap();
+    relay.set_key_path(0x300, path_key(0x300));
+    relay.set_endpoints(2, vec![dest_ep]);
+    // 注意：无 set_paths（源是节点 4，不是自己）——只有转发表
+    relay.set_forward_path(PathEntry {
+        path_id: 0x300,
+        path_epoch: 1,
+        hops: vec![4, 3, 2],
+        expires_at: unix_seconds() + 3600,
+    });
+
+    let header = MeshFrameHeader {
+        version: VERSION2,
+        to_node_id: 2,
+        from_node_id: 4,
+        path_id: 0x300,
+        seq: 1,
+        ttl: 64,
+        ..Default::default()
+    };
+    let mut frame = build_frame(&header, &path_key(0x300), &[0x24; 32], 0x1234_5678, b"p").unwrap();
+    assert_eq!(
+        relay.relay(&mut frame).await,
+        RelayOutcome::Forwarded { to: 2 }
+    );
+    let mut buf = [0u8; 2048];
+    let (n, _) = dest.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], &frame[..]);
+}

@@ -98,6 +98,9 @@ pub struct MeshData {
     key_path_table: HashMap<u64, [u8; 32]>,
     /// v2 候选路径表：dest → 候选路径集合（2~4 条）
     path_table: HashMap<u32, Vec<PathEntry>>,
+    /// v2 转发路径表：path_id → hops（非自源路径中自己是 hops 参与者的条目；
+    /// 中继转发查表用，与发送选择表分离——按 path_id 全局查，不按 dest）
+    forward_paths: HashMap<u64, PathEntry>,
     /// 主路径健康 miss 计数（快速切换，CONTROL_PLANE §3.11）
     path_health: HashMap<u64, u32>,
     /// 入站路径记录：from_node_id → 帧实际到达的上一跳（UDP 发送者归属节点；
@@ -225,6 +228,7 @@ impl MeshData {
             flood_bucket: TokenBucket::new(FLOOD_BUCKET_RATE_PER_SEC, FLOOD_BUCKET_CAPACITY),
             key_path_table: HashMap::new(),
             path_table: HashMap::new(),
+            forward_paths: HashMap::new(),
             path_health: HashMap::new(),
             ingress_hop: HashMap::new(),
             endpoint_health: HashMap::new(),

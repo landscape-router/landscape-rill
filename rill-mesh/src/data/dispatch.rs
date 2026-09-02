@@ -117,9 +117,17 @@ impl MeshData {
     ) -> std::io::Result<IncomingEvent> {
         match self.relay(frame).await {
             RelayOutcome::Delivered { from } => {
-                if let Some(ingress) = self.endpoint_owner(from_addr) {
+                if let Some(ingress) = self.endpoint_owner_preferring(from_addr, from) {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
+                    // v1 直连活性推断（与 v2 apply_ingress_health 同哲学）：
+                    // 帧经中继到达 = 发送方直连端点不可达的入站证据 → 直连端点
+                    // miss，后续发送排序让位中继兜底端点（纯响应侧无发起重试，
+                    // 不降级则回包永远命中黑洞端点）。直连恢复（直连帧到达）
+                    // 时 note_endpoint_ok 清零，自愈。
+                    if ingress != from {
+                        self.demote_direct_endpoints(from);
+                    }
                 }
                 self.apply_ingress_health(from);
                 let ev = self.dispatch_delivered(from, frame).await;

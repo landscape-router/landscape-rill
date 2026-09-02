@@ -25,9 +25,16 @@ impl MeshData {
         self.path_table.insert(dest, paths);
     }
 
+    /// 转发路径注入（非自源、自己是 hops 参与者的路径）：中继查表用，
+    /// 不进发送选择表（path_table 只装 source = 自己的路径）
+    pub fn set_forward_path(&mut self, path: PathEntry) {
+        self.forward_paths.insert(path.path_id, path);
+    }
+
     /// PathWithdraw：移除某路径；空集时移除该 dest 的路径表
     pub fn withdraw_path(&mut self, dest: u32, path_id: u64) {
         self.remove_key_path(path_id);
+        self.forward_paths.remove(&path_id);
         if let Some(paths) = self.path_table.get_mut(&dest) {
             paths.retain(|p| p.path_id != path_id);
             if paths.is_empty() {
@@ -144,6 +151,41 @@ impl MeshData {
         self.endpoint_table
             .iter()
             .find_map(|(id, addrs)| addrs.contains(&addr).then_some(*id))
+    }
+
+    /// 端点归属反查（ingress 判定用，优先非 from 的归属）：
+    /// 中继兜底端点会同时出现在 from 的候选列表与中继自己的表内
+    /// （HashMap 遍历序不定）——经中继到达的帧必须归到中继名下，
+    /// 否则误判直连、活性降级失效
+    pub(super) fn endpoint_owner_preferring(&self, addr: SocketAddr, pref_not: u32) -> Option<u32> {
+        let mut fallback = None;
+        for (id, addrs) in &self.endpoint_table {
+            if addrs.contains(&addr) {
+                if *id != pref_not {
+                    return Some(*id);
+                }
+                fallback = Some(*id);
+            }
+        }
+        fallback
+    }
+
+    /// 直连端点降级（v1 入站证据）：帧经中继到达 → 发送方自身端点 miss+1。
+    /// 只降级归属该节点的端点（端点表内混入的中继兜底端点不受累——
+    /// 归属判定用 preferring 语义排除兜底二义）
+    pub(super) fn demote_direct_endpoints(&mut self, from: u32) {
+        let direct: Vec<SocketAddr> = self
+            .endpoint_table
+            .get(&from)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| self.endpoint_owner_preferring(*a, from) == Some(from))
+            .collect();
+        for addr in direct {
+            let m = self.endpoint_health.entry((from, addr)).or_insert(0);
+            *m = m.saturating_add(1);
+        }
     }
 
     /// 发送端点排序：活性 miss 少优先；同活性时上次未用的优先（轮换尝试，

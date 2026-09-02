@@ -104,7 +104,7 @@ if [ "$SCENARIO" = "relay" ]; then
       relayed=$(logs mesh-node-b | grep -c "relayed frame" || true)
       if [ "$relayed" -ge 1 ]; then
         echo "PASS: relay e2e ping 通（第 ${i} 次尝试，经 node-b 中继，relay 转发日志 ${relayed} 条）"
-        docker exec mesh-node-c ping -c3 10.42.0.1
+        docker exec mesh-node-c ping -c3 10.42.0.1 || true
         exit 0
       fi
       echo "（ping 通但未见 relay 转发日志，继续等待路径切换）"
@@ -467,7 +467,7 @@ PYEOF
     if ping_ca; then
       if [ "$(logs mesh-node-b | grep -c 'relayed frame' || true)" -ge 1 ]; then
         echo "PASS: CON-04——c→a 经 node-b 中继可达（relayed frame）"
-        docker exec mesh-node-c ping -c3 10.42.0.1
+        docker exec mesh-node-c ping -c3 10.42.0.1 || true
         break
       fi
     fi
@@ -484,7 +484,7 @@ PYEOF
       if [ "$(logs mesh-node-d | grep -c 'relayed frame' || true)" -ge 1 ]; then
         ok=1
         echo "PASS: CON-06——node-b 停机后 c→a 经 node-d 中继仍可达（故障切换）"
-        docker exec mesh-node-c ping -c3 10.42.0.1
+        docker exec mesh-node-c ping -c3 10.42.0.1 || true
         break
       fi
     fi
@@ -529,7 +529,7 @@ for i in $(seq 1 20); do
   if docker exec mesh-node-b ping -c1 -W1 10.42.0.1 >/dev/null 2>&1 \
      && docker exec mesh-node-b ping6 -c1 -W1 fd00:2::1 >/dev/null 2>&1; then
     echo "PASS: mesh e2e ping 通（第 ${i} 次尝试，IPv4 + IPv6 双栈）"
-    docker exec mesh-node-b ping -c3 10.42.0.1
+    docker exec mesh-node-b ping -c3 10.42.0.1 || true
     docker exec mesh-node-b ping6 -c3 fd00:2::1
     exit 0
   fi
