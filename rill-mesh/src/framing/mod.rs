@@ -35,6 +35,15 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer.flush().await
 }
 
+/// 手写长度前缀的唯一合法入口（畸形/预认证语料专用）：u32 宽度在此钉死，
+/// 传 u64/u16 直接编译失败，杜绝宽度错配使流错位、read_exact 永久阻塞
+pub async fn write_declared_len<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    declared: u32,
+) -> Result<(), std::io::Error> {
+    writer.write_all(&declared.to_be_bytes()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,7 +65,7 @@ mod tests {
     #[tokio::test]
     async fn oversize_rejected() {
         let (mut a, mut b) = duplex(1024);
-        a.write_all(&(u32::MAX).to_be_bytes()).await.unwrap();
+        write_declared_len(&mut a, u32::MAX).await.unwrap();
         a.write_all(&[0u8; 8]).await.unwrap();
         let err = read_frame(&mut b).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -65,11 +74,21 @@ mod tests {
     #[tokio::test]
     async fn truncated_rejected() {
         let (mut a, mut b) = duplex(1024);
-        a.write_all(&64u32.to_be_bytes()).await.unwrap();
+        write_declared_len(&mut a, 64).await.unwrap();
         a.write_all(&[0u8; 16]).await.unwrap();
         drop(a);
         let err = read_frame(&mut b).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn declared_len_writes_u32_prefix() {
+        let (mut a, mut b) = duplex(64);
+        write_declared_len(&mut a, 0x0102_0304).await.unwrap();
+        drop(a);
+        let mut wire = Vec::new();
+        b.read_to_end(&mut wire).await.unwrap();
+        assert_eq!(wire, [0x01, 0x02, 0x03, 0x04]);
     }
 
     // ---- 预认证解析语料（REQ-059 / SEC-08）----
@@ -89,12 +108,12 @@ mod tests {
             let (mut a, mut b) = duplex(1024);
             // 超长声明：无 body 字节也必须 InvalidData（而非 EOF/分配）
             let declared = MAX_MESSAGE_LEN + 1 + (xorshift(&mut s) as u32 % 1000);
-            a.write_all(&declared.to_be_bytes()).await.unwrap();
+            write_declared_len(&mut a, declared).await.unwrap();
             let err = read_frame(&mut b).await.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
             // 合法声明（≥1）+ body 截断 → EOF
             let declared = 1 + (xorshift(&mut s) as u32 % 64);
-            a.write_all(&declared.to_be_bytes()).await.unwrap();
+            write_declared_len(&mut a, declared).await.unwrap();
             drop(a);
             let err = read_frame(&mut b).await.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);

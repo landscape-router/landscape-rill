@@ -756,7 +756,7 @@ async fn preauth_garbage_inputs_rejected() {
     // ① 超长帧声明：只发 4B 头、无 body——长度校验必须先于读取/分配
     assert_preauth_reject(|host, port, ca| async move {
         let mut tls = client_tls_stream(&host, port, &ca).await.unwrap();
-        tls.write_all(&(framing::MAX_MESSAGE_LEN + 1).to_be_bytes())
+        framing::write_declared_len(&mut tls, framing::MAX_MESSAGE_LEN + 1)
             .await
             .unwrap();
     })

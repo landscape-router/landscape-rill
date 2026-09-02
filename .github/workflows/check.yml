@@ -10,6 +10,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -20,8 +21,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
       - name: unit tests
-        run: cargo test --workspace
+        run: cargo nextest run --profile ci
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
       - name: cargo audit

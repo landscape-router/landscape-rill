@@ -150,7 +150,7 @@ mod tests {
             let (mut a, mut b) = duplex(4096);
             // 超长帧声明 → InvalidData（先于 body 分配）
             let declared = MAX_MESSAGE_LEN + 1;
-            a.write_all(&declared.to_be_bytes()).await.unwrap();
+            framing::write_declared_len(&mut a, declared).await.unwrap();
             assert!(read_envelope(&mut b).await.is_err());
             // 帧内随机字节：Ok（合法信封）或 Err（坏信封）——只要求不 panic
             let n = (xorshift(&mut s) % 64) as usize;

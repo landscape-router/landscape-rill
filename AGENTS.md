@@ -55,4 +55,4 @@ Docs are organized as: requirements (why/when) → design (authoritative behavio
 ## Verify
 
 - After any docs change, run `./docs/ci/check-docs.sh`.
-- Local gate before commit: `cargo +stable test --workspace`, `cargo +stable clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, then `./e2e/run_e2e.sh` (default `direct` scenario) and `MESH_E2E_SCENARIO=relay ./e2e/run_e2e.sh`.
+- Local gate before commit: `cargo +stable nextest run`, `cargo +stable clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, then `./e2e/run_e2e.sh` (default `direct` scenario) and `MESH_E2E_SCENARIO=relay ./e2e/run_e2e.sh`.

@@ -1,0 +1,9 @@
+# cargo-nextest：每测试独立进程，超时终止只影响单个测试
+# 本地（default 档）：超过 10s 标记 slow；超过 30s 杀掉并判失败
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+# CI（--profile ci）：2 核共享 runner + 并行争抢，慢机容差放宽：
+# 超过 60s 标记 slow；超过 120s 杀掉并判失败
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2 }
