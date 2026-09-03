@@ -77,7 +77,7 @@
 - 关联 REQ：REQ-051
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-coord/src/status.rs、rill-coord/src/coordinator/tests.rs、e2e/scenarios/status.sh
+- 证据：rill-coord/src/status.rs、rill-coord/src/coordinator/tests.rs、rill-coord/src/config/mod.rs、e2e/scenarios/status.sh
 - 说明：无密码/错密码 → 401；同源高频错密码 → 429（按源限速）；SIGHUP 轮换密码旧拒新通；https 可达、明文 HTTP 被拒；快照方法与 coord 内存态一致（多网络/离线节点/一次性 key 已消费分支）；`status` 启用而密码哈希缺失/非法 → 拒绝启动；红线：密钥材料只出"已配置 + 指纹"。CI：e2e-mesh status（run 33697089991）
 
 #### 验收断言（文件尾部汇总）
