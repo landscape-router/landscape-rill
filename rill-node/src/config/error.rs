@@ -29,4 +29,7 @@ pub enum ConfigError {
     #[error("invalid listen addr")]
     #[error_id("node.config.invalid_listen_addr")]
     InvalidListenAddr,
+    #[error("invalid dn42 config: {0}")]
+    #[error_id("node.config.invalid_dn42")]
+    InvalidDn42(String),
 }

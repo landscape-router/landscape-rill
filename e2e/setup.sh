@@ -34,6 +34,8 @@ elif [ "$SCENARIO" = "probe" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/probe/docker-compose.yaml"
 elif [ "$SCENARIO" = "recover" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/recover/docker-compose.yaml"
+elif [ "$SCENARIO" = "dn42" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/dn42/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
@@ -120,6 +122,106 @@ EOF
 gen_node_config node-a.json "$NODE_A_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_A_AUTHKEY"
 gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" '["10.43.0.0/24", "fd00:3::/64"]' "$NODE_B_AUTHKEY"
 gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY"
+
+# dn42 场景（DN42_LEG §7，DNL-01~07）：node-a（lrill dn42 leg，无 coordinator）
+# + peer-r（内核 WG + FRR）。互操作断言：boringtun⇄内核 WG、eBGP-lite⇄FRR。
+if [ "$SCENARIO" = "dn42" ]; then
+  echo "==> 4a 预置 peer-r 镜像（内核 WG + FRR；环境 DNS 受限，run+commit 模式）"
+  if ! docker image inspect mesh-dn42-peer-img >/dev/null 2>&1; then
+    PEER_CID=$(docker run --dns "$E2E_DNS" -d debian:trixie-slim sleep infinity)
+    docker exec "$PEER_CID" sh -c \
+      "apt-get update && apt-get install -y --no-install-recommends \
+         frr wireguard-tools iproute2 iputils-ping bash && rm -rf /var/lib/apt/lists/*"
+    docker cp "$E2E_DIR/mesh/dn42/peer/entrypoint.sh" "$PEER_CID:/entrypoint.sh"
+    docker commit "$PEER_CID" mesh-dn42-peer-img
+    docker rm -f "$PEER_CID" >/dev/null
+  fi
+
+  echo "==> 4b 生成 WG 密钥与 peer-r 配置"
+  mkdir -p "$BUILD_DIR/dn42"
+  PEER_R_PRIV=$(docker run --rm mesh-dn42-peer-img wg genkey)
+  PEER_R_PUB=$(printf '%s' "$PEER_R_PRIV" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
+  # node 的 WG 私钥 = static_key_seed（clamp 语义同 WG），公钥由 wg pubkey 派生
+  # （x25519 与 wg pubkey 均对标量做 RFC7748 clamping，二者结果一致）
+  SEED_B64=$(printf '%s' "$NODE_A_KEY" | python3 -c '
+import base64, sys
+seed = bytes.fromhex(sys.stdin.read().strip())
+seed = bytes([seed[0] & 248]) + seed[1:31] + bytes([seed[31] & 127 | 64])
+print(base64.b64encode(seed).decode())
+')
+  NODE_WG_PUB=$(printf '%s' "$SEED_B64" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
+
+  cat > "$BUILD_DIR/dn42/wg0.conf" <<WGEOF
+[Interface]
+PrivateKey = $PEER_R_PRIV
+Address = 172.20.100.2/30
+Address = fd00:100::2/126
+ListenPort = 51820
+
+[Peer]
+PublicKey = $NODE_WG_PUB
+AllowedIPs = 172.20.100.1/32, fd00:100::1/128, 10.42.0.0/24, fd00:2::/64
+WGEOF
+
+  cat > "$BUILD_DIR/dn42/bgpd.conf" <<BGPEOF
+hostname peer-r
+password zebra
+log syslog
+router bgp 4242420002
+ bgp router-id 172.20.100.2
+ no bgp ebgp-requires-policy
+ timers bgp 5 15
+ neighbor 172.20.100.1 remote-as 4242420001
+ address-family ipv4 unicast
+  network 172.20.100.0/24
+  network 10.99.0.0/16
+  neighbor 172.20.100.1 activate
+ exit-address-family
+BGPEOF
+
+  cat > "$BUILD_DIR/dn42/zebra.conf" <<ZEBEOF
+hostname peer-r
+log syslog
+ZEBEOF
+
+  # node-a：dn42 段（hold_time=9 加速 DNL-07 hold 收敛）；coordinator 字段为
+  # 必填占位（M1 本地闭环无 coord，连接失败走退避，不影响 dn42 leg）
+  cat > "$BUILD_DIR/node-a.json" <<NODEEOF
+{
+  "coordinator_url": "https://coord:8443",
+  "auth_key": "$NODE_A_AUTHKEY",
+  "static_key_seed": "$NODE_A_KEY",
+  "capabilities": 0,
+  "announce_routes": [],
+  "coord_signing_pubkey": "$COORD_PUBKEY",
+  "ca_cert_path": "/etc/landscape/ca.pem",
+  "data_transport": "udp",
+  "tun": { "name": "land0", "mtu": 1420, "address4": "10.42.0.1/24", "address6": "fd00:2::1/64" },
+  "dn42": {
+    "local_as": 4242420001,
+    "bgp_id": "172.20.100.1",
+    "hold_time": 15,
+    "own_prefixes": ["172.20.1.0/24"],
+    "peers": [
+      {
+        "name": "peer-r",
+        "endpoint": "192.168.243.10:51820",
+        "public_key": "$PEER_R_PUB",
+        "local_v4": "172.20.100.1",
+        "local_v6": "fd00:100::1",
+        "peer_v4": "172.20.100.2",
+        "peer_v6": "fd00:100::2",
+        "peer_as": 4242420002,
+        "bgp_port": 179,
+        "local_bgp_port": 179,
+        "whitelist": ["172.20.0.0/14"],
+        "max_prefixes": 1000
+      }
+    ]
+  }
+}
+NODEEOF
+fi
 
 # 多网络配置（CONTROL_PLANE §1.5）：networks 列表，每网络独立主密钥/auth key 空间/白名单
 cat > "$BUILD_DIR/coord.json" <<EOF
@@ -362,18 +464,25 @@ if [ -n "${MESH_E2E_CPUS:-}" ]; then
 fi
 
 echo "==> 6/6 等待注册 + 注入 mesh 路由/黑洞（场景: $SCENARIO）"
-for _ in $(seq 1 30); do
-  docker logs mesh-coord 2>/dev/null | grep -q "listening" && break
-  sleep 1
-done
-sleep 3
+if [ "$SCENARIO" != "dn42" ]; then
+  for _ in $(seq 1 30); do
+    docker logs mesh-coord 2>/dev/null | grep -q "listening" && break
+    sleep 1
+  done
+  sleep 3
+fi
 
 # 内核最小参与：mesh 前缀 → tun0（生产由 runtime 自动注入）
 # direct 场景：a↔b；relay 场景：a↔c（经 b 中继）；tenancy 场景：a1↔a2、b1↔b2（组内）
 # iperf 场景路由随 MESH_E2E_TOPOLOGY（direct 同 direct；relay 同 relay）
 ROUTE_TOPO="$SCENARIO"
 if [ "$SCENARIO" = "iperf" ]; then ROUTE_TOPO="${MESH_E2E_TOPOLOGY:-direct}"; fi
-if [ "$ROUTE_TOPO" = "relay" ]; then
+if [ "$SCENARIO" = "dn42" ]; then
+  # dn42 场景：node-a 内核侧把 dn42 空间导入 land0（白名单外 10.99/16 同样导入，
+  # 使负向断言为"引擎裁决丢弃"而非"内核无路由"）
+  docker exec mesh-node-a ip route add 172.20.100.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ip route add 10.99.0.0/16 dev land0 2>/dev/null || true
+elif [ "$ROUTE_TOPO" = "relay" ]; then
   docker exec mesh-node-a ip route add 10.44.0.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-c ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-a ip -6 route add fd00:4::/64 dev land0 2>/dev/null || true

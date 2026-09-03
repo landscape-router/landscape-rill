@@ -24,11 +24,18 @@ impl Node {
             return LanOutcome::Flooded { peers };
         }
         let (via, _prefix) = {
-            let Some(entry) = self
-                .engine
-                .lookup_best(&info.dst, &|e| matches!(e.via, RouteVia::Mesh(_)))
-            else {
-                warn!("[node] no mesh route for {}", info.dst);
+            // 可达性谓词：mesh 会话存在即可达；dn42 peer 以 BGP 会话建立为准（DN42_LEG §5）
+            let dn42_up = &self.dn42_peers;
+            let reachable = |e: &RouteEntry| match &e.via {
+                RouteVia::Mesh(_) => true,
+                RouteVia::Dn42(name) => dn42_up
+                    .iter()
+                    .find(|l| l.name == *name)
+                    .is_some_and(|l| l.established()),
+                RouteVia::Tailnet(_) | RouteVia::Direct(_) => false,
+            };
+            let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
+                warn!("[node] no route for {}", info.dst);
                 return LanOutcome::Dropped;
             };
             (entry.via.clone(), entry.prefix)
@@ -88,7 +95,18 @@ impl Node {
                     }
                 }
             }
-            RouteVia::Dn42(_) | RouteVia::Tailnet(_) | RouteVia::Direct(_) => LanOutcome::Local,
+            RouteVia::Dn42(name) => {
+                let Some(leg) = self.dn42_peers.iter().find(|l| l.name == name) else {
+                    return LanOutcome::Dropped;
+                };
+                // 包直接进 WG 隧道（明文由 leg 侧 boringtun 封装）
+                if leg.send(packet).await {
+                    LanOutcome::SentDn42 { peer: name }
+                } else {
+                    LanOutcome::Dropped
+                }
+            }
+            RouteVia::Tailnet(_) | RouteVia::Direct(_) => LanOutcome::Local,
         }
     }
 

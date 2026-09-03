@@ -102,6 +102,7 @@ fn node_config_caps(url: &str, ca_path: &str, seed: u8, routes: Vec<String>, cap
         udp_echo_addr: None,
         data_transport: DataTransport::default(),
         coord: None,
+        dn42: None,
     }
 }
 

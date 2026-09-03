@@ -263,6 +263,19 @@ impl RouteEngine {
             .remove_where(|e| e.source == RouteSource::Mesh && e.via == RouteVia::Mesh(node_id));
     }
 
+    /// 移除 dn42 peer 的单条路由（BGP WITHDRAW，DN42_LEG §5）
+    pub fn remove_dn42_route(&mut self, prefix: &Prefix, peer: &str) -> bool {
+        self.table
+            .remove(prefix, RouteSource::Dn42, &RouteVia::Dn42(peer.to_string()))
+    }
+
+    /// 移除 dn42 peer 的全部路由（会话撤销，DN42_LEG §5）
+    pub fn remove_dn42_peer(&mut self, peer: &str) {
+        let via = RouteVia::Dn42(peer.to_string());
+        self.table
+            .remove_where(|e| e.source == RouteSource::Dn42 && e.via == via);
+    }
+
     /// 重建 mesh 来源路由（netmap 全量替换语义）
     pub fn reset_mesh_routes(&mut self) {
         self.table.remove_where(|e| e.source == RouteSource::Mesh);
@@ -405,6 +418,31 @@ mod tests {
         assert!(!engine.table.remove(&p, RouteSource::Mesh, &mesh_via(1)));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(engine.lookup(&ip), vec![]);
+    }
+
+    #[test]
+    fn remove_dn42_routes() {
+        let mut engine = RouteEngine::new();
+        let dn42 = |cidr: &str, peer: &str| RouteEntry {
+            prefix: Prefix::parse(cidr).unwrap(),
+            source: RouteSource::Dn42,
+            via: RouteVia::Dn42(peer.into()),
+            metric: None,
+        };
+        engine.insert(dn42("172.20.1.0/24", "peer-a"));
+        engine.insert(dn42("fd00:100::/48", "peer-a"));
+        engine.insert(dn42("172.20.2.0/24", "peer-b"));
+        let ip: IpAddr = "172.20.1.5".parse().unwrap();
+        assert_eq!(engine.lookup(&ip).len(), 1);
+        // 单条撤销
+        assert!(engine.remove_dn42_route(&Prefix::parse("172.20.1.0/24").unwrap(), "peer-a"));
+        assert!(!engine.remove_dn42_route(&Prefix::parse("172.20.1.0/24").unwrap(), "peer-a"));
+        assert_eq!(engine.lookup(&ip), vec![]);
+        // 会话撤销：peer-a 余下全部移除，peer-b 不受影响
+        engine.remove_dn42_peer("peer-a");
+        let ip6: IpAddr = "fd00:100::1".parse().unwrap();
+        assert_eq!(engine.lookup(&ip6), vec![]);
+        assert_eq!(engine.lookup(&"172.20.2.5".parse().unwrap()).len(), 1);
     }
 
     #[test]

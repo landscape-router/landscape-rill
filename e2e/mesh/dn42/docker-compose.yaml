@@ -1,0 +1,49 @@
+# dn42 e2e 拓扑（DN42_LEG §7，DNL-01~07）：node-a（lrill dn42 leg，无 coordinator）
+#                        + peer-r（内核 WireGuard + FRR，真实 dn42 peer 形态）
+# 互操作断言：boringtun ⇄ 内核 WG、eBGP-lite ⇄ FRR
+# 网段：192.168.243.0/24（dn42 e2e 专用段，避开 mesh e2e 的 240-242）
+# peer-r 镜像由 setup.sh 以 run+commit 预置（环境 DNS 受限，与 mesh-e2e-base 同模式）
+services:
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      dn42net:
+        ipv4_address: 192.168.243.11
+
+  peer-r:
+    image: mesh-dn42-peer-img
+    container_name: mesh-dn42-peer
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - ./peer/entrypoint.sh:/entrypoint.sh
+      - ../../build/dn42/wg0.conf:/etc/wireguard/wg0.conf
+      - ../../build/dn42/bgpd.conf:/etc/frr/bgpd.conf
+      - ../../build/dn42/zebra.conf:/etc/frr/zebra.conf
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    networks:
+      dn42net:
+        ipv4_address: 192.168.243.10
+
+networks:
+  dn42net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.243.0/24

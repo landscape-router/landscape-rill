@@ -4,7 +4,7 @@ use crate::coord_run::run_coord;
 use crate::{unix_now, BoxResult, FileConfig};
 use landscape_rill_coord::authkey::{is_expired, parse_auth_key};
 use landscape_rill_core::error::format_chain;
-use landscape_rill_node::config::{Config, DataTransport};
+use landscape_rill_node::config::{Config, DataTransport, Dn42Config, Dn42PeerConfig};
 use landscape_rill_node::runtime::{Node, NodeOptions};
 use landscape_rill_node::tun::TunConfig;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,55 @@ pub(crate) fn run_daemon(
                 })?,
             },
             coord: None,
+            dn42: match &file.dn42 {
+                None => None,
+                Some(d) => {
+                    let bad = |what: String| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("dn42 config: {what}"),
+                        )
+                    };
+                    let peers =
+                        d.peers
+                            .iter()
+                            .map(|p| {
+                                Ok(Dn42PeerConfig {
+                                    name: p.name.clone(),
+                                    endpoint: p.endpoint.parse().map_err(|e| {
+                                        bad(format!("peer {}: endpoint: {e}", p.name))
+                                    })?,
+                                    public_key: p.public_key.clone(),
+                                    preshared_key: p.preshared_key.clone(),
+                                    local_v4: p.local_v4.parse().map_err(|e| {
+                                        bad(format!("peer {}: local_v4: {e}", p.name))
+                                    })?,
+                                    local_v6: p.local_v6.parse().map_err(|e| {
+                                        bad(format!("peer {}: local_v6: {e}", p.name))
+                                    })?,
+                                    peer_v4: p.peer_v4.parse().map_err(|e| {
+                                        bad(format!("peer {}: peer_v4: {e}", p.name))
+                                    })?,
+                                    peer_v6: p.peer_v6.parse().map_err(|e| {
+                                        bad(format!("peer {}: peer_v6: {e}", p.name))
+                                    })?,
+                                    peer_as: p.peer_as,
+                                    bgp_port: p.bgp_port,
+                                    local_bgp_port: p.local_bgp_port,
+                                    whitelist: p.whitelist.clone(),
+                                    max_prefixes: p.max_prefixes,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, std::io::Error>>()?;
+                    Some(Dn42Config {
+                        local_as: d.local_as,
+                        bgp_id: d.bgp_id.parse().map_err(|e| bad(format!("bgp_id: {e}")))?,
+                        hold_time: d.hold_time,
+                        own_prefixes: d.own_prefixes.clone(),
+                        peers,
+                    })
+                }
+            },
         };
         config.validate().map_err(|e| {
             std::io::Error::new(

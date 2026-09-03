@@ -1,0 +1,18 @@
+[package]
+name = "landscape-rill-dn42"
+version.workspace = true
+edition.workspace = true
+description = "dn42 leg: boringtun tunnel management + self-implemented eBGP-lite + import/export policy"
+
+[dependencies]
+landscape-rill-core = { path = "../rill-core" }
+landscape-rill-macro = { path = "../rill-macro" }
+boringtun.workspace = true
+smoltcp.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

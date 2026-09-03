@@ -150,6 +150,51 @@ struct FileConfig {
     tun: Option<TunFile>,
     #[serde(default)]
     coord: Option<CoordConfig>,
+    /// dn42 接入（DN42_LEG）：缺省 = 未启用
+    #[serde(default)]
+    dn42: Option<Dn42File>,
+}
+
+/// dn42 接入配置（serde 形态；校验在 rill-node config::dn42，加载即校验）
+#[derive(Debug, Deserialize)]
+struct Dn42File {
+    local_as: u32,
+    bgp_id: String,
+    #[serde(default = "default_hold_time")]
+    hold_time: u16,
+    #[serde(default)]
+    own_prefixes: Vec<String>,
+    peers: Vec<Dn42PeerFile>,
+}
+
+fn default_hold_time() -> u16 {
+    90
+}
+
+#[derive(Debug, Deserialize)]
+struct Dn42PeerFile {
+    name: String,
+    endpoint: String,
+    /// 对端 WG 公钥（base64，wg pubkey 格式）
+    public_key: String,
+    #[serde(default)]
+    preshared_key: Option<String>,
+    local_v4: String,
+    local_v6: String,
+    peer_v4: String,
+    peer_v6: String,
+    peer_as: u32,
+    #[serde(default = "default_bgp_port")]
+    bgp_port: u16,
+    local_bgp_port: u16,
+    /// import 白名单（covered-by）
+    whitelist: Vec<String>,
+    #[serde(default)]
+    max_prefixes: Option<u32>,
+}
+
+fn default_bgp_port() -> u16 {
+    179
 }
 
 #[derive(Debug, Deserialize)]

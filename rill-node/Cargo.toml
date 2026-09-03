@@ -8,6 +8,7 @@ description = "edge node runtime: tun device, packet parse, mesh session glue"
 landscape-rill-core = { path = "../rill-core" }
 landscape-rill-coord = { path = "../rill-coord" }
 landscape-rill-mesh = { path = "../rill-mesh" }
+landscape-rill-dn42 = { path = "../rill-dn42" }
 tokio.workspace = true
 bytes.workspace = true
 tun.workspace = true

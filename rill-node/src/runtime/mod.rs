@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 pub mod control;
+pub mod dn42;
 pub mod lan;
 pub mod probe;
 pub mod reconnect;
@@ -106,6 +107,8 @@ impl Default for NodeOptions {
 pub enum LanOutcome {
     /// 已加密帧发往 rill 节点
     Sent { peer: u32 },
+    /// 包已进 dn42 隧道（DN42_LEG）
+    SentDn42 { peer: String },
     /// 无会话，已发起懒握手（包丢弃，TCP 重传语义兜底）
     Handshaking { peer: u32 },
     /// 组播包已泛洪（广播帧，FRAME_HEADER §2.6）
@@ -163,6 +166,8 @@ pub struct Node {
     peer_endpoints: HashMap<u32, Vec<SocketAddr>>,
     /// echo 得到的 seen 地址（候选端点补充；变化时重发 EndpointReport）
     echoed_endpoints: Vec<SocketAddr>,
+    /// dn42 leg 运行态（DN42_LEG，None = 未启用）
+    dn42_peers: Vec<dn42::Dn42PeerLeg>,
 }
 
 impl Node {
@@ -191,7 +196,7 @@ impl Node {
             let (host, port) = s.rsplit_once(':')?;
             Some((host.to_string(), port.parse::<u16>().ok()?))
         });
-        Ok(Self {
+        let mut node = Self {
             cfg,
             opts,
             mesh,
@@ -225,7 +230,13 @@ impl Node {
             relays: Vec::new(),
             peer_endpoints: HashMap::new(),
             echoed_endpoints: Vec::new(),
-        })
+            dn42_peers: Vec::new(),
+        };
+        // dn42 接入（DN42_LEG）：配置启用即 spawn peer 会话任务
+        if let Some(dn42_cfg) = node.cfg.dn42.clone() {
+            node.spawn_dn42_legs(&dn42_cfg).await?;
+        }
+        Ok(node)
     }
 
     pub fn node_id(&self) -> Option<u32> {
@@ -255,29 +266,28 @@ impl Node {
         Ok((host, port))
     }
 
-    fn leg_config(&self) -> MeshLegConfig {
-        MeshLegConfig {
-            coordinator_host: String::new(),
-            coordinator_port: 0,
-            auth_key: self.cfg.auth_key.clone(),
-            static_key: self.cfg.static_key_seed,
-            capabilities: self.cfg.capabilities,
-            announce_routes: self.cfg.announce_routes.clone(),
-        }
-    }
-
     /// 控制面连接（含初始注册）。重连传上次 node_id（幂等注册/挑战路径）。
     pub async fn connect_control(&mut self) -> BoxResult<()> {
-        let (host, port) = Self::parse_url(&self.cfg.coordinator_url)?;
-        let ca = std::fs::read(&self.cfg.ca_cert_path)
-            .map_err(|e| std::io::Error::new(e.kind(), format!("ca: {}", e)))?;
-        let mut leg = self.leg_config();
-        leg.coordinator_host = host.clone();
-        leg.coordinator_port = port;
-        let session = ControlSession::connect(&host, port, &ca, &leg, self.node_id).await?;
+        let session = Self::establish_control(&self.cfg, self.node_id).await?;
         self.control = Some(session);
-        info!("[node] control connected to {}:{}", host, port);
+        info!("[node] control connected");
         Ok(())
+    }
+
+    /// 字段级构造控制面会话（run() 的 connect 分支做字段级借用，不经 &mut self）
+    async fn establish_control(cfg: &Config, node_id: Option<u32>) -> BoxResult<ControlSession> {
+        let (host, port) = Self::parse_url(&cfg.coordinator_url)?;
+        let ca = std::fs::read(&cfg.ca_cert_path)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("ca: {}", e)))?;
+        let leg = MeshLegConfig {
+            coordinator_host: host.clone(),
+            coordinator_port: port,
+            auth_key: cfg.auth_key.clone(),
+            static_key: cfg.static_key_seed,
+            capabilities: cfg.capabilities,
+            announce_routes: cfg.announce_routes.clone(),
+        };
+        ControlSession::connect(&host, port, &ca, &leg, node_id).await
     }
 
     /// 握手拒绝计数（LOGGING §5）：仅已知 peer 记 per-peer，防伪造 node_id 膨胀
@@ -352,8 +362,11 @@ impl Node {
         }
     }
 
-    /// 定时器：控制面心跳（租约保活）/ 数据面心跳（会话活性 + 3 次超时拆会话）/ rekey
+    /// 定时器：控制面心跳（租约保活）/ 数据面心跳（会话活性 + 3 次超时拆会话）/ rekey。
+    /// dn42 leg 事件/明文 drain 同挂此节奏（非阻塞）：控制面退避分片（sleep_with_timers）
+    /// 也持续调用，dn42-only 形态（无 coordinator）路由事件不饿死（DN42_LEG §5）
     pub async fn pump_timers(&mut self) {
+        self.pump_dn42().await;
         let now = Instant::now();
         if now.duration_since(self.last_control_heartbeat) >= self.opts.heartbeat_interval {
             self.last_control_heartbeat = now;
@@ -454,6 +467,8 @@ impl Node {
     }
 
     /// 主循环：控制面事件 / 数据面事件 / tun 入包 / 定时器（v1 单线程）
+    /// 主循环：控制面事件 / 数据面事件 / tun 入包 / 定时器（v1 单线程）。
+    /// dn42 leg 事件泵挂在 100ms 定时器与退避分片上，控制面不可用不停数据面。
     pub async fn run(mut self) {
         loop {
             if self.control.is_none() {
@@ -464,12 +479,12 @@ impl Node {
                     }
                     Err(e) => {
                         debug!("[node] connect_control error: {}", e);
+                        // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持
+                        self.connect_failed.tick();
                         Some(self.reconnect.on_disconnect())
                     }
                 };
                 if let Some(wait) = wait {
-                    // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持
-                    self.connect_failed.tick();
                     self.sleep_with_timers(wait).await;
                     continue;
                 }
@@ -510,13 +525,23 @@ impl Node {
         }
     }
 
-    /// 分片退避等待（REQ-056）：100ms 片轮转 pump_timers——失败摘要持续输出，
-    /// 数据面定时器（rekey/probe）在控制面退避期间不停摆
+    /// 分片退避等待（REQ-056）：100ms 片轮转，片内持续服务数据面——
+    /// tun 读 + dn42 leg 事件/明文 + 定时器。dn42-only 形态无 coordinator，
+    /// 控制面永久退避，数据面（tun/dn42）不得随之停摆（DN42_LEG §5）。
     async fn sleep_with_timers(&mut self, mut remaining: Duration) {
         while remaining > Duration::ZERO {
             let slice = remaining.min(Duration::from_millis(100));
-            tokio::time::sleep(slice).await;
             remaining = remaining.saturating_sub(slice);
+            if self.tun.is_some() {
+                // 片内等一个 tun 包；无包则按片超时，不阻塞其他泵
+                let _ = tokio::time::timeout(slice, async {
+                    if let Ok(pkt) = self.tun.as_mut().unwrap().read_packet().await {
+                        let _ = self.pump_lan_packet(&pkt).await;
+                    }
+                })
+                .await;
+            }
+            self.pump_dn42().await;
             self.pump_timers().await;
         }
     }

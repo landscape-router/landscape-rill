@@ -23,6 +23,9 @@
 #            轮换（旧 401 新 200 + reload_log）、红线（密码/密钥材料零输出）
 #   iperf ：性能场景（docs/perf.md §2.4）——TUN 隧道 iperf3 双向吞吐；
 #           MESH_E2E_TOPOLOGY=relay 用线形拓扑（经中继），MESH_E2E_CPUS=0 全容器绑单核
+#   dn42  ：dn42 接入互操作（DN42_LEG §7，DNL-01~07）——node-a（lrill dn42 leg，无
+#           coordinator）+ peer-r（内核 WG + FRR）：WG 握手、BGP Established、路由
+#           学习/撤销/fallback、import 白名单负向、stub 导出、会话故障自动重建
 # 环境变量 MESH_E2E_TRANSPORT（默认 udp，REQ-054）：=tcp 时数据面走真 TCP 兜底档
 #（帧字节与 UDP 一致，仅外覆 2B 长度前缀）——建议与 direct 场景组合验证。
 set -euo pipefail

@@ -42,6 +42,8 @@ pub struct Config {
     /// 数据面 underlay 传输（REQ-054）：v1 全网统一（UDP 默认 / TCP 兜底）
     pub data_transport: DataTransport,
     pub coord: Option<CoordConfig>,
+    /// dn42 接入（DN42_LEG）：None = 未启用
+    pub dn42: Option<Dn42Config>,
 }
 
 impl Config {
@@ -62,7 +64,9 @@ pub struct CoordConfig {
     pub signing_seed: [u8; 32],
 }
 
+pub mod dn42;
 pub mod error;
+pub use dn42::{Dn42Config, Dn42PeerConfig};
 pub use error::ConfigError;
 
 impl Config {
@@ -95,6 +99,9 @@ impl Config {
             if coord.signing_seed == [0u8; 32] {
                 return Err(ConfigError::MissingSigningSeed);
             }
+        }
+        if let Some(dn42) = &self.dn42 {
+            dn42.validate().map_err(ConfigError::InvalidDn42)?;
         }
         Ok(())
     }
@@ -190,6 +197,7 @@ mod tests {
             udp_echo_addr: None,
             data_transport: DataTransport::Udp,
             coord: None,
+            dn42: None,
         }
     }
 
