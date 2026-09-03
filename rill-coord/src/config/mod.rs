@@ -299,6 +299,58 @@ mod tests {
         assert!(err.to_string().contains("networks must not be empty"));
     }
 
+    // ---- status 段（REQ-051/CONTROL_PLANE §3.14）：加载即校验，fail-closed ----
+
+    fn inject_status(text: &str, password_hash: &str) -> String {
+        let status = format!(
+            r#""status": {{ "listen_addr": "127.0.0.1:8444", "password_hash": "{}" }}"#,
+            password_hash
+        );
+        text.replace("\"networks\":", &format!("{}, \"networks\":", status))
+    }
+
+    fn valid_hash() -> String {
+        format!(
+            "pbkdf2-sha256$60000${}${}",
+            "ab".repeat(16),
+            "cd".repeat(32)
+        )
+    }
+
+    #[test]
+    fn config_status_section_accepted() {
+        let cfg = CoordConfig::parse(&inject_status(&valid_config(), &valid_hash())).unwrap();
+        let status = cfg.status.expect("status 段应解析");
+        assert_eq!(status.listen_addr, "127.0.0.1:8444");
+    }
+
+    #[test]
+    fn config_status_without_hash_rejected() {
+        // 启用 status 而无有效密码哈希 → 拒绝启动（fail-closed，§3.14 / ADM-01 同哲学）
+        let err = CoordConfig::parse(&inject_status(&valid_config(), "plaintext")).unwrap_err();
+        assert!(err.to_string().contains("status.password_hash"));
+    }
+
+    #[test]
+    fn config_status_weak_hash_params_rejected() {
+        // 迭代不足（< 10000）/ 盐过短（< 16B）→ 拒绝启动
+        let weak_iter = valid_hash().replace("60000", "1000");
+        let err = CoordConfig::parse(&inject_status(&valid_config(), &weak_iter)).unwrap_err();
+        assert!(err.to_string().contains("status.password_hash"));
+
+        let short_salt = valid_hash().replace(&"ab".repeat(16), "ab".repeat(8).as_str());
+        let err = CoordConfig::parse(&inject_status(&valid_config(), &short_salt)).unwrap_err();
+        assert!(err.to_string().contains("status.password_hash"));
+    }
+
+    #[test]
+    fn config_status_listen_addr_validated() {
+        let bad_addr =
+            inject_status(&valid_config(), &valid_hash()).replace("127.0.0.1:8444", "not-an-addr");
+        let err = CoordConfig::parse(&bad_addr).unwrap_err();
+        assert!(err.to_string().contains("status.listen_addr"));
+    }
+
     #[test]
     fn config_duplicate_network_rejected() {
         // 同名单网络段 → 拒绝

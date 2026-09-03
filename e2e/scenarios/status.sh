@@ -7,7 +7,8 @@
   #    + 节点 build_version（REQ-052 RegisterRequest.version）
   # ④ 遥测聚合：per-peer 收发计数 > 0、直连确认对非空（probe RTT，latest-wins）
   # ⑤ SIGHUP 密码轮换：旧密码即刻 401、新密码 200、reload_log 记录 ok（内容组 5）
-  # ⑥ 红线：明文密码/master_key/signing_seed 不出现在响应
+  # ⑥ 重载失败：坏配置 → SIGHUP → reload_log 记录 failed + 保持旧配置（密码仍可用）
+  # ⑦ 红线：明文密码/master_key/signing_seed 不出现在响应；轮换/失败重载后数据面不受影响
   STATUS_URL="https://coord:9444/status"
   STATUS_IP="192.168.240.10"
   CA="$E2E_DIR/build/ca.pem"
@@ -41,7 +42,7 @@
     "${CURL_BASE[@]}" -H "Authorization: Bearer e2e-status-pass-1" "$STATUS_URL"
   }
 
-  echo "==> status 阶段 1/6：注册收敛 + 数据面 ping（遥测流量源）"
+  echo "==> status 阶段 1/7：注册收敛 + 数据面 ping（遥测流量源）"
   wait_registered || { echo "FAIL: 节点未注册"; logs mesh-node-a | tail -10; exit 1; }
   for i in $(seq 1 20); do
     if docker exec mesh-node-b ping -c1 -W1 10.42.0.1 >/dev/null 2>&1; then
@@ -52,7 +53,7 @@
     sleep 2
   done
 
-  echo "==> status 阶段 2/6：认证面（401 / 429 / 明文拒绝）"
+  echo "==> status 阶段 2/7：认证面（401 / 429 / 明文拒绝）"
   wait_coord_status || { echo "FAIL: status 端点不可达"; logs mesh-coord | tail -10; exit 1; }
   [ "$(code_with "")" = "401" ] || { echo "FAIL: 无密码应 401，got $(code_with "")"; exit 1; }
   [ "$(code_with "wrong-pass")" = "401" ] || { echo "FAIL: 错密码应 401"; exit 1; }
@@ -77,7 +78,7 @@ PYEOF
   fi
   echo "PASS: 明文 HTTP 在 TLS 握手层被拒"
 
-  echo "==> status 阶段 3/6：正确密码 200 + 内容组齐全"
+  echo "==> status 阶段 3/7：正确密码 200 + 内容组齐全"
   # 限速桶排空（容量 10 + 5/s 补充；洪泛后须等窗口恢复）
   sleep 5
   BODY=$(fetch_status)
@@ -108,7 +109,7 @@ PYEOF
   fi
   echo "PASS: 红线——明文密码/master_key/signing_seed 零输出"
 
-  echo "==> status 阶段 4/6：遥测聚合（per-peer 计数 + 直连确认对）"
+  echo "==> status 阶段 4/7：遥测聚合（per-peer 计数 + 直连确认对）"
   python3 - "$STATUS_IP" <<'PYEOF'
 import http.client, ssl, sys, time
 ctx = ssl._create_unverified_context()
@@ -137,7 +138,7 @@ rtts = [p["rtt_ms"] for t in tele for p in t["direct"]]
 print(f"PASS: 遥测聚合 latest-wins（per-peer 计数 > 0，直连对 RTT={rtts}ms）")
 PYEOF
 
-  echo "==> status 阶段 5/6：SIGHUP 密码轮换（旧密码即刻 401）"
+  echo "==> status 阶段 5/7：SIGHUP 密码轮换（旧密码即刻 401）"
   cp "$E2E_DIR/build/coord.json.rotated" "$E2E_DIR/build/coord.json"
   docker kill -s HUP mesh-coord >/dev/null
   for i in $(seq 1 20); do
@@ -158,7 +159,33 @@ assert any("ok" in r for r in d["coord"]["reload_log"]), d["coord"]["reload_log"
 print("PASS: 新密码 200 + reload_log 记录 ok（重载历史）")
 PYEOF
 
-  echo "==> status 阶段 6/6：轮换后数据面不受影响"
+  echo "==> status 阶段 6/7：重载失败 → reload_log 记录 failed + 保持旧配置"
+  printf 'this is not json\n' > "$E2E_DIR/build/coord.json"
+  docker kill -s HUP mesh-coord >/dev/null
+  for i in $(seq 1 20); do
+    if [ "$(logs mesh-coord | grep -c 'reload failed, keeping old config')" -ge 1 ]; then
+      break
+    fi
+    sleep 1
+  done
+  [ "$(logs mesh-coord | grep -c 'reload failed, keeping old config')" -ge 1 ] \
+    || { echo "FAIL: 未观察到 reload failed 日志"; logs mesh-coord | tail -10; exit 1; }
+  sleep 2
+  AFTER_FAIL=$(curl -s --cacert "$CA" --resolve "coord:9444:$STATUS_IP" \
+    -H "Authorization: Bearer e2e-status-pass-2" "$STATUS_URL")
+  python3 - "$AFTER_FAIL" <<'PYEOF'
+import json, sys
+d = json.loads(sys.argv[1])
+log = d["coord"]["reload_log"]
+assert any(r.startswith("failed") for r in log), f"missing failed entry: {log}"
+assert any(r.startswith("ok") for r in log), f"missing ok entry: {log}"
+print("PASS: reload_log 同时记录 ok 与 failed（重载历史完整）")
+PYEOF
+  [ "$(code_with "e2e-status-pass-2")" = "200" ] \
+    || { echo "FAIL: 失败重载后旧配置应保持服务（pass-2 仍 200）"; exit 1; }
+  echo "PASS: 失败重载保持旧配置（认证不中断）"
+
+  echo "==> status 阶段 7/7：轮换/失败重载后数据面不受影响"
   docker exec mesh-node-b ping -c2 10.42.0.1 >/dev/null 2>&1 \
     || { echo "FAIL: 轮换后 ping 不通（SIGHUP 不应中断数据面）"; exit 1; }
   echo "PASS: SIGHUP 轮换不中断数据面（a↔b 仍通）"
