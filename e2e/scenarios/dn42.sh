@@ -179,7 +179,7 @@ echo "==> DNL-08: 双 peer 故障切换（peer-r2 上线，同前缀双公告）
 $COMPOSE_DN42 --profile late up -d peer-r2
 R2_ESTAB=0
 for i in $(seq 1 45); do
-  if docker exec mesh-dn42-peer2 vtysh -c "show bgp neighbors 172.20.101.1" 2>/dev/null | grep -q "BGP state = Established" \
+  if docker exec mesh-dn42-peer2 birdc show protocols 2>/dev/null | grep -q "Established" \
      && docker exec mesh-dn42-peer2 ping -c1 -W1 10.42.0.1 >/dev/null 2>&1; then
     R2_ESTAB=1
     break
@@ -297,7 +297,7 @@ else
 fi
 
 echo "==> DNL-11: rogue BGP 输入 fail-closed（假 peer 发畸形流）"
-docker exec mesh-dn42-peer2 sh -c 'kill $(cat /var/run/frr/bgpd.pid) 2>/dev/null; sleep 1; cat > /tmp/rogue.py <<ROGUE
+docker exec mesh-dn42-peer2 sh -c 'kill $(cat /run/bird/bird.pid) 2>/dev/null; sleep 1; cat > /tmp/rogue.py <<ROGUE
 import socket, threading, time
 def handle(c):
     try:
@@ -339,3 +339,59 @@ else
 fi
 
 echo "PASS: dn42 e2e 全部断言通过（DNL-01~11）"
+
+echo "==> DNL-12: 表规模收敛（402 条公告，dn42 真实表量级）"
+PFX=0
+for i in $(seq 1 60); do
+  PFX=$(docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null \
+    | awk '/^172.20.100.1/ {print $11}')
+  [ "${PFX:-0}" -ge 400 ] && break
+  sleep 1
+done
+LEARNED=$(count_log "dn42 learned 172.2")
+if [ "${PFX:-0}" -ge 400 ] && [ "$LEARNED" -ge 395 ]; then
+  echo "PASS: DNL-12a 402 条公告全量收敛（PfxSnt=$PFX, node learned=$LEARNED）"
+else
+  echo "FAIL: DNL-12a 收敛不足 (PfxSnt=$PFX learned=$LEARNED)"
+  exit 1
+fi
+
+if docker exec mesh-node-a ping -c2 -W2 172.20.100.100 >/dev/null 2>&1; then
+  echo "PASS: DNL-12b 规模表下转发不受影响"
+else
+  echo "FAIL: DNL-12b 规模表下转发失败"
+  exit 1
+fi
+
+echo "==> DNL-13: 半表撤销（bgpd 换配置重启 → 撤销批量传播）"
+python3 - "$E2E_DIR/build/dn42/bgpd.conf" <<'PYHALF'
+import sys
+path = sys.argv[1]
+out = []
+for line in open(path):
+    if "network 172.22." in line:
+        continue
+    if "network 172.21." in line:
+        third = int(line.strip().split(".")[2])
+        if third >= 200:
+            continue
+    out.append(line.rstrip("\n"))
+open(path, "w").write("\n".join(out) + "\n")
+PYHALF
+docker exec mesh-dn42-peer sh -c 'kill $(cat /var/run/frr/bgpd.pid); sleep 1; /usr/lib/frr/bgpd -d -f /etc/frr/bgpd.conf'
+PFX2=999
+for i in $(seq 1 60); do
+  P2=$(docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null \
+    | awk '/^172.20.100.1/ {print $11}')
+  [ -n "$P2" ] && [ "$P2" -le 202 ] && PFX2=$P2 && break
+  sleep 1
+done
+if [ "$PFX2" != "999" ] && [ "$PFX2" -le 202 ] \
+   && docker exec mesh-node-a ping -c2 -W2 172.20.100.100 >/dev/null 2>&1; then
+  echo "PASS: DNL-13 半表撤销批量传播（PfxSnt=$PFX2），保留路径转发不受影响"
+else
+  echo "FAIL: DNL-13 撤销传播异常 (PfxSnt=$PFX2)"
+  exit 1
+fi
+
+echo "PASS: dn42 e2e 全部断言通过（DNL-01~13）"

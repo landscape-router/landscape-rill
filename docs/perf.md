@@ -1,13 +1,14 @@
 # 性能基准（perf）
 
 > 数据面/加密路径的性能基线与回归对照。**证据类文档**：不承载行为设计（行为见 [design/](./design/README.md)），不进 REQ 演进流；结果随基准执行回填。
-> 版本：v1.0（2026-09-01，首次基线落档：REQ-053 前后对照）
+> 版本：v1.1（2026-09-03，新增 L1 路由规模基准：dn42 表规模 LPM 量化）
 
 ## 1. 基准分层（L1~L4）
 
 | 层 | 位置 | 测什么 | 对应优化（REQ-053） |
 |---|---|---|---|
 | L1 微基准 | `rill-core/benches/frame.rs` | 帧头编解码 / auth_input / build_frame（64B/1400B 两档）/ open_frame / `seal` 现实现 vs naive 参照（旧算法：`to_vec` + 原地加密） | ②⑧ |
+| L1 微基准（路由） | `rill-core/benches/route.rs` | LPM 在 dn42 表规模（100/1k/4k 条）下的 lookup_best 命中/未命中与批量注入（ROUTE_ENGINE §9 线性扫描量化） | P4 XDP 基线 |
 | L2 环回数据面 | `rill-mesh/benches/dataplane.rs` | 真实 UDP socket 全链：握手后 ping-pong 每往返 µs、relay 转发每包 µs、广播送达每包 µs | ①③ |
 | L3 跨提交 A/B | 手动 worktree 流程（§2.3） | 同一 bench 代码在 REQ-053 前后提交上的对照（真实 before/after） | 全部 |
 | L4 全栈吞吐 | `MESH_E2E_SCENARIO=iperf` | 容器 TUN 隧道 iperf3 Mbps：direct/relay 拓扑 × 未约束/单核约束 | 全部（端到端） |
@@ -85,6 +86,17 @@ PASS 只判 iperf 退出码（不设吞吐阈值——容器网络/内核路径�
 
 一致性交叉验证：HEAD 的 `seal_naive_reference`（内置旧算法）= 3.51µs ≈ baseline `seal_current` 3.48µs——bench 参照与真实旧实现吻合。
 解读：L1 以 AEAD 计算为主导（~3.4µs），分配/拷贝消除的绝对收益在百 ns 级（build -3.7%）；帧头操作为 ns 级不受影响（符合预期——⑧ 是正确性投资非性能投资）。
+
+### L1 微基准（路由，dn42 表规模，2026-09-03，taskset -c 0）
+
+| bench | 100 条 | 1k 条 | 4k 条 |
+|---|---|---|---|
+| insert_all（批量注入，µs） | 18.3 | 176.6 | 691.6 |
+| lookup_best_hit（命中，ns） | 521 | 4 621 | 18 603 |
+| lookup_best_miss（未命中，ns） | 358 | 3 004 | 12 057 |
+
+结论：线性扫描 ~4.6ns/条/次查找。dn42 全表（≈4k 条）下单核转发上限 ≈ 50k pps（仅 LPM 项），
+边缘盒可接受；P4 XDP 快速路径替换时以本表为对照基线（ROUTE_ENGINE §9）。
 
 ### L2 环回数据面（µs/包，中位数，越小越好）
 

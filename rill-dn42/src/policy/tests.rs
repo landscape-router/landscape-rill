@@ -84,6 +84,22 @@ fn default_bogons_keep_dn42_space() {
 }
 
 #[test]
+fn v4_bogon_does_not_cover_v6_prefix() {
+    // 回归：v4 汇总 bogon（240.0.0.0/4）在字节比较下"覆盖"v6 前缀的假阳性
+    // （掩码修正 + 地址族守卫后必须为 false）
+    let policy = ImportPolicy::new(wl(), None, 4242420001, None);
+    let v6 = path_v4([172, 20, 100, 2]);
+    // 白名单内的 v6 前缀不得再被 v4 bogon 误拒（地址族守卫回归）
+    assert_eq!(policy.admit(&p("fd00:100::/48"), &v6), Ok(()));
+    for b in default_bogons() {
+        assert!(
+            !p("fd00::/8").is_covered_by(&b),
+            "v6 前缀不得被 v4 bogon {b:?} 覆盖"
+        );
+    }
+}
+
+#[test]
 fn max_prefix_counter_and_overflow() {
     let mut policy = ImportPolicy::new(wl(), None, 4242420001, Some(2));
     policy.note_accepted().unwrap();

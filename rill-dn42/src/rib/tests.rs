@@ -156,6 +156,26 @@ fn best_path_shortest_as_path_and_failover() {
 }
 
 #[test]
+fn equal_path_length_tie_breaks_by_peer_name() {
+    let mut rib = LocRib::new();
+    let mut policy = rib_policy();
+    // 等长路径：确定性地选 peer 名字典序最小者
+    rib.apply(
+        "peer-z",
+        &update_v4(vec![p("172.20.1.0/24")], vec![65001], [172, 20, 200, 2]),
+        &mut policy,
+    );
+    rib.apply(
+        "peer-a",
+        &update_v4(vec![p("172.20.1.0/24")], vec![65001], [172, 20, 100, 2]),
+        &mut policy,
+    );
+    // peer-a 后到但字典序小 → best 切换到 peer-a
+    assert!(matches!(&rib.best(&p("172.20.1.0/24")).unwrap().next_hop,
+        Some(nh) if *nh == "172.20.100.2".parse::<IpAddr>().unwrap()));
+}
+
+#[test]
 fn as4_path_takes_precedence_over_as_path() {
     let mut rib = LocRib::new();
     let mut policy = rib_policy();

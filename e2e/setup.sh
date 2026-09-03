@@ -131,7 +131,7 @@ if [ "$SCENARIO" = "dn42" ]; then
     PEER_CID=$(docker run --dns "$E2E_DNS" -d debian:trixie-slim sleep infinity)
     docker exec "$PEER_CID" sh -c \
       "apt-get update && apt-get install -y --no-install-recommends \
-         frr wireguard-tools iproute2 iputils-ping bash python3 && rm -rf /var/lib/apt/lists/*"
+         frr bird2 wireguard-tools iproute2 iputils-ping bash python3 && rm -rf /var/lib/apt/lists/*"
     docker cp "$E2E_DIR/mesh/dn42/peer/entrypoint.sh" "$PEER_CID:/entrypoint.sh"
     docker commit "$PEER_CID" mesh-dn42-peer-img
     docker rm -f "$PEER_CID" >/dev/null
@@ -165,36 +165,6 @@ PublicKey = $NODE_WG_PUB
 AllowedIPs = 172.20.100.1/32, fd00:100::1/128, 10.42.0.0/24, fd00:2::/64
 WGEOF
 
-  # peer-r2：独立隧道 172.20.101.0/30（双 peer 故障切换，DNL-08~11）
-  cat > "$BUILD_DIR/dn42/wg0-r2.conf" <<WGEOF2
-[Interface]
-PrivateKey = $PEER_R2_PRIV
-Address = 172.20.101.2/30
-Address = fd00:101::2/126
-ListenPort = 51821
-
-[Peer]
-PublicKey = $NODE_WG_PUB
-AllowedIPs = 172.20.101.1/32, fd00:101::1/128, 10.42.0.0/24, fd00:2::/64
-WGEOF2
-
-  cat > "$BUILD_DIR/dn42/bgpd-r2.conf" <<BGPEOF2
-hostname peer-r2
-password zebra
-log syslog
-router bgp 4242420003
- bgp router-id 172.20.101.2
- no bgp ebgp-requires-policy
- timers bgp 5 15
- neighbor 172.20.101.1 remote-as 4242420001
- address-family ipv4 unicast
-  network 172.20.100.0/24
-  network 172.20.200.0/24
-  neighbor 172.20.101.1 activate
- exit-address-family
-BGPEOF2
-
-
   cat > "$BUILD_DIR/dn42/bgpd.conf" <<BGPEOF
 hostname peer-r
 password zebra
@@ -208,19 +178,59 @@ router bgp 4242420002
   network 172.20.100.0/24
   network 10.99.0.0/16
   neighbor 172.20.100.1 activate
- exit-address-family
 BGPEOF
+  # DNL-12 表规模：400 条 /24（dn42 真实表量级，RIB 支撑路由见 entrypoint）
+  for i in $(seq 0 399); do
+    if [ "$i" -lt 256 ]; then
+      echo "  network 172.21.$i.0/24" >> "$BUILD_DIR/dn42/bgpd.conf"
+    else
+      echo "  network 172.22.$((i - 256)).0/24" >> "$BUILD_DIR/dn42/bgpd.conf"
+    fi
+  done
+  printf ' exit-address-family\n!\n' >> "$BUILD_DIR/dn42/bgpd.conf"
+
+  # peer-r2：独立隧道 172.20.101.0/30 + Bird（双 BGP 实现互操作，DNL-08~11）
+  cat > "$BUILD_DIR/dn42/wg0-r2.conf" <<WGEOF2
+[Interface]
+PrivateKey = $PEER_R2_PRIV
+Address = 172.20.101.2/30
+Address = fd00:101::2/126
+ListenPort = 51821
+
+[Peer]
+PublicKey = $NODE_WG_PUB
+AllowedIPs = 172.20.101.1/32, fd00:101::1/128, 10.42.0.0/24, fd00:2::/64
+WGEOF2
+
+  cat > "$BUILD_DIR/dn42/bird-r2.conf" <<BIRDEOF
+log syslog all;
+router id 172.20.101.2;
+
+protocol device { }
+
+protocol static announce {
+    ipv4;
+    route 172.20.100.0/24 blackhole;
+    route 172.20.200.0/24 blackhole;
+}
+
+protocol bgp peer_r {
+    local as 4242420003;
+    neighbor 172.20.101.1 as 4242420001;
+    ipv4 {
+        import all;
+        export all;
+        import limit 1 action restart;
+    };
+}
+BIRDEOF
 
   cat > "$BUILD_DIR/dn42/zebra.conf" <<ZEBEOF
 hostname peer-r
 log syslog
 ZEBEOF
-  cat > "$BUILD_DIR/dn42/zebra-r2.conf" <<ZEBEOF2
-hostname peer-r2
-log syslog
-ZEBEOF2
 
-  # node-a：dn42 段（hold_time=9 加速 DNL-07 hold 收敛）；coordinator 字段为
+  # node-a：dn42 段（hold_time=15 控制故障收敛窗口）；coordinator 字段为
   # 必填占位（M1 本地闭环无 coord，连接失败走退避，不影响 dn42 leg）
   cat > "$BUILD_DIR/node-a.json" <<NODEEOF
 {

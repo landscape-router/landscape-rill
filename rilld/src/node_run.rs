@@ -10,6 +10,59 @@ use landscape_rill_node::tun::TunConfig;
 use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
 
+/// FileConfig.dn42 → 节点 dn42 配置（字符串字段解析；语义校验在 Config::validate，fail-closed）
+pub(crate) fn dn42_config_from_file(d: &crate::Dn42File) -> std::io::Result<Dn42Config> {
+    let bad = |what: String| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("dn42 config: {what}"),
+        )
+    };
+    let peers = d
+        .peers
+        .iter()
+        .map(|p| {
+            Ok(Dn42PeerConfig {
+                name: p.name.clone(),
+                endpoint: p
+                    .endpoint
+                    .parse()
+                    .map_err(|e| bad(format!("peer {}: endpoint: {e}", p.name)))?,
+                public_key: p.public_key.clone(),
+                preshared_key: p.preshared_key.clone(),
+                local_v4: p
+                    .local_v4
+                    .parse()
+                    .map_err(|e| bad(format!("peer {}: local_v4: {e}", p.name)))?,
+                local_v6: p
+                    .local_v6
+                    .parse()
+                    .map_err(|e| bad(format!("peer {}: local_v6: {e}", p.name)))?,
+                peer_v4: p
+                    .peer_v4
+                    .parse()
+                    .map_err(|e| bad(format!("peer {}: peer_v4: {e}", p.name)))?,
+                peer_v6: p
+                    .peer_v6
+                    .parse()
+                    .map_err(|e| bad(format!("peer {}: peer_v6: {e}", p.name)))?,
+                peer_as: p.peer_as,
+                bgp_port: p.bgp_port,
+                local_bgp_port: p.local_bgp_port,
+                whitelist: p.whitelist.clone(),
+                max_prefixes: p.max_prefixes,
+            })
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+    Ok(Dn42Config {
+        local_as: d.local_as,
+        bgp_id: d.bgp_id.parse().map_err(|e| bad(format!("bgp_id: {e}")))?,
+        hold_time: d.hold_time,
+        own_prefixes: d.own_prefixes.clone(),
+        peers,
+    })
+}
+
 pub(crate) fn run_daemon(
     path: &Path,
     log_file: Option<PathBuf>,
@@ -81,55 +134,7 @@ pub(crate) fn run_daemon(
                 })?,
             },
             coord: None,
-            dn42: match &file.dn42 {
-                None => None,
-                Some(d) => {
-                    let bad = |what: String| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("dn42 config: {what}"),
-                        )
-                    };
-                    let peers =
-                        d.peers
-                            .iter()
-                            .map(|p| {
-                                Ok(Dn42PeerConfig {
-                                    name: p.name.clone(),
-                                    endpoint: p.endpoint.parse().map_err(|e| {
-                                        bad(format!("peer {}: endpoint: {e}", p.name))
-                                    })?,
-                                    public_key: p.public_key.clone(),
-                                    preshared_key: p.preshared_key.clone(),
-                                    local_v4: p.local_v4.parse().map_err(|e| {
-                                        bad(format!("peer {}: local_v4: {e}", p.name))
-                                    })?,
-                                    local_v6: p.local_v6.parse().map_err(|e| {
-                                        bad(format!("peer {}: local_v6: {e}", p.name))
-                                    })?,
-                                    peer_v4: p.peer_v4.parse().map_err(|e| {
-                                        bad(format!("peer {}: peer_v4: {e}", p.name))
-                                    })?,
-                                    peer_v6: p.peer_v6.parse().map_err(|e| {
-                                        bad(format!("peer {}: peer_v6: {e}", p.name))
-                                    })?,
-                                    peer_as: p.peer_as,
-                                    bgp_port: p.bgp_port,
-                                    local_bgp_port: p.local_bgp_port,
-                                    whitelist: p.whitelist.clone(),
-                                    max_prefixes: p.max_prefixes,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, std::io::Error>>()?;
-                    Some(Dn42Config {
-                        local_as: d.local_as,
-                        bgp_id: d.bgp_id.parse().map_err(|e| bad(format!("bgp_id: {e}")))?,
-                        hold_time: d.hold_time,
-                        own_prefixes: d.own_prefixes.clone(),
-                        peers,
-                    })
-                }
-            },
+            dn42: file.dn42.as_ref().map(dn42_config_from_file).transpose()?,
         };
         config.validate().map_err(|e| {
             std::io::Error::new(
@@ -174,4 +179,77 @@ pub(crate) fn run_daemon(
         node.run().await;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FileConfig;
+
+    #[test]
+    fn dn42_file_config_maps_to_node_config() {
+        let text = r#"{
+            "coordinator_url": "https://coord:8443",
+            "auth_key": "lrk-lab-1735689600-deadbeef",
+            "static_key_seed": "0101010101010101010101010101010101010101010101010101010101010101",
+            "coord_signing_pubkey": "0707070707070707070707070707070707070707070707070707070707070707",
+            "ca_cert_path": "/etc/landscape/ca.pem",
+            "dn42": {
+                "local_as": 4242420001,
+                "bgp_id": "172.20.100.1",
+                "hold_time": 15,
+                "own_prefixes": ["172.20.1.0/24"],
+                "peers": [
+                    {
+                        "name": "peer-r",
+                        "endpoint": "192.168.243.10:51820",
+                        "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                        "local_v4": "172.20.100.1",
+                        "local_v6": "fd00:100::1",
+                        "peer_v4": "172.20.100.2",
+                        "peer_v6": "fd00:100::2",
+                        "peer_as": 4242420002,
+                        "local_bgp_port": 1179,
+                        "whitelist": ["172.20.0.0/14"],
+                        "max_prefixes": 1000
+                    }
+                ]
+            }
+        }"#;
+        let file: FileConfig = serde_json::from_str(text).unwrap();
+        let dn42 = dn42_config_from_file(file.dn42.as_ref().unwrap()).unwrap();
+        assert_eq!(dn42.local_as, 4242420001);
+        assert_eq!(dn42.peers.len(), 1);
+        assert_eq!(dn42.peers[0].name, "peer-r");
+        assert_eq!(
+            dn42.peers[0].endpoint,
+            "192.168.243.10:51820".parse().unwrap()
+        );
+        assert_eq!(dn42.peers[0].bgp_port, 179); // 缺省值
+        assert!(dn42.validate().is_ok());
+    }
+
+    #[test]
+    fn dn42_file_config_bad_address_rejected() {
+        let text = r#"{
+            "local_as": 4242420001,
+            "bgp_id": "172.20.100.1",
+            "peers": [
+                {
+                    "name": "peer-r",
+                    "endpoint": "not-an-addr",
+                    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "local_v4": "172.20.100.1",
+                    "local_v6": "fd00:100::1",
+                    "peer_v4": "172.20.100.2",
+                    "peer_v6": "fd00:100::2",
+                    "peer_as": 4242420002,
+                    "local_bgp_port": 1179,
+                    "whitelist": ["172.20.0.0/14"]
+                }
+            ]
+        }"#;
+        let file: crate::Dn42File = serde_json::from_str(text).unwrap();
+        assert!(dn42_config_from_file(&file).is_err());
+    }
 }

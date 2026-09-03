@@ -30,6 +30,11 @@ impl Dn42PeerLeg {
         self.established
     }
 
+    /// 明文通道非阻塞探测（观测/测试用）
+    pub fn try_recv_plaintext(&mut self) -> Result<Vec<u8>, mpsc::error::TryRecvError> {
+        self.plaintext.try_recv()
+    }
+
     pub async fn send(&self, packet: &[u8]) -> bool {
         self.outbound.send(packet.to_vec()).await.is_ok()
     }
@@ -196,5 +201,136 @@ impl Node {
 
     pub fn dn42_peer_names(&self) -> Vec<String> {
         self.dn42_peers.iter().map(|l| l.name.clone()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config as NodeConfig;
+    use landscape_rill_core::route::Prefix;
+
+    /// 构造带假 leg 的 Node（无 tun；事件/明文通道由测试持有）
+    async fn node_with_leg() -> (Node, mpsc::Sender<Dn42RouteEvent>, mpsc::Sender<Vec<u8>>) {
+        let cfg = NodeConfig {
+            coordinator_url: "https://coord.test:8443".into(),
+            auth_key: "lrk-lab-1735689600-deadbeef".into(),
+            static_key_seed: [1; 32],
+            capabilities: 0,
+            announce_routes: vec![],
+            coord_signing_pubkey: [7; 32],
+            ca_cert_path: "/nonexistent".into(),
+            udp_echo_addr: None,
+            data_transport: Default::default(),
+            coord: None,
+            dn42: None,
+        };
+        let mut node = Node::new(cfg, NodeOptions::default()).await.unwrap();
+        let (out_tx, _out_rx) = mpsc::channel(64);
+        let (ev_tx, ev_rx) = mpsc::channel(64);
+        let (pt_tx, pt_rx) = mpsc::channel(64);
+        node.dn42_peers.push(Dn42PeerLeg {
+            name: "peer-t".into(),
+            peer_v4: Ipv4Addr::new(172, 20, 101, 2),
+            peer_v6: "fd00:101::2".parse().unwrap(),
+            outbound: out_tx,
+            events: ev_rx,
+            plaintext: pt_rx,
+            established: false,
+        });
+        (node, ev_tx, pt_tx)
+    }
+
+    fn learned(cidr: &str) -> Dn42RouteEvent {
+        Dn42RouteEvent::Changes(vec![RouteChange::Learned {
+            prefix: Prefix::parse(cidr).unwrap(),
+            path: landscape_rill_dn42::rib::BgpPath {
+                as_path: vec![4242420002],
+                next_hop: Some("172.20.100.2".parse().unwrap()),
+                origin: 0,
+                communities: vec![],
+            },
+        }])
+    }
+
+    fn lookups(node: &Node, cidr: &str) -> Vec<(RouteSource, String)> {
+        node.engine
+            .lookup(&cidr.parse().unwrap())
+            .into_iter()
+            .map(|(e, _)| {
+                (
+                    e.source,
+                    match &e.via {
+                        RouteVia::Dn42(n) => n.clone(),
+                        _ => String::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_up_injects_peer_tunnel_routes() {
+        let (mut node, ev_tx, _pt) = node_with_leg().await;
+        ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
+        node.pump_dn42().await;
+        assert!(node.dn42_peers[0].established());
+        // 对端隧道地址入 LPM（内核 WG connected 路由等价物）
+        assert_eq!(
+            lookups(&node, "172.20.101.2"),
+            vec![(RouteSource::Dn42, "peer-t".into())]
+        );
+        assert_eq!(
+            lookups(&node, "fd00:101::2"),
+            vec![(RouteSource::Dn42, "peer-t".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn learned_then_withdrawn_roundtrip() {
+        let (mut node, ev_tx, _pt) = node_with_leg().await;
+        ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
+        ev_tx.send(learned("172.20.100.0/24")).await.unwrap();
+        node.pump_dn42().await;
+        assert_eq!(
+            lookups(&node, "172.20.100.5"),
+            vec![(RouteSource::Dn42, "peer-t".into())]
+        );
+        ev_tx
+            .send(Dn42RouteEvent::Changes(vec![RouteChange::Withdrawn(
+                Prefix::parse("172.20.100.0/24").unwrap(),
+            )]))
+            .await
+            .unwrap();
+        node.pump_dn42().await;
+        assert!(lookups(&node, "172.20.100.5").is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_down_purges_all_dn42_routes() {
+        let (mut node, ev_tx, _pt) = node_with_leg().await;
+        ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
+        ev_tx.send(learned("172.20.100.0/24")).await.unwrap();
+        node.pump_dn42().await;
+        assert!(!lookups(&node, "172.20.101.2").is_empty());
+
+        ev_tx.send(Dn42RouteEvent::SessionDown).await.unwrap();
+        node.pump_dn42().await;
+        // 学习路由 + 隧道路由随会话撤销全部清理
+        assert!(lookups(&node, "172.20.100.5").is_empty());
+        assert!(lookups(&node, "172.20.101.2").is_empty());
+        assert!(!node.dn42_peers[0].established());
+    }
+
+    #[tokio::test]
+    async fn plaintext_channel_drained_by_pump() {
+        let (mut node, _ev, pt) = node_with_leg().await;
+        pt.send(vec![0x45, 0, 0, 20]).await.unwrap();
+        node.pump_dn42().await;
+        // 无 tun 时 write_lan 为 no-op，但通道必须被消费（防堆积）
+        assert!(matches!(
+            node.dn42_peers[0].try_recv_plaintext(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }

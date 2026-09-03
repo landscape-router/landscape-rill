@@ -105,7 +105,8 @@ impl Prefix {
             if i == bytes - 1 {
                 let rem = self.len as usize % 8;
                 if rem != 0 {
-                    let mask = !(0xffu8 << rem);
+                    // 偏字节的 rem 个有效位在高位：掩码取高 rem 位
+                    let mask = 0xffu8 << (8 - rem);
                     if self.bits[i] & mask != other.bits[i] & mask {
                         return false;
                     }
@@ -133,6 +134,10 @@ impl Prefix {
     /// self ⊆ other（self 被 other 覆盖）：self 范围不得超出 other。
     /// 白名单校验用：公告前缀必须被某条白名单前缀覆盖（CONTROL_PLANE §3.8）。
     pub fn is_covered_by(&self, other: &Prefix) -> bool {
+        // 跨地址族无覆盖语义（v4 bogon 不得"覆盖"v6 前缀，反之亦然）
+        if self.v4 != other.v4 {
+            return false;
+        }
         if other.len > self.len {
             return false;
         }
@@ -141,7 +146,8 @@ impl Prefix {
             if i == bytes - 1 {
                 let rem = other.len as usize % 8;
                 if rem != 0 {
-                    let mask = !(0xffu8 << rem);
+                    // 偏字节的 rem 个有效位在高位：掩码取高 rem 位
+                    let mask = 0xffu8 << (8 - rem);
                     if (self.bits[i] ^ other.bits[i]) & mask != 0 {
                         return false;
                     }
@@ -418,6 +424,35 @@ mod tests {
         assert!(!engine.table.remove(&p, RouteSource::Mesh, &mesh_via(1)));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(engine.lookup(&ip), vec![]);
+    }
+
+    #[test]
+    fn non_byte_aligned_prefix_lengths() {
+        // /14 聚合（dn42 白名单，172.20.0.0/14 = 172.20-172.23）
+        let agg = Prefix::parse("172.20.0.0/14").unwrap();
+        for cidr in [
+            "172.20.1.55",
+            "172.21.250.9",
+            "172.22.142.7",
+            "172.23.255.255",
+        ] {
+            let ip: IpAddr = cidr.parse().unwrap();
+            assert!(agg.matches(&ip), "agg {agg:?} 应匹配 {cidr}");
+        }
+        for cidr in ["172.19.255.255", "172.24.0.1"] {
+            let ip: IpAddr = cidr.parse().unwrap();
+            assert!(!agg.matches(&ip), "agg {agg:?} 不应匹配 {cidr}");
+        }
+        // covered-by 同语义
+        let p = Prefix::parse("172.22.142.0/24").unwrap();
+        assert!(p.is_covered_by(&agg));
+        assert!(!Prefix::parse("172.24.0.0/24").unwrap().is_covered_by(&agg));
+        // /10（第二字节高 2 位）
+        let p10 = Prefix::parse("172.128.0.0/10").unwrap();
+        let ip: IpAddr = "172.191.255.1".parse().unwrap();
+        assert!(p10.matches(&ip));
+        let ip: IpAddr = "172.192.0.1".parse().unwrap();
+        assert!(!p10.matches(&ip));
     }
 
     #[test]

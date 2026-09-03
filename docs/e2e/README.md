@@ -54,7 +54,8 @@ node-C 容器 ──┘
     （白名单外前缀已公告但拒收）、WITHDRAW 撤销收敛、会话故障（stop peer-r →
     hold timer 收敛 → SessionDown → 恢复自动重建）、双 peer 故障切换（peer-r2 同前缀
     双公告，profile late 门控）、max-prefix 超限关停循环（借 node 重启改配置）、
-    WG 层单点故障（wg-quick down，隔离隧道层）、rogue BGP 畸形输入 fail-closed
+    WG 层单点故障（wg-quick down，隔离隧道层）、rogue BGP 畸形输入 fail-closed、
+    表规模收敛与半表撤销（402 条 /24，peer-r2 = Bird——双 BGP 实现互操作）
   - `tenancy`：单 coordinator 双网络隔离（CONTROL_PLANE §1.5，SEC-21~25）——lab
     （node-a1/a2）+ work（node-b1/b2）共用一个 coordinator，全部容器同 bridge（隔离是逻辑的）：
     组内双栈互通、跨网络不可达、netmap 各见本网条目；node-d 持未配置网络（ghost）key 注册被拒；

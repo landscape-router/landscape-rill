@@ -377,6 +377,50 @@ fn encode_rejects_v6_in_v4_nlri_fields() {
 }
 
 #[test]
+fn extended_length_attribute_roundtrip() {
+    // 单属性值 > 255B（100 个 ASN 的 AS_SEQUENCE）：flags 需 ext 标志（0x10）+ 2B 长度
+    let asns: Vec<u32> = (65001..65101).collect();
+    let update = UpdateMsg {
+        withdrawn: vec![],
+        attrs: vec![PathAttr::AsPath(vec![Segment {
+            set: false,
+            asns: asns.clone(),
+        }])],
+        announced: vec![p("10.99.0.0/24")],
+    };
+    let mut out = Vec::new();
+    Message::Update(update).encode(&mut out).unwrap();
+    // attr 头：flags 0x40 | 0x10（well-known + extended length）,type 2
+    let pos = out.windows(2).position(|w| w == [0x50, 0x02]).unwrap();
+    assert_eq!(out[pos + 2..pos + 4], [0x01, 0x92]); // len = 0x0192 = 402 > 255
+    match decode(&out).unwrap() {
+        Message::Update(got) => assert_eq!(
+            got.attrs[0],
+            PathAttr::AsPath(vec![Segment { set: false, asns }])
+        ),
+        other => panic!("not update: {other:?}"),
+    }
+}
+
+#[test]
+fn oversized_message_rejected_with_too_long() {
+    // NLRI 塞到超过 4096 上限：每个 /24 NLRI 4B，2000 条 ≈ 8KB body
+    let announced: Vec<Prefix> = (0..2000u32)
+        .map(|i| p(&format!("10.{}.{}.0/24", i / 256, i % 256)))
+        .collect();
+    let update = UpdateMsg {
+        withdrawn: vec![],
+        attrs: vec![PathAttr::Origin(0), PathAttr::NextHop(Ipv4Addr::LOCALHOST)],
+        announced,
+    };
+    let mut out = Vec::new();
+    assert!(matches!(
+        Message::Update(update).encode(&mut out),
+        Err(WireError::TooLong)
+    ));
+}
+
+#[test]
 fn frame_reader_reassembles_split_messages() {
     let mut wire = Vec::new();
     Message::Keepalive.encode(&mut wire).unwrap();
