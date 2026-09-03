@@ -60,6 +60,7 @@
 | [AO-07](./admin-ops/AO-07-admin-action-toctou.md) | 管理面 | 管理操作时序型越权（检查/执行窗口） | **需补**：P3 管理 API 原子授权 + 吊销即时生效 |
 | [RM-01](./runtime/RM-01-panic-systemic.md) | 运行时 | 解析路径 panic 系统性复发 | **需补**：实现规范 + 任务隔离 |
 | [RM-02](./runtime/RM-02-socket-leak.md) | 运行时 | 连接资源泄漏 → EMFILE | **需补**：生命周期管理 |
+| [RM-03](./runtime/RM-03-dataplane-starvation.md) | 运行时 | 数据面随控制面退避停摆 | **需补**：退避期数据面服务解耦 |
 | [PF-01](./platform/PF-01-platform-sleep-stale.md) | 平台 | 休眠/网络切换后静默失效 | **需补**：平台生命周期钩子 |
 | [PF-02](./platform/PF-02-disables-firewall.md) | 平台 | 运行时改动系统安全配置 | ✅ 架构规避 |
 | [PF-03](./platform/PF-03-kernel-driver-dependency.md) | 平台 | 内核驱动依赖 → 蓝屏/日志风暴 | ✅ 架构规避 |
@@ -74,6 +75,7 @@
 - 实现握手/会话时：复核 **FS-01/FS-02**（逐对会话密钥 + 身份绑定交叉验证）
 - 实现任务框架时：复核 **RM-01**（fail-closed 规范 + 任务隔离）
 - 实现控制面连接管理时：复核 **RM-02** + **CP-03**（重连全量补偿）+ **CP-05**（退避 + 上限）
+- 落地接入（leg）/ 改动主循环时：复核 **RM-03**（控制面退避不停数据面）
 - 实现组级隔离（v2）/打洞时：复核 **CN-04**（策略覆盖中继/打洞/直连全部路径）
 - 实现平台适配（macOS/Windows）时：复核 **PF-01/PF-02** + **PF-03**（禁内核驱动）+ **PF-04**（事件驱动就绪）
 - 实现 netmap 增量（v2）时：复核 **CP-04**（淘汰策略）

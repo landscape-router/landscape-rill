@@ -63,6 +63,7 @@
 | REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/tenancy/、rill-coord/src/domain.rs、rill-coord/src/coordinator/ |
 | REQ-011 | FRM-06 | 已覆盖 | rill-core/src/handshake/ |
 | REQ-012 | E2E-01 ~ E2E-08 | 待补充 | — |
+| REQ-015 | DNL-01 ~ DNL-07 | 已覆盖 | rill-dn42/src/、rill-node/src/runtime/dn42.rs、e2e/mesh/dn42/、e2e/scenarios/dn42.sh |
 | REQ-013 | CTL-13 | 已覆盖 | rill-core/src/control/ |
 | REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | rill-mesh/src/data/、rill-core/src/probe.rs（CON-08 已闭环；RTE-08 exit 语义待 P3） |
 | REQ-015 | DNL-01 ~ DNL-07 | 待补充 | — |
@@ -102,6 +103,21 @@
 | REQ-048 | — | 📌 proposed（无验收场景） | — |
 | REQ-049 | — | 📌 proposed（无验收场景） | — |
 | REQ-050 | — | 📌 proposed（无验收场景） | — |
+| REQ-051 | ADM-07 | 已覆盖 | rill-coord/src/status.rs、rilld/src/coord_run.rs、e2e/mesh/status/、e2e/scenarios/status.sh |
+| REQ-052 | CTL-21 | 已覆盖 | rill-mesh/src/data/、rill-coord/src/coordinator/、rill-coord/src/status.rs、e2e/scenarios/status.sh |
+| REQ-053 | FRM-12 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/tests.rs |
+| REQ-054 | CON-11 | 已覆盖 | rill-mesh/src/data/、rill-node/src/runtime/、e2e/run_e2e.sh（MESH_E2E_TRANSPORT=tcp） |
+| REQ-055 | — | 📌 proposed（无验收场景） | — |
+| REQ-061 | — | 📌 proposed（无验收场景） | — |
+| REQ-062 | — | 📌 proposed（无验收场景） | — |
+| REQ-063 | — | 📌 proposed（无验收场景） | — |
+| REQ-064 | — | 📌 proposed（无验收场景） | — |
+| REQ-065 | — | 📌 proposed（无验收场景） | — |
+| REQ-056 | CTL-18 | 已覆盖 | rill-node/src/runtime/reconnect.rs、e2e/mesh/recover/、e2e/scenarios/recover.sh |
+| REQ-057 | CTL-19 | 已覆盖 | rill-core/src/control/、rill-mesh/src/control/、rill-coord/src/coordinator/、e2e/scenarios/recover.sh |
+| REQ-058 | SEC-30 | 已覆盖 | rill-core/src/control/registry.rs、e2e/scenarios/recover.sh |
+| REQ-059 | SEC-08 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/、e2e/mesh/preauth_flood/、e2e/scenarios/preauth_flood.sh |
+| REQ-060 | CTL-20 | 已覆盖 | rill-coord/src/coordinator/、rill-mesh/src/control/、e2e/scenarios/recover.sh |
 
 ## 5. 维护规则
 

@@ -47,6 +47,12 @@ node-C 容器 ──┘
     TLS 后超长帧声明/垃圾信封/REGISTER 垃圾消息体；断言三容器存活不 panic、
     node-a 丢帧摘要出现（解析 fail-closed）、洪泛后 b→a 双栈 ping 收敛
     （已认证流量不受影响，认证失败路径零持久分配）
+  - `dn42`：dn42 接入互操作（DN42_LEG §7，DNL-01~07）——node-a（lrill dn42 leg，
+    无 coordinator）+ peer-r（**内核 WireGuard + FRR**，真实 dn42 peer 形态，专用网段
+    192.168.243.0/24；镜像由 setup 以 run+commit 预置）：WG 握手、BGP Established、
+    路由学习（LPM 注入 dn42 来源）、tun0→隧道转发、stub 导出、import 白名单负向
+    （白名单外前缀已公告但拒收）、WITHDRAW 撤销收敛、会话故障（stop peer-r →
+    hold timer 收敛 → SessionDown → 恢复自动重建）
   - `tenancy`：单 coordinator 双网络隔离（CONTROL_PLANE §1.5，SEC-21~25）——lab
     （node-a1/a2）+ work（node-b1/b2）共用一个 coordinator，全部容器同 bridge（隔离是逻辑的）：
     组内双栈互通、跨网络不可达、netmap 各见本网条目；node-d 持未配置网络（ghost）key 注册被拒；
@@ -78,7 +84,7 @@ node-C 容器 ──┘
 |---|---|---|
 | P0 | headscale + derper 部署、官方 app（iOS/Android）入网端到端 | ✅ 已实证（#31，REQ-033；交互式登录真机挂账） |
 | P1 | mesh 骨架：注册/netmap/34B 帧转发/直连+中继/租户隔离 | 🚧 数据面/控制面主机+容器闭环（REQ-022~032）；直连/中继/租户未实现 |
-| P2 | 接入：ts2021 客户端接入（subnet router 广播）、dn42 接入（eBGP-lite 会话） | ⏳ 未开始 |
+| P2 | 接入：ts2021 客户端接入（subnet router 广播）、dn42 接入（eBGP-lite 会话） | 🚧 dn42 leg 本地闭环 + FRR 互操作 e2e（DNL-01~07，DN42_LEG §7）；ts2021 未开始 |
 | P3 | 融合：路由引擎策略/exit 双向/自研 ts2021 服务端/Raft 切换 | ⏳ 未开始 |
 | P4 | XDP 快速路径与用户态路径一致性 | ⏳ 未开始 |
 

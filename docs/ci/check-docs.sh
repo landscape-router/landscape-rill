@@ -92,6 +92,19 @@ for f in "$DOCS"/requirements/REQ-*.md; do
   esac
 done
 
+# ---------- 3.7 merged/proposed 的 REQ 必须登记于状态表与验收矩阵（反向覆盖） ----------
+for f in "$DOCS"/requirements/REQ-*.md; do
+  [ -f "$f" ] || continue
+  base="$(basename "$f" .md)"
+  id="$(printf '%s' "$base" | grep -oE 'REQ-[0-9]{3}')"
+  if ! grep -q "\[${id}\]" "$DOCS/requirements/README.md"; then
+    error "$base 未登记于 requirements/README.md 状态表"
+  fi
+  if ! grep -q "^| ${id} " "$DOCS/tests/README.md"; then
+    error "$base 未登记于 tests/README.md 验收矩阵（merged 至少对应一个场景）"
+  fi
+done
+
 # ---------- 4. 已覆盖场景必须有存在的证据文件 ----------
 # 证据字段格式：`- 证据：<路径>、<路径>`（仓库根相对；分隔符为 、 或 ,）
 tmp="$(mktemp)"
