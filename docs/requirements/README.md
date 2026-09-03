@@ -13,7 +13,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 ```
 
 - **状态取值**：`📌 proposed`（未合并，含"建议默认值"以推动收敛）/ `✅ merged`（已合并）/ `❌ rejected` / `↩️ superseded`
-- **优先级**（仅 proposed 阶段）：`P0/P1/P2` = 期望落地阶段，与 CONTEXT §10 路线图对齐；**merged 时移除**（与 stub 瘦身一致，历史优先级无意义）
+- **优先级**（仅 proposed 阶段）：`P0~P4` = 期望落地阶段，与 CONTEXT §10 路线图对齐，`P5` = 远期（路线图之后）；**merged 时移除**（与 stub 瘦身一致，历史优先级无意义）
 - **依赖**（仅 proposed 阶段）：前置 REQ 列表（`依赖：REQ-038`，可多个；`—` = 无）——排序依据：依赖未合并则本项无法独立验收；**merged 时移除**（合并后关联由 `去向` 同章节表达）
 - **一条需求 = 一个可验收的行为变更**：写不出验收标准就不是需求
 - **合并动作 = 内容搬家**：行为内容写入 design/ 对应章节并标注 REQ，stub 只留动机/决策摘要/指针
@@ -38,7 +38,11 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-048](./REQ-048-batch-revoke-rotation.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
 | [REQ-050](./REQ-050-reproducible-build.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
 | [REQ-049](./REQ-049-coordinator-transparency.md) | 需求 | 📌 proposed | P3 | 09-01 | — |
+| [REQ-062](./REQ-062-relay-roster.md) | 需求 | 📌 proposed | P3 | 09-02 | — |
+| [REQ-064](./REQ-064-path-stats.md) | 需求 | 📌 proposed | P3 | 09-02 | — |
 | [REQ-055](./REQ-055-faketcp-xdp.md) | 决策 | 📌 proposed | P4 | 09-01 | — |
+| [REQ-061](./REQ-061-multihop-relay-chain.md) | 需求 | 📌 proposed | P5 | 09-02 | — |
+| [REQ-063](./REQ-063-multipath-duplication.md) | 需求 | 📌 proposed | P5 | 09-02 | — |
 | [REQ-001](./REQ-001.md) | 决策 | ✅ merged | — | 08-13 | FRAME_HEADER §2 |
 | [REQ-002](./REQ-002.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §2.1/§3.1 |
 | [REQ-003](./REQ-003.md) | 决策 | ✅ merged | — | 08-15 | FRAME_HEADER §3.1/§2.1 |
