@@ -131,7 +131,7 @@ if [ "$SCENARIO" = "dn42" ]; then
     PEER_CID=$(docker run --dns "$E2E_DNS" -d debian:trixie-slim sleep infinity)
     docker exec "$PEER_CID" sh -c \
       "apt-get update && apt-get install -y --no-install-recommends \
-         frr wireguard-tools iproute2 iputils-ping bash && rm -rf /var/lib/apt/lists/*"
+         frr wireguard-tools iproute2 iputils-ping bash python3 && rm -rf /var/lib/apt/lists/*"
     docker cp "$E2E_DIR/mesh/dn42/peer/entrypoint.sh" "$PEER_CID:/entrypoint.sh"
     docker commit "$PEER_CID" mesh-dn42-peer-img
     docker rm -f "$PEER_CID" >/dev/null
@@ -150,6 +150,8 @@ seed = bytes([seed[0] & 248]) + seed[1:31] + bytes([seed[31] & 127 | 64])
 print(base64.b64encode(seed).decode())
 ')
   NODE_WG_PUB=$(printf '%s' "$SEED_B64" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
+  PEER_R2_PRIV=$(docker run --rm mesh-dn42-peer-img wg genkey)
+  PEER_R2_PUB=$(printf '%s' "$PEER_R2_PRIV" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
 
   cat > "$BUILD_DIR/dn42/wg0.conf" <<WGEOF
 [Interface]
@@ -162,6 +164,36 @@ ListenPort = 51820
 PublicKey = $NODE_WG_PUB
 AllowedIPs = 172.20.100.1/32, fd00:100::1/128, 10.42.0.0/24, fd00:2::/64
 WGEOF
+
+  # peer-r2：独立隧道 172.20.101.0/30（双 peer 故障切换，DNL-08~11）
+  cat > "$BUILD_DIR/dn42/wg0-r2.conf" <<WGEOF2
+[Interface]
+PrivateKey = $PEER_R2_PRIV
+Address = 172.20.101.2/30
+Address = fd00:101::2/126
+ListenPort = 51821
+
+[Peer]
+PublicKey = $NODE_WG_PUB
+AllowedIPs = 172.20.101.1/32, fd00:101::1/128, 10.42.0.0/24, fd00:2::/64
+WGEOF2
+
+  cat > "$BUILD_DIR/dn42/bgpd-r2.conf" <<BGPEOF2
+hostname peer-r2
+password zebra
+log syslog
+router bgp 4242420003
+ bgp router-id 172.20.101.2
+ no bgp ebgp-requires-policy
+ timers bgp 5 15
+ neighbor 172.20.101.1 remote-as 4242420001
+ address-family ipv4 unicast
+  network 172.20.100.0/24
+  network 172.20.200.0/24
+  neighbor 172.20.101.1 activate
+ exit-address-family
+BGPEOF2
+
 
   cat > "$BUILD_DIR/dn42/bgpd.conf" <<BGPEOF
 hostname peer-r
@@ -183,6 +215,10 @@ BGPEOF
 hostname peer-r
 log syslog
 ZEBEOF
+  cat > "$BUILD_DIR/dn42/zebra-r2.conf" <<ZEBEOF2
+hostname peer-r2
+log syslog
+ZEBEOF2
 
   # node-a：dn42 段（hold_time=9 加速 DNL-07 hold 收敛）；coordinator 字段为
   # 必填占位（M1 本地闭环无 coord，连接失败走退避，不影响 dn42 leg）
@@ -214,6 +250,20 @@ ZEBEOF
         "peer_as": 4242420002,
         "bgp_port": 179,
         "local_bgp_port": 179,
+        "whitelist": ["172.20.0.0/14"],
+        "max_prefixes": 1000
+      },
+      {
+        "name": "peer-r2",
+        "endpoint": "192.168.243.12:51821",
+        "public_key": "$PEER_R2_PUB",
+        "local_v4": "172.20.101.1",
+        "local_v6": "fd00:101::1",
+        "peer_v4": "172.20.101.2",
+        "peer_v6": "fd00:101::2",
+        "peer_as": 4242420003,
+        "bgp_port": 179,
+        "local_bgp_port": 1179,
         "whitelist": ["172.20.0.0/14"],
         "max_prefixes": 1000
       }
@@ -481,6 +531,8 @@ if [ "$SCENARIO" = "dn42" ]; then
   # dn42 场景：node-a 内核侧把 dn42 空间导入 land0（白名单外 10.99/16 同样导入，
   # 使负向断言为"引擎裁决丢弃"而非"内核无路由"）
   docker exec mesh-node-a ip route add 172.20.100.0/24 dev land0 2>/dev/null || true
+  # 第二隧道回程（peer-r2 的 BGP/TCP 流量走 land0 注入的裁决路径）
+  docker exec mesh-node-a ip route add 172.20.101.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-a ip route add 10.99.0.0/16 dev land0 2>/dev/null || true
 elif [ "$ROUTE_TOPO" = "relay" ]; then
   docker exec mesh-node-a ip route add 10.44.0.0/24 dev land0 2>/dev/null || true

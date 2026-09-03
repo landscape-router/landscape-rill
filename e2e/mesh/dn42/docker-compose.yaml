@@ -41,6 +41,26 @@ services:
       dn42net:
         ipv4_address: 192.168.243.10
 
+  peer-r2:
+    image: mesh-dn42-peer-img
+    container_name: mesh-dn42-peer2
+    profiles: ["late"]
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - ./peer/entrypoint.sh:/entrypoint.sh
+      - ../../build/dn42/wg0-r2.conf:/etc/wireguard/wg0.conf
+      - ../../build/dn42/bgpd-r2.conf:/etc/frr/bgpd.conf
+      - ../../build/dn42/zebra-r2.conf:/etc/frr/zebra.conf
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    networks:
+      dn42net:
+        ipv4_address: 192.168.243.12
+
 networks:
   dn42net:
     driver: bridge

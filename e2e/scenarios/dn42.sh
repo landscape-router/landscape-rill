@@ -6,6 +6,20 @@
 set -euo pipefail
 
 logs() { docker logs "$1" 2>&1; }
+count_log() {
+    local n
+    n=$(logs mesh-node-a | grep -c "$1" || true)
+    echo "${n:-0}"
+}
+# 等待日志计数相对快照增长 ≥1（防历史行污染）
+wait_log_inc() { # $1=模式 $2=快照 $3=超时秒
+  for i in $(seq 1 "$3"); do
+    N=$(count_log "$1")
+    [ "${N:-0}" -gt "$2" ] && return 0
+    sleep 1
+  done
+  return 1
+}
 
 echo "==> DNL-01: boringtun ⇄ 内核 WG 握手"
 for i in $(seq 1 20); do
@@ -157,4 +171,171 @@ else
   exit 1
 fi
 
-echo "PASS: dn42 e2e 全部断言通过（DNL-01~07）"
+echo "PASS: dn42 e2e 基础断言通过（DNL-01~07）"
+
+COMPOSE_DN42="docker compose -f $E2E_DIR/mesh/dn42/docker-compose.yaml"
+
+echo "==> DNL-08: 双 peer 故障切换（peer-r2 上线，同前缀双公告）"
+$COMPOSE_DN42 --profile late up -d peer-r2
+R2_ESTAB=0
+for i in $(seq 1 45); do
+  if docker exec mesh-dn42-peer2 vtysh -c "show bgp neighbors 172.20.101.1" 2>/dev/null | grep -q "BGP state = Established" \
+     && docker exec mesh-dn42-peer2 ping -c1 -W1 10.42.0.1 >/dev/null 2>&1; then
+    R2_ESTAB=1
+    break
+  fi
+  sleep 1
+done
+if [ "$R2_ESTAB" = "1" ]; then
+  echo "PASS: DNL-08a peer-r2 会话 Established（独立隧道 172.20.101.0/30）"
+else
+  echo "FAIL: DNL-08a peer-r2 会话未建立"
+  exit 1
+fi
+
+SNAP8=$(count_log "dn42 session down: peer-r$")
+docker stop mesh-dn42-peer >/dev/null
+DOWN8=1
+wait_log_inc "dn42 session down: peer-r$" "$SNAP8" 30 || DOWN8=0
+RECOVER8=0
+for i in $(seq 1 30); do
+  if docker exec mesh-node-a ping -c1 -W1 172.20.100.100 >/dev/null 2>&1; then
+    RECOVER8=1
+    break
+  fi
+  sleep 2
+done
+docker start mesh-dn42-peer >/dev/null
+BACK8=0
+for i in $(seq 1 40); do
+  if docker exec mesh-dn42-peer vtysh -c "show bgp neighbors 172.20.100.1" 2>/dev/null | grep -q "BGP state = Established" \
+     && docker exec mesh-node-a ping -c1 -W1 172.20.100.100 >/dev/null 2>&1; then
+    BACK8=1
+    break
+  fi
+  sleep 2
+done
+if [ "$DOWN8" = "1" ] && [ "$RECOVER8" = "1" ] && [ "$BACK8" = "1" ]; then
+  echo "PASS: DNL-08 peer-r 停机 → 流量切换 peer-r2 → peer-r 恢复后回流"
+else
+  echo "FAIL: DNL-08 故障切换失败 (down=$DOWN8 recover=$RECOVER8 back=$BACK8)"
+  exit 1
+fi
+
+echo "==> DNL-10: WG 层单点故障（隧道断，peer 进程在）"
+SNAP10=$(count_log "dn42 session down: peer-r$")
+docker exec mesh-dn42-peer wg-quick down wg0 >/dev/null
+DOWN10=1
+wait_log_inc "dn42 session down: peer-r$" "$SNAP10" 30 || DOWN10=0
+ALIVE10=1
+docker exec mesh-dn42-peer true 2>/dev/null || ALIVE10=0
+RECOVER10=0
+for i in $(seq 1 30); do
+  if docker exec mesh-node-a ping -c1 -W1 172.20.100.100 >/dev/null 2>&1; then
+    RECOVER10=1
+    break
+  fi
+  sleep 2
+done
+SNAP10E=$(count_log "dn42 session established: peer-r$")
+docker exec mesh-dn42-peer wg-quick up wg0 >/dev/null
+BACK10=1
+for i in $(seq 1 40); do
+  E=$(count_log "dn42 session established: peer-r$")
+  if [ "${E:-0}" -gt "$SNAP10E" ] \
+     && docker exec mesh-dn42-peer vtysh -c "show bgp neighbors 172.20.100.1" 2>/dev/null | grep -q "BGP state = Established"; then
+    BACK10=1
+    break
+  fi
+  sleep 2
+done
+if [ "$DOWN10" = "1" ] && [ "$ALIVE10" = "1" ] && [ "$RECOVER10" = "1" ] && [ "$BACK10" = "1" ]; then
+  echo "PASS: DNL-10 隧道层故障 → hold 收敛 → peer-r2 顶上 → 隧道恢复重建（peer 进程全程存活）"
+else
+  echo "FAIL: DNL-10 (down=$DOWN10 alive=$ALIVE10 recover=$RECOVER10 back=$BACK10)"
+  exit 1
+fi
+
+echo "==> DNL-09: max-prefix 会话自保（借 node 重启改配置，覆盖节点重启重建）"
+python3 - "$E2E_DIR/build/node-a.json" <<'PYMAX'
+import json, shutil, sys, tempfile
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+for p in cfg["dn42"]["peers"]:
+    if p["name"] == "peer-r2":
+        p["max_prefixes"] = 1
+tmp = tempfile.NamedTemporaryFile(delete=False, dir=path.rsplit("/", 1)[0])
+with open(tmp.name, "w") as f:
+    json.dump(cfg, f, indent=2)
+shutil.copyfile(tmp.name, path)
+PYMAX
+docker restart mesh-node-a >/dev/null
+# node 重启后重注内核路由（netns 重建已清）
+docker exec mesh-node-a ip route add 172.20.100.0/24 dev land0 2>/dev/null || true
+docker exec mesh-node-a ip route add 172.20.101.0/24 dev land0 2>/dev/null || true
+docker exec mesh-node-a ip route add 10.99.0.0/16 dev land0 2>/dev/null || true
+FLAP=0
+for i in $(seq 1 30); do
+  N=$(logs mesh-node-a | grep -c "dn42 session down: peer-r2" || true)
+  [ "${N:-0}" -ge 2 ] && FLAP=1 && break
+  sleep 1
+done
+VIA_PEER=0
+for i in $(seq 1 30); do
+  if docker exec mesh-node-a ping -c1 -W1 172.20.100.100 >/dev/null 2>&1; then
+    VIA_PEER=1
+    break
+  fi
+  sleep 2
+done
+if [ "$FLAP" = "1" ] && [ "$VIA_PEER" = "1" ]; then
+  echo "PASS: DNL-09 max-prefix 超限 → peer-r2 会话关停循环，peer-r 转发不受影响（node 重启后隧道/会话/路由全量重建）"
+else
+  echo "FAIL: DNL-09 (flap=$FLAP via_peer=$VIA_PEER)"
+  exit 1
+fi
+
+echo "==> DNL-11: rogue BGP 输入 fail-closed（假 peer 发畸形流）"
+docker exec mesh-dn42-peer2 sh -c 'kill $(cat /var/run/frr/bgpd.pid) 2>/dev/null; sleep 1; cat > /tmp/rogue.py <<ROGUE
+import socket, threading, time
+def handle(c):
+    try:
+        c.sendall(b"\xff" * 16 + b"\x00\x40\x01" + b"GARBAGE!" * 8)
+        time.sleep(20)
+        c.recv(4096)
+    except Exception:
+        pass
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", 179))
+s.listen(5)
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+ROGUE
+python3 /tmp/rogue.py &'
+ROGUE_SEEN=0
+for i in $(seq 1 20); do
+  N=$(logs mesh-node-a | grep -c "session round ended, reconnecting" || true)
+  [ "${N:-0}" -ge 2 ] && ROGUE_SEEN=1 && break
+  sleep 1
+done
+ALIVE11=1
+docker exec mesh-node-a true 2>/dev/null || ALIVE11=0
+VIA11=0
+for i in $(seq 1 10); do
+  if docker exec mesh-node-a ping -c1 -W1 172.20.100.100 >/dev/null 2>&1; then
+    VIA11=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ROGUE_SEEN" = "1" ] && [ "$ALIVE11" = "1" ] && [ "$VIA11" = "1" ]; then
+  echo "PASS: DNL-11 rogue 畸形输入 → 会话 fail-closed 丢弃重试，lrill 存活，peer-r 转发不受影响"
+else
+  echo "FAIL: DNL-11 (rogue_seen=$ROGUE_SEEN alive=$ALIVE11 via=$VIA11)"
+  exit 1
+fi
+
+echo "PASS: dn42 e2e 全部断言通过（DNL-01~11）"

@@ -434,6 +434,13 @@ async fn session_round(
                         }
                     }
                     let now = Instant::now();
+                    // 会话久未建立 → 结束本轮（新轮重建 WgTunnel）：boringtun 握手重试
+                    // 有 REKEY_ATTEMPT_TIME（90s）上限，超限进入 expired 态后不再发起，
+                    // 对端后上线（如 e2e 的 peer-r2 late 启动）将永远握不上手
+                    if !was_established && now.duration_since(started) >= Duration::from_secs(90) {
+                        tracing::debug!(peer = %cfg.name, "round gave up: session not established in 90s");
+                        return ever_established;
+                    }
                     if fsm.state() == crate::fsm::State::Established {
                         if let Some(interval) = fsm.keepalive_interval() {
                             if now.duration_since(last_keepalive) >= interval {

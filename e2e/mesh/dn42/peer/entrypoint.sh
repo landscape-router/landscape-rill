@@ -9,6 +9,8 @@ wg-quick up /etc/wireguard/wg0.conf
 ip addr add 172.20.100.100/24 dev lo 2>/dev/null || true
 # 10.99.0.0/16 = 白名单外前缀（DNL-05 负向断言：本端可达，node-a 必须拒绝）
 ip route add blackhole 10.99.0.0/16 2>/dev/null || true
+# 172.20.200.0/24 = peer-r2 的第二条公告（DNL-09 max-prefix 触发用）
+ip route add blackhole 172.20.200.0/24 2>/dev/null || true
 
 mkdir -p /var/run/frr /var/log/frr
 chown -R frr:frr /var/run/frr /var/log/frr /etc/frr 2>/dev/null || true

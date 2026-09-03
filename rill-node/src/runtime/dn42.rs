@@ -10,10 +10,15 @@ use landscape_rill_dn42::session::{
     BgpSessionConfig, PeerConfig, PeerHooks, RouteEvent as Dn42RouteEvent,
 };
 use landscape_rill_dn42::tunnel::WgPeerKeys;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::sync::mpsc;
 /// 单 peer 运行态：出站句柄 + 事件/明文接收端 + 会话状态
 pub struct Dn42PeerLeg {
     pub name: String,
+    /// 对端隧道地址（内核 WG 的 connected /30 等价物：SessionUp 时注入 LPM，
+    /// 使内核发往对端隧道地址的应答可裁决进本 leg）
+    peer_v4: Ipv4Addr,
+    peer_v6: Ipv6Addr,
     outbound: mpsc::Sender<Vec<u8>>,
     events: mpsc::Receiver<Dn42RouteEvent>,
     plaintext: mpsc::Receiver<Vec<u8>>,
@@ -104,6 +109,8 @@ impl Node {
             ));
             self.dn42_peers.push(Dn42PeerLeg {
                 name: peer.name.clone(),
+                peer_v4: peer.peer_v4,
+                peer_v6: peer.peer_v6,
                 outbound: out_tx,
                 events: ev_rx,
                 plaintext: pt_rx,
@@ -124,6 +131,23 @@ impl Node {
                         Dn42RouteEvent::SessionUp => {
                             info!("[node] dn42 session established: {}", leg.name);
                             leg.established = true;
+                            // 对端隧道地址入 LPM（等价内核 WG connected 路由）
+                            self.engine.insert(RouteEntry {
+                                prefix: landscape_rill_core::route::Prefix::from_ip(IpAddr::V4(
+                                    leg.peer_v4,
+                                )),
+                                source: RouteSource::Dn42,
+                                via: RouteVia::Dn42(leg.name.clone()),
+                                metric: None,
+                            });
+                            self.engine.insert(RouteEntry {
+                                prefix: landscape_rill_core::route::Prefix::from_ip(IpAddr::V6(
+                                    leg.peer_v6,
+                                )),
+                                source: RouteSource::Dn42,
+                                via: RouteVia::Dn42(leg.name.clone()),
+                                metric: None,
+                            });
                         }
                         Dn42RouteEvent::SessionDown => {
                             info!("[node] dn42 session down: {}", leg.name);
