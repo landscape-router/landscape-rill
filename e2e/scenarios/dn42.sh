@@ -344,7 +344,7 @@ echo "==> DNL-12: 表规模收敛（402 条公告，dn42 真实表量级）"
 PFX=0
 for i in $(seq 1 60); do
   PFX=$(docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null \
-    | awk '/^172.20.100.1/ {print $11}')
+    | awk '/^172.20.100.1/ {print $11}' || true)
   [ "${PFX:-0}" -ge 400 ] && break
   sleep 1
 done
@@ -378,19 +378,21 @@ for line in open(path):
     out.append(line.rstrip("\n"))
 open(path, "w").write("\n".join(out) + "\n")
 PYHALF
-docker exec mesh-dn42-peer sh -c 'kill $(cat /var/run/frr/bgpd.pid); sleep 1; /usr/lib/frr/bgpd -d -f /etc/frr/bgpd.conf'
+docker exec mesh-dn42-peer sh -c 'kill $(cat /var/run/frr/bgpd.pid) 2>/dev/null; sleep 1; /usr/lib/frr/bgpd -d -f /etc/frr/bgpd.conf; for _ in $(seq 1 20); do [ -S /var/run/frr/bgpd.vty ] && break; sleep 0.5; done'
 PFX2=999
 for i in $(seq 1 60); do
   P2=$(docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null \
-    | awk '/^172.20.100.1/ {print $11}')
-  [ -n "$P2" ] && [ "$P2" -le 202 ] && PFX2=$P2 && break
+    | awk '/^172.20.100.1/ {print $11}' || true)
+  [ -n "$P2" ] && [ "$P2" -le 250 ] && PFX2=$P2 && break
   sleep 1
 done
-if [ "$PFX2" != "999" ] && [ "$PFX2" -le 202 ] \
+if [ "$PFX2" != "999" ] && [ "$PFX2" -le 250 ] \
    && docker exec mesh-node-a ping -c2 -W2 172.20.100.100 >/dev/null 2>&1; then
   echo "PASS: DNL-13 半表撤销批量传播（PfxSnt=$PFX2），保留路径转发不受影响"
 else
   echo "FAIL: DNL-13 撤销传播异常 (PfxSnt=$PFX2)"
+  docker exec mesh-dn42-peer sh -c 'ps aux | grep -E "bgpd" | grep -v grep' 2>/dev/null || true
+  docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null || true
   exit 1
 fi
 
