@@ -96,28 +96,25 @@ impl Prefix {
     }
 
     pub fn matches(&self, addr: &IpAddr) -> bool {
-        let other = Self::from_ip(*addr);
+        self.contains(&Self::from_ip(*addr))
+    }
+
+    /// 前缀有效位（高 self.len 位，低位对齐到 128 位尾）。len==0 → 0
+    fn significant(&self) -> u128 {
         if self.len == 0 {
-            return true;
+            return 0;
         }
-        let bytes = (self.len as usize).div_ceil(8);
-        for i in 0..bytes {
-            if i == bytes - 1 {
-                let rem = self.len as usize % 8;
-                if rem != 0 {
-                    // 偏字节的 rem 个有效位在高位：掩码取高 rem 位
-                    let mask = 0xffu8 << (8 - rem);
-                    if self.bits[i] & mask != other.bits[i] & mask {
-                        return false;
-                    }
-                    continue;
-                }
-            }
-            if self.bits[i] != other.bits[i] {
-                return false;
-            }
+        u128::from_be_bytes(self.bits) >> (128 - self.len as u32)
+    }
+
+    /// self 精确包含 other（同地址族、other.len ≥ self.len、有效位一致）。
+    /// u128 移位实现：无逐字节/偏字节掩码算术（掩码取反位错的根除手段）
+    fn contains(&self, other: &Prefix) -> bool {
+        if self.v4 != other.v4 || other.len < self.len {
+            return false;
         }
-        true
+        // 把 other 的有效位右移对齐到 self 的长度再比较
+        (other.significant() >> (other.len - self.len)) == self.significant()
     }
 
     pub fn to_cidr(&self) -> String {
@@ -133,32 +130,9 @@ impl Prefix {
 
     /// self ⊆ other（self 被 other 覆盖）：self 范围不得超出 other。
     /// 白名单校验用：公告前缀必须被某条白名单前缀覆盖（CONTROL_PLANE §3.8）。
+    /// self ⊆ other（self 被 other 覆盖）。跨地址族一律 false
     pub fn is_covered_by(&self, other: &Prefix) -> bool {
-        // 跨地址族无覆盖语义（v4 bogon 不得"覆盖"v6 前缀，反之亦然）
-        if self.v4 != other.v4 {
-            return false;
-        }
-        if other.len > self.len {
-            return false;
-        }
-        let bytes = (other.len as usize).div_ceil(8);
-        for i in 0..bytes {
-            if i == bytes - 1 {
-                let rem = other.len as usize % 8;
-                if rem != 0 {
-                    // 偏字节的 rem 个有效位在高位：掩码取高 rem 位
-                    let mask = 0xffu8 << (8 - rem);
-                    if (self.bits[i] ^ other.bits[i]) & mask != 0 {
-                        return false;
-                    }
-                    continue;
-                }
-            }
-            if self.bits[i] != other.bits[i] {
-                return false;
-            }
-        }
-        true
+        other.contains(self)
     }
 }
 
@@ -424,6 +398,61 @@ mod tests {
         assert!(!engine.table.remove(&p, RouteSource::Mesh, &mesh_via(1)));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(engine.lookup(&ip), vec![]);
+    }
+
+    /// 独立参照性质测试：用整除构造块边界（测试自身不含位掩码逻辑），
+    /// 对每个长度验证 首✓ / 末✓ / 块前✗ / 块后✗。u128 掩码实现的根除性守卫。
+    #[test]
+    fn contains_matches_arithmetic_block_reference_v4() {
+        use std::net::Ipv4Addr;
+        let base: u32 = 0xAC140000; // 172.20.0.0
+        for len in 0..=32u32 {
+            let block: u64 = if len == 0 {
+                u64::from(u32::MAX) + 1
+            } else {
+                1u64 << (32 - len)
+            };
+            let net = (base as u64) / block * block;
+            let p = Prefix::parse(&format!(
+                "{}.{}.{}.{}/{len}",
+                net >> 24 & 0xff,
+                net >> 16 & 0xff,
+                net >> 8 & 0xff,
+                net & 0xff
+            ))
+            .unwrap();
+            let ip = |v: u64| IpAddr::V4(Ipv4Addr::from(v as u32));
+            assert!(p.matches(&ip(net)), "len {len}: 网络地址应匹配");
+            assert!(p.matches(&ip(net + block - 1)), "len {len}: 块末地址应匹配");
+            if net > 0 {
+                assert!(!p.matches(&ip(net - 1)), "len {len}: 块前地址不应匹配");
+            }
+            if net + block <= u64::from(u32::MAX) {
+                assert!(!p.matches(&ip(net + block)), "len {len}: 块后地址不应匹配");
+            }
+        }
+    }
+
+    #[test]
+    fn contains_matches_arithmetic_block_reference_v6() {
+        use std::net::Ipv6Addr;
+        let base: u128 = 0xFD00_0000_0000_0000_0000_0000_0000_0000; // fd00::/8 锚点
+        for len in [8u32, 16, 24, 32, 48, 64, 96, 128] {
+            let block: u128 = if len == 0 {
+                return;
+            } else {
+                1u128 << (128 - len)
+            };
+            let net = base / block * block;
+            let p = Prefix::parse(&format!("fd00::/{len}")).unwrap();
+            let ip = |v: u128| IpAddr::V6(Ipv6Addr::from(v));
+            assert!(p.matches(&ip(net)), "len {len}: 网络地址应匹配");
+            assert!(p.matches(&ip(net + block - 1)), "len {len}: 块末地址应匹配");
+            if net > 0 {
+                assert!(!p.matches(&ip(net - 1)), "len {len}: 块前地址不应匹配");
+            }
+            assert!(!p.matches(&ip(net + block)), "len {len}: 块后地址不应匹配");
+        }
     }
 
     #[test]
