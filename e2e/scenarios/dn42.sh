@@ -308,7 +308,12 @@ def handle(c):
         pass
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("0.0.0.0", 179))
+for _ in range(30):
+    try:
+        s.bind(("0.0.0.0", 179))
+        break
+    except OSError:
+        time.sleep(1)
 s.listen(5)
 while True:
     c, _ = s.accept()

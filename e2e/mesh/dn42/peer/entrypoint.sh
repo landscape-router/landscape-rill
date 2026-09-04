@@ -33,7 +33,9 @@ if [ "$(hostname)" = "peer-r2" ]; then
   done
 else
   mkdir -p /var/run/frr /var/log/frr
-  chown -R frr:frr /var/run/frr /var/log/frr /etc/frr 2>/dev/null || true
+  # 注意:不得 chown /etc/frr——bgpd.conf 是宿主 bind mount,
+  # 改属主会让宿主侧(非 root)改写配置时 Permission denied
+  chown -R frr:frr /var/run/frr /var/log/frr 2>/dev/null || true
   /usr/lib/frr/zebra -d
   /usr/lib/frr/bgpd -d -f /etc/frr/bgpd.conf
   for _ in $(seq 1 20); do
