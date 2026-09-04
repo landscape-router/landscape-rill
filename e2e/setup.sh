@@ -162,7 +162,7 @@ ListenPort = 51820
 
 [Peer]
 PublicKey = $NODE_WG_PUB
-AllowedIPs = 172.20.100.1/32, fd00:100::1/128, 10.42.0.0/24, fd00:2::/64
+AllowedIPs = 172.20.100.1/32, fd00:100::1/128, 10.42.0.0/24, fd00:2::/64, 10.88.0.0/24, fd00:88::/64
 WGEOF
 
   cat > "$BUILD_DIR/dn42/bgpd.conf" <<BGPEOF
@@ -199,7 +199,7 @@ ListenPort = 51821
 
 [Peer]
 PublicKey = $NODE_WG_PUB
-AllowedIPs = 172.20.101.1/32, fd00:101::1/128, 10.42.0.0/24, fd00:2::/64
+AllowedIPs = 172.20.101.1/32, fd00:101::1/128, 10.42.0.0/24, fd00:2::/64, 10.88.0.0/24, fd00:88::/64
 WGEOF2
 
   cat > "$BUILD_DIR/dn42/bird-r2.conf" <<BIRDEOF
@@ -230,15 +230,15 @@ hostname peer-r
 log syslog
 ZEBEOF
 
-  # node-a：dn42 段（hold_time=15 控制故障收敛窗口）；coordinator 字段为
-  # 必填占位（M1 本地闭环无 coord，连接失败走退避，不影响 dn42 leg）
+  # node-a：dn42 段（hold_time=15 控制故障收敛窗口）+ M2 全网出口：
+  # announce_to_mesh 开关注册聚合（172.20/14、fd00::/8）进 mesh，node-b 借道 transit
   cat > "$BUILD_DIR/node-a.json" <<NODEEOF
 {
   "coordinator_url": "https://coord:8443",
   "auth_key": "$NODE_A_AUTHKEY",
   "static_key_seed": "$NODE_A_KEY",
   "capabilities": 0,
-  "announce_routes": [],
+  "announce_routes": ["10.42.0.0/24", "fd00:2::/64"],
   "coord_signing_pubkey": "$COORD_PUBKEY",
   "ca_cert_path": "/etc/landscape/ca.pem",
   "data_transport": "udp",
@@ -248,6 +248,7 @@ ZEBEOF
     "bgp_id": "172.20.100.1",
     "hold_time": 15,
     "own_prefixes": ["172.20.1.0/24"],
+    "announce_to_mesh": true,
     "peers": [
       {
         "name": "peer-r",
@@ -281,6 +282,11 @@ ZEBEOF
   }
 }
 NODEEOF
+
+  # node-b（M2，DNL-14/15）：mesh 第二节点；172.21.5.0/24 = 仲裁目标
+  # （node-b lo 承载 172.21.5.1，mesh 路径回包、dn42 路径 peer 黑洞）
+  gen_node_config node-b.json "$NODE_B_KEY" "10.88.0.1/24" "fd00:88::1/64" \
+    '["10.88.0.0/24", "fd00:88::/64", "172.21.5.0/24"]' "$NODE_B_AUTHKEY"
 fi
 
 # 多网络配置（CONTROL_PLANE §1.5）：networks 列表，每网络独立主密钥/auth key 空间/白名单
@@ -300,7 +306,7 @@ cat > "$BUILD_DIR/coord.json" <<EOF
           { "key": "$NODE_B_AUTHKEY", "policy": "reusable" },
           { "key": "$NODE_C_AUTHKEY", "policy": "reusable" }
         ],
-        "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
+        "announce_whitelist": ["10.0.0.0/8", "fd00::/8", "172.20.0.0/14", "172.21.5.0/24"]
       }
     ]
   }

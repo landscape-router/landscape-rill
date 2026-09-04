@@ -110,6 +110,78 @@ impl Node {
         }
     }
 
+    /// 跨腿 transit 转发（M2，DN42_LEG §7 ⑤）：mesh 入站 → dn42 leg；
+    /// dn42 入站 → mesh。严格单向配对（不做 mesh→mesh / dn42→dn42 IP 转发，
+    /// 转发图无环，不依赖 TTL 衰减；v1 不减 TTL）。未命中 → false，调用方写 TUN
+    pub(super) async fn forward_transit(&mut self, packet: &[u8], from_mesh: bool) -> bool {
+        let Ok(info) = parse_packet(packet) else {
+            return false;
+        };
+        // 组播/广播维持既有语义（mesh 广播帧写 TUN 由内核泛洪；dn42 侧不 transit 组播）
+        if info.dst.is_multicast() {
+            return false;
+        }
+        let (via, dst) = {
+            let dn42_up = &self.dn42_peers;
+            let reachable = |e: &RouteEntry| match &e.via {
+                RouteVia::Mesh(_) => true,
+                RouteVia::Dn42(name) => dn42_up
+                    .iter()
+                    .find(|l| l.name == *name)
+                    .is_some_and(|l| l.established()),
+                RouteVia::Tailnet(_) | RouteVia::Direct(_) => false,
+            };
+            let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
+                return false;
+            };
+            (entry.via.clone(), info.dst)
+        };
+        match via {
+            RouteVia::Dn42(name) if from_mesh => {
+                let Some(leg) = self.dn42_peers.iter().find(|l| l.name == name) else {
+                    return false;
+                };
+                if leg.send(packet).await {
+                    info!("[node] transit mesh->dn42: {} via {}", dst, leg.name);
+                    true
+                } else {
+                    false
+                }
+            }
+            RouteVia::Mesh(peer) if !from_mesh => {
+                if !self.mesh.has_session(peer) {
+                    debug!(
+                        "[node] transit dn42->mesh: {} no session with {}",
+                        dst, peer
+                    );
+                    return false;
+                }
+                let flow = flow_hash(&info);
+                match self.mesh.build_data_frame(peer, packet, flow) {
+                    Ok((frame, first_hop)) => {
+                        let ok = self
+                            .mesh
+                            .send_to_node_hop(peer, first_hop, &frame)
+                            .await
+                            .unwrap_or(false);
+                        if ok {
+                            info!("[node] transit dn42->mesh: {} via node {}", dst, peer);
+                        }
+                        ok
+                    }
+                    Err(e) => {
+                        debug!(
+                            "[node] transit dn42->mesh: {} frame build failed: {:?}",
+                            dst, e
+                        );
+                        false
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub(super) async fn write_lan(&mut self, payload: &[u8]) {
         if let Some(tun) = self.tun.as_mut() {
             let _ = tun.write_packet(payload).await;

@@ -76,15 +76,6 @@ pub struct Registry {
     network_id: u32,
 }
 
-/// 前缀长度边界（CONTROL_PLANE §3.8）：IPv4 < /8、IPv6 < /32 拒绝
-fn route_len_ok(p: &Prefix) -> bool {
-    if p.is_v4() {
-        p.len() >= 8
-    } else {
-        p.len() >= 32
-    }
-}
-
 impl Registry {
     pub fn new(network_id: u32) -> Self {
         Self {
@@ -141,13 +132,12 @@ impl Registry {
         &self.announce_whitelist
     }
 
-    /// 校验公告前缀（REQ-038）：白名单覆盖 + 长度边界
+    /// 校验公告前缀（REQ-038）：白名单覆盖为唯一门。
+    /// 既有 /8、/32 长度边界撤销（§3.8 修订，DN42_LEG §7 ⑤）——dn42 聚合公告
+    /// （fd00::/8）为有意宽前缀，宽窄的权威在管理面白名单本身
     pub fn check_announce_routes(&self, routes: &[String]) -> Result<(), RegisterError> {
         for route in routes {
             let prefix = Prefix::parse(route).map_err(|_| RegisterError::BadRoute)?;
-            if !route_len_ok(&prefix) {
-                return Err(RegisterError::RouteNotAllowed);
-            }
             if !self
                 .announce_whitelist
                 .iter()
@@ -490,19 +480,44 @@ mod tests {
     }
 
     #[test]
-    fn whitelist_rejects_short_prefix() {
+    fn wide_prefix_allowed_when_explicitly_whitelisted() {
         let mut reg = Registry::new(1);
         let signer = XorSigner { key: 0x5a };
         reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
+        // 白名单是宽窄的唯一权威（§3.8 修订，M2 聚合公告语义）：显式放行 0/0 即允许
         reg.set_announce_whitelist(vec![Prefix::parse("0.0.0.0/0").unwrap()]);
-        let err = reg
+        let out = reg
             .register("ak-r", &key(1), 0, vec!["0.0.0.0/0".into()], 1, &signer)
-            .unwrap_err();
-        assert_eq!(err, RegisterError::RouteNotAllowed);
+            .unwrap();
+        assert_eq!(out, RegisterOutcome::NewNode(1));
+        // 未被覆盖（跨地址族不算覆盖）→ 仍拒绝
         let err = reg
-            .register("ak-r", &key(1), 0, vec!["fd00::/16".into()], 1, &signer)
+            .register("ak-r", &key(2), 0, vec!["fd00::/16".into()], 2, &signer)
             .unwrap_err();
         assert_eq!(err, RegisterError::RouteNotAllowed);
+    }
+
+    /// 宽前缀（跨过既有 /8、/32 边界的 dn42 聚合）白名单覆盖即放行（M2，DN42_LEG §7 ⑤）
+    #[test]
+    fn aggregate_announce_allowed_when_whitelisted() {
+        let mut reg = Registry::new(1);
+        let signer = XorSigner { key: 0x5a };
+        reg.add_auth_key("ak-r", AuthKeyPolicy::Reusable);
+        reg.set_announce_whitelist(vec![
+            Prefix::parse("172.20.0.0/14").unwrap(),
+            Prefix::parse("fd00::/8").unwrap(),
+        ]);
+        let out = reg
+            .register(
+                "ak-r",
+                &key(1),
+                0,
+                vec!["172.20.0.0/14".into(), "fd00::/8".into()],
+                1,
+                &signer,
+            )
+            .unwrap();
+        assert_eq!(out, RegisterOutcome::NewNode(1));
     }
 
     #[test]

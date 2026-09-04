@@ -1,6 +1,6 @@
 //! dn42 leg 适配（DN42_LEG §2/§5）：peer 会话任务编排 + 路由注入 + 数据面接驳。
 //! - 路由事件 → 用户态路由引擎 LPM（source=Dn42, via=peer 名，ROUTE_ENGINE §3）
-//! - 隧道明文包 → LAN 侧出口（v1：对端回程流量；leg→leg 转发属 M2）
+//! - 隧道明文包 → 跨腿 transit 裁决（M2）：mesh 路由命中回 mesh，否则 LAN 侧出口
 //! - LAN 侧 dn42 路由命中 → 包经 leg 出站通道进隧道
 
 use super::*;
@@ -195,7 +195,11 @@ impl Node {
             }
         }
         for pkt in inbound {
-            self.write_lan(&pkt).await;
+            // 回程 transit（M2）：dst 命中 mesh 路由且有会话即回 mesh（dn42 主机 → mesh 节点），
+            // 否则写 TUN（本节点自身会话的回程，行为不变）
+            if !self.forward_transit(&pkt, false).await {
+                self.write_lan(&pkt).await;
+            }
         }
     }
 
@@ -210,8 +214,13 @@ mod tests {
     use crate::config::Config as NodeConfig;
     use landscape_rill_core::route::Prefix;
 
-    /// 构造带假 leg 的 Node（无 tun；事件/明文通道由测试持有）
-    async fn node_with_leg() -> (Node, mpsc::Sender<Dn42RouteEvent>, mpsc::Sender<Vec<u8>>) {
+    /// 构造带假 leg 的 Node（无 tun；事件/明文/出站通道由测试持有）
+    async fn node_with_leg() -> (
+        Node,
+        mpsc::Sender<Dn42RouteEvent>,
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
         let cfg = NodeConfig {
             coordinator_url: "https://coord.test:8443".into(),
             auth_key: "lrk-lab-1735689600-deadbeef".into(),
@@ -238,7 +247,15 @@ mod tests {
             plaintext: pt_rx,
             established: false,
         });
-        (node, ev_tx, pt_tx)
+        (node, ev_tx, pt_tx, _out_rx)
+    }
+
+    /// 最小 IPv4 包（头 20 字节；校验和不参与转发裁决）
+    fn v4_packet(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
+        let mut p = vec![0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0];
+        p.extend_from_slice(&src);
+        p.extend_from_slice(&dst);
+        p
     }
 
     fn learned(cidr: &str) -> Dn42RouteEvent {
@@ -271,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_up_injects_peer_tunnel_routes() {
-        let (mut node, ev_tx, _pt) = node_with_leg().await;
+        let (mut node, ev_tx, _pt, _out) = node_with_leg().await;
         ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
         node.pump_dn42().await;
         assert!(node.dn42_peers[0].established());
@@ -288,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn learned_then_withdrawn_roundtrip() {
-        let (mut node, ev_tx, _pt) = node_with_leg().await;
+        let (mut node, ev_tx, _pt, _out) = node_with_leg().await;
         ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
         ev_tx.send(learned("172.20.100.0/24")).await.unwrap();
         node.pump_dn42().await;
@@ -308,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_down_purges_all_dn42_routes() {
-        let (mut node, ev_tx, _pt) = node_with_leg().await;
+        let (mut node, ev_tx, _pt, _out) = node_with_leg().await;
         ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
         ev_tx.send(learned("172.20.100.0/24")).await.unwrap();
         node.pump_dn42().await;
@@ -324,7 +341,7 @@ mod tests {
 
     #[tokio::test]
     async fn plaintext_channel_drained_by_pump() {
-        let (mut node, _ev, pt) = node_with_leg().await;
+        let (mut node, _ev, pt, _out) = node_with_leg().await;
         pt.send(vec![0x45, 0, 0, 20]).await.unwrap();
         node.pump_dn42().await;
         // 无 tun 时 write_lan 为 no-op，但通道必须被消费（防堆积）
@@ -332,5 +349,51 @@ mod tests {
             node.dn42_peers[0].try_recv_plaintext(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn transit_mesh_to_dn42_via_established_leg() {
+        let (mut node, ev_tx, _pt, mut out_rx) = node_with_leg().await;
+        ev_tx.send(Dn42RouteEvent::SessionUp).await.unwrap();
+        ev_tx.send(learned("172.20.100.0/24")).await.unwrap();
+        node.pump_dn42().await;
+        let pkt = v4_packet([10, 0, 0, 1], [172, 20, 100, 9]);
+        // mesh 入站 + dn42 路由命中 → 出隧道，出站通道收到原包
+        assert!(node.forward_transit(&pkt, true).await);
+        assert_eq!(out_rx.recv().await.unwrap(), pkt);
+        // dn42 入站带 dn42 路由命中 → 不 transit（防环：dn42→dn42 禁止）
+        assert!(!node.forward_transit(&pkt, false).await);
+    }
+
+    #[tokio::test]
+    async fn transit_mesh_ingress_requires_established_leg() {
+        let (mut node, _ev, _pt, _out) = node_with_leg().await;
+        // leg 未建立：路由在但 reachable 谓词失败 → 回退本地投递
+        node.engine.insert(RouteEntry {
+            prefix: Prefix::parse("172.20.100.0/24").unwrap(),
+            source: RouteSource::Dn42,
+            via: RouteVia::Dn42("peer-t".into()),
+            metric: None,
+        });
+        let pkt = v4_packet([10, 0, 0, 1], [172, 20, 100, 9]);
+        assert!(!node.forward_transit(&pkt, true).await);
+        // 组播永不 transit（广播帧维持写 TUN 泛洪语义）
+        let mut mcast = v4_packet([10, 0, 0, 1], [224, 0, 0, 1]);
+        mcast[15] = 224;
+        assert!(!node.forward_transit(&mcast, true).await);
+    }
+
+    #[tokio::test]
+    async fn transit_dn42_to_mesh_requires_session() {
+        let (mut node, _ev, _pt, _out) = node_with_leg().await;
+        // mesh 路由在但无会话 → false（回退写 TUN）
+        node.engine.insert(RouteEntry {
+            prefix: Prefix::parse("10.42.0.0/24").unwrap(),
+            source: RouteSource::Mesh,
+            via: RouteVia::Mesh(2),
+            metric: None,
+        });
+        let pkt = v4_packet([172, 20, 100, 9], [10, 42, 0, 5]);
+        assert!(!node.forward_transit(&pkt, false).await);
     }
 }

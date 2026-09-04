@@ -279,13 +279,19 @@ impl Node {
         let (host, port) = Self::parse_url(&cfg.coordinator_url)?;
         let ca = std::fs::read(&cfg.ca_cert_path)
             .map_err(|e| std::io::Error::new(e.kind(), format!("ca: {}", e)))?;
+        let mut announce_routes = cfg.announce_routes.clone();
+        // dn42 聚合公告（M2，DN42_LEG §7 ③）：opt-in 打开即并进注册 routes[]，
+        // 与 LAN 公告同通道同 fail-closed 语义（coord 白名单 covered-by 放行）
+        if let Some(dn42) = &cfg.dn42 {
+            announce_routes.extend(dn42.mesh_announces());
+        }
         let leg = MeshLegConfig {
             coordinator_host: host.clone(),
             coordinator_port: port,
             auth_key: cfg.auth_key.clone(),
             static_key: cfg.static_key_seed,
             capabilities: cfg.capabilities,
-            announce_routes: cfg.announce_routes.clone(),
+            announce_routes,
         };
         ControlSession::connect(&host, port, &ca, &leg, node_id).await
     }
@@ -497,7 +503,11 @@ impl Node {
                 ev = self.mesh.handle_incoming() => {
                     if let Ok(ev) = ev {
                         if let Some(payload) = self.handle_mesh_event(ev).await {
-                            self.write_lan(&payload).await;
+                            // 跨腿 transit（M2）：dst 命中 dn42 路由且 leg 建立即出隧道，
+                            // 否则写 TUN（本地投递，含组播/广播泛洪语义不变）
+                            if !self.forward_transit(&payload, true).await {
+                                self.write_lan(&payload).await;
+                            }
                         }
                     }
                 }

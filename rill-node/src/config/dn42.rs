@@ -13,7 +13,22 @@ pub struct Dn42Config {
     pub hold_time: u16,
     /// export stub：只公告的自家前缀
     pub own_prefixes: Vec<String>,
+    /// 注册时把 dn42 聚合网段公告进 mesh（opt-in，DN42_LEG §7 ③/⑤）：本节点成为
+    /// 全网 dn42 出口；需 coord 白名单放行（covered-by），否则注册整体失败
+    /// （与 LAN 公告同 fail-closed 语义）
+    pub announce_to_mesh: bool,
     pub peers: Vec<Dn42PeerConfig>,
+}
+
+impl Dn42Config {
+    /// 进 mesh 注册 routes[] 的聚合公告（固定聚合，DN42_LEG §7 ③；
+    /// 逐条 BGP 路由动态上报后置 REQ-065）
+    pub fn mesh_announces(&self) -> Vec<String> {
+        if !self.announce_to_mesh {
+            return Vec::new();
+        }
+        vec!["172.20.0.0/14".into(), "fd00::/8".into()]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +147,7 @@ mod tests {
             bgp_id: Ipv4Addr::new(172, 20, 100, 1),
             hold_time: 90,
             own_prefixes: vec!["172.20.1.0/24".into()],
+            announce_to_mesh: false,
             peers: vec![Dn42PeerConfig {
                 name: "peer-r".into(),
                 endpoint: "192.168.243.10:51820".parse().unwrap(),
@@ -148,6 +164,14 @@ mod tests {
                 max_prefixes: Some(1000),
             }],
         }
+    }
+
+    #[test]
+    fn mesh_announces_opt_in_gate() {
+        let mut cfg = valid_dn42();
+        assert!(cfg.mesh_announces().is_empty());
+        cfg.announce_to_mesh = true;
+        assert_eq!(cfg.mesh_announces(), vec!["172.20.0.0/14", "fd00::/8"]);
     }
 
     #[test]

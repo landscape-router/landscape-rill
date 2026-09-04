@@ -59,6 +59,7 @@ pub(crate) fn dn42_config_from_file(d: &crate::Dn42File) -> std::io::Result<Dn42
         bgp_id: d.bgp_id.parse().map_err(|e| bad(format!("bgp_id: {e}")))?,
         hold_time: d.hold_time,
         own_prefixes: d.own_prefixes.clone(),
+        announce_to_mesh: d.announce_to_mesh,
         peers,
     })
 }

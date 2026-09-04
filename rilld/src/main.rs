@@ -164,6 +164,8 @@ struct Dn42File {
     hold_time: u16,
     #[serde(default)]
     own_prefixes: Vec<String>,
+    #[serde(default)]
+    announce_to_mesh: bool,
     peers: Vec<Dn42PeerFile>,
 }
 

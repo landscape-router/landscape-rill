@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# dn42 e2e 场景断言（DNL-01~07，DN42_LEG §7）：
-#   peer-r = 内核 WG + FRR；node-a = lrill dn42 leg（无 coordinator）
+# dn42 e2e 场景断言（DN42_LEG §7）：
+#   peer-r = 内核 WG + FRR；node-a = lrill dn42 leg（M2 mesh 出口）
+#   coord + node-b = mesh 侧（DNL-14/15：全网出口 transit + 跨腿仲裁）
 #   DNL-01 WG 握手 / DNL-02 BGP Established / DNL-03 路由学习 + 双向转发 /
 #   DNL-04 export stub / DNL-05 import policy 负向 / DNL-06 撤销收敛 / DNL-07 会话故障恢复
 set -euo pipefail
@@ -20,6 +21,24 @@ wait_log_inc() { # $1=模式 $2=快照 $3=超时秒
   done
   return 1
 }
+
+echo "==> M2 拓扑准备：node-b 内核路由（TUN 入口）+ 仲裁目标地址"
+for i in $(seq 1 30); do
+  docker exec mesh-node-b ip link show land0 >/dev/null 2>&1 && break
+  sleep 1
+done
+docker exec mesh-node-b ip link show land0 >/dev/null
+# 内核 → TUN 入口路由（用户态 LPM 裁决前的内核侧投递）
+docker exec mesh-node-b ip route replace 172.20.0.0/14 dev land0
+docker exec mesh-node-b ip route replace 10.42.0.0/24 dev land0
+docker exec mesh-node-b ip -6 route replace fd00:2::/64 dev land0 2>/dev/null || true
+# 仲裁目标：172.21.5.1 落 node-b 本机（mesh 路径回包；dn42 路径 peer 黑洞）
+docker exec mesh-node-b ip addr add 172.21.5.1/32 dev lo 2>/dev/null || true
+for i in $(seq 1 30); do
+  docker exec mesh-node-a ip link show land0 >/dev/null 2>&1 && break
+  sleep 1
+done
+docker exec mesh-node-a ip route replace 172.21.5.0/24 dev land0
 
 echo "==> DNL-01: boringtun ⇄ 内核 WG 握手"
 for i in $(seq 1 20); do
@@ -343,7 +362,6 @@ else
   exit 1
 fi
 
-echo "PASS: dn42 e2e 全部断言通过（DNL-01~11）"
 
 echo "==> DNL-12: 表规模收敛（402 条公告，dn42 真实表量级）"
 PFX=0
@@ -401,4 +419,41 @@ else
   exit 1
 fi
 
-echo "PASS: dn42 e2e 全部断言通过（DNL-01~13）"
+echo "==> DNL-14: M2 全网出口（node-b 经 mesh 借道 node-a 出 dn42）"
+B14=0
+for i in $(seq 1 45); do
+  if docker exec mesh-node-b ping -c2 -W2 172.20.100.100 >/dev/null 2>&1; then
+    B14=1
+    break
+  fi
+  sleep 2
+done
+T_OUT=$(logs mesh-node-a | grep -c "transit mesh->dn42: 172.20.100.100" || true)
+T_BACK=$(logs mesh-node-a | grep -c "transit dn42->mesh: 10.88.0.1" || true)
+if [ "$B14" = "1" ] && [ "${T_OUT:-0}" -ge 1 ] && [ "${T_BACK:-0}" -ge 1 ]; then
+  echo "PASS: DNL-14 node-b→peer lo 双向 transit（去程/回程日志 $T_OUT/$T_BACK）"
+else
+  echo "FAIL: DNL-14 mesh 出口 transit 失败 (ping=$B14 out=$T_OUT back=$T_BACK)"
+  exit 1
+fi
+
+echo "==> DNL-15: 跨腿仲裁（172.21.5.0/24 mesh 与 dn42 同长 → mesh 优先）"
+# node-a 若经历 DNL-09 重启，prep 期内核路由已随 tun 重建抹掉——使用点就近补加
+docker exec mesh-node-a ip route replace 172.21.5.0/24 dev land0 2>/dev/null || true
+LEARN15=$(logs mesh-node-a | grep -c "dn42 learned 172.21.5.0/24" || true)
+A15=0
+for i in $(seq 1 45); do
+  if docker exec mesh-node-a ping -c2 -W2 172.21.5.1 >/dev/null 2>&1; then
+    A15=1
+    break
+  fi
+  sleep 2
+done
+if [ "$A15" = "1" ] && [ "${LEARN15:-0}" -ge 1 ]; then
+  echo "PASS: DNL-15 mesh 优先仲裁获证（dn42 同长路由在表且该路径为黑洞，回包只能来自 mesh）"
+else
+  echo "FAIL: DNL-15 仲裁异常 (ping=$A15 learned=$LEARN15)"
+  exit 1
+fi
+
+echo "PASS: dn42 e2e 全部断言通过（DNL-01~15）"
