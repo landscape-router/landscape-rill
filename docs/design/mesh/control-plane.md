@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
 
-**版本：v0.13（2026-09-02 修订：REQ-051——§3.14 coord 只读状态端点；REQ-052——§3.15 节点遥测上报）**
+**版本：v0.14（2026-09-03 修订：REQ-066——删除 v1 帧头兼容措辞，§3.11 `path_id=0` = 默认路径（42B 唯一帧头））**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -212,7 +212,7 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 
 ### 3.11 PathService\*（路径服务，v1.5 控制面引入 / v2 数据面生效）
 
-> 借鉴 SCION Path Service 的设计思想（不引入完整 SCION 协议栈）：**netmap 描述"节点是谁"，PathMap 描述"节点之间怎么到"**。v1.5 数据面仍使用 `to_node_id` + `key_dst`（34B 帧头不变），路径信息只用于本地转发表、备用路径选择与多路径负载；v2 帧头携带 `path_id`，数据面按路径转发与授权（交叉引用见 FRAME_HEADER §9）。
+> 借鉴 SCION Path Service 的设计思想（不引入完整 SCION 协议栈）：**netmap 描述"节点是谁"，PathMap 描述"节点之间怎么到"**。数据面帧头恒含 `path_id`（FRAME_HEADER §2.1）：`0` = 默认路径（`to_node_id` + `key_dst` 直连语义），非 0 = 显式路径（数据面按路径转发与授权；交叉引用见 FRAME_HEADER §9）。
 
 **两类数据分离**
 
@@ -243,11 +243,11 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - 自动清理：失效 endpoint 关联路径、拓扑变化后的旧路径、联邦关系取消后的跨网路径、被吊销节点仍持有的旧路径授权
 - 路径过期/撤销 → 节点本地路径表删除 + 相关 `key_path` 作废（§3.11.5）
 
-**path_id 与 key_path（v2 数据面）**
+**path_id 与 key_path（数据面）**
 
-- 帧头新增**固定 8B `path_id`**（v2，34B → 42B），**纳入 route_mac 与 AEAD AAD 输入**（防止成员偷换路径字段）
-- 路径密钥：`key_path = KDF(网络主密钥, path_id, path_epoch)`；v2 的 route_mac 改用 `key_path` 计算（同 FRAME_HEADER §3.1 的 KDF 派生约定）
-- **v1 兼容回退**：`path_id = 0` = 默认路径 = 现有 `key_dst` 语义——v1 帧头不变（隐式 path_id=0），v2 加字段后查表多一个默认分支即可平滑过渡
+- 帧头含**固定 8B `path_id`**（42B 帧头，FRAME_HEADER §2.1），**纳入 route_mac 与 AEAD AAD 输入**（防止成员偷换路径字段）
+- 路径密钥：`key_path = KDF(网络主密钥, path_id, path_epoch)`；显式路径（`path_id≠0`）的 route_mac 用 `key_path` 计算（同 FRAME_HEADER §3.1 的 KDF 派生约定）
+- **默认路径**：`path_id = 0` = 默认路径 = `key_dst` 语义（无路径表/无授权时的直连帧，握手/心跳帧隐式 path_id=0）
 - coordinator 按路径签发 `key_path`，**只发给路径参与者**（源、途经 relay、目的节点）
 - **路径级授权语义**：路径外成员无 `key_path` → 算不出合法 route_mac → 无法向该路径注入/改道流量（对现状的实质加强：现 `key_dst` 全网共享，任何成员可伪造发往任意目的地的帧头）
 - **边界**：`key_path` 是路径级授权**不是源认证**——路径内成员仍可伪造 `from_node_id`（信任域从"全网"收窄到"路径参与者"），源认证仍由 AEAD + 握手层身份绑定兜底（FRAME_HEADER §3.1/§2.3）
@@ -257,7 +257,7 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 **路径 = 路径级 ACL（与 §3.10 衔接）**
 
 - 控制面"发不发某条路径给你"本身即策略：coordinator 在 PathResponse 签发时按组/网络过滤 → **路径集合 = ACL**（单网络多租户组隔离的加密强版本——相比基于明文源/目的 ID 的中继侧组对检查，路径授权加密绑定参与资格，成员无法伪造源字段绕过）
-- v1 恒放行的策略检查点（ROUTE_ENGINE §2）在 v2 变为"帧使用的路径是否合法"——relay 侧可执法（校验 key_path），因为路径授权绑定了参与资格
+- 原先恒放行的策略检查点（ROUTE_ENGINE §2）变为"帧使用的路径是否合法"——relay 侧可执法（校验 key_path），因为路径授权绑定了参与资格
 - 组级隔离开放时（v2）：probe/打洞信令与 PathProbe 同样按 (source_groups, destination_groups) 门控（v1 probe 无认证为有意设计，CONNECTIVITY §4.3）
 
 **联邦衔接（v2+）**
@@ -265,10 +265,10 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - 路径段摘要：跨网只交换边界路径段（远端端点仍只下发桥节点，§7.1 不变）
 - 桥节点跨界用**目标网络的 key_path** 重签 route_mac（FRAME_HEADER §3.1 例外扩展：按路径段重签，一次跨界一次重签）
 
-**v1 钩子（零成本）**
+**落地钩子（零成本）**
 
-- 数据面 v1 **零改动**：path_id 仅控制面语义，34B 帧头不变
-- 控制面：Path\* 消息在现有 Envelope 消息族新增 MsgType（§8 待定落地）
+- 数据面：path_id 已在帧头（FRAME_HEADER §2.1）——无路径表/无授权即按 path_id=0 默认路径直发
+- 控制面：Path\* 消息在现有 Envelope 消息族新增 MsgType（§8 已落地）
 - 能力位：不新增；PathService 属 coordinator 侧实现
 
 ### 3.12 管理面（v1，REQ-038）
@@ -533,7 +533,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 - dn42 路由全网同步（仅边缘持有）
 - 控制面走数据面帧通道（独立 TLS）
 - 增量 netmap（v1 全量 + 版本号，增量后置）
-- 帧内分片（34B 帧不分片；MTU 语义由 MSS clamping + ICMP PTB 承担，ROUTE_ENGINE §6）
+- 帧内分片（42B 帧不分片；MTU 语义由 MSS clamping + ICMP PTB 承担，ROUTE_ENGINE §6）
 
 ### 待定（v1 实现时定）
 
@@ -551,7 +551,7 @@ coordinator 对等互联（双边信任 + 过滤），借鉴 dn42 AS 对等与 X
 - **coord/ 落档（2026-08-15）**：①**Ed25519Signer**（ed25519-dalek 2.2，verify_strict 防弱密钥篡改，确定性签名，无随机源）；②**KeyDist 派生**：`key = derive_key_dst(master_key, node_id)`、`broadcast_key = derive_key_dst(master_key, 0xFFFFFFFF)`（FRAME_HEADER §3.1 语义落地）；③**全网 key 轮换（§5.4）实现 = 主密钥更换 + key_version++**（key_dst 为确定性 KDF，不换主密钥则无新密钥；节点侧宽限期语义待传输层）；④**吊销（§5.5）**：条目移除 + netmap_version++ + key_version++；⑤**netmap 版本管理**：注册/端点变更/relay 列表变更/离线标记均 `version++`，幂等重注册不 bump；⑥**offline 为显式软状态**（I/O 层租约超时喂 `mark_offline`，心跳复活清除），条目保留（§3.4）
 - **传输包络（2026-08-15，legs/mesh 落档）**：TLS 之上 = **4B 大端长度 + Envelope 消息**（`rill-proto/proto/control.proto`：`MsgType` 枚举 10 值 + `Envelope{ msg_type, body }`）；帧长上限 1MB（fail-closed）；控制面连接 = 双向长连接复用（注册/心跳/推送同一连接，§2 连接建立顺序）；消息封包 API（envelope_bytes/write_msg/read_envelope）+ TLS 双向流辅助（客户端预置 CA 路径 = 内网自签 CA 落地；公网 PKI 证书链验证 v1 预留 webpki-roots）；**回环集成测试验证注册全流程**（TLS 双向认证 + Register → RegisterResponse(身份绑定) → NetmapPush(含自身条目)）
 - **注册表/吊销/会话状态机**（§4/§5）：Registry（auth key 生命周期：一次性注册后即弃、可复用保留；同 auth_key+同公钥 → 相同 node_id，幂等 §4.2；同公钥不同能力 → 拒绝）、RevokeList（节点本地，握手/流量拒绝依据）、ClientSession（Unregistered → Registered → Reconnecting 状态机；自吊销 → 回 Unregistered；他吊销 → 仅记录；Reconnecting 可经挑战或同 id 幂等重注册恢复）
-- **路径服务实现落档（2026-08-31，REQ-034，§3.11）**：①**Path\* 消息族**（proto MsgType 11~16）：PathRequest{ destination_node_id, max_candidates } / PathResponse{ destination, candidates[], path_version } / PathUpdate / PathWithdraw / PathProbe{ path_id, nonce, issued_at } / PathProbeResponse；CandidatePath{ path_id, path_epoch, hops[], expires_at, key_path }；②**PathMap**（rill-coord path_service.rs）：(source,dest) → PathSet{ version, candidates }；**候选 = 直连（hops=[dest]）+ 每条 relay 一条中继路径（hops=[relay, dest]）**，上限 max_candidates clamp(2,4)；relay 集合 = 能力位含 relay（0x01）的节点（netmap 变更同步）；③**幂等**：request() 已有未过期路径集直接返回（不重新分配 path_id——避免参与者间路径分叉）；过期按 PATH_DEFAULT_TTL(3600s) 全过期判定重建；④**key_path 参与者全量下发**：`key_path = KDF(主密钥, path_id, path_epoch)` 随 PathResponse/PathUpdate 推给**全部参与者**（source=选择方、dest=接收校验方、relay=转发校验方）——非参与者无 key_path 无法校验/转发（fail-closed）；⑤**推送机制**：v1 无主动推送通道 → 路径事件挂 pending（按 source 归类），随该节点心跳（HEARTBEAT 处理）取走推送（PathUpdate 全量替换/PathWithdraw 单条撤销）；**PathRequest 不回即时响应**（即时写回在并发下不可靠），路径集以心跳推送通道为权威下发路径，请求方幂等刷新直至收敛；⑥**吊销联动**：revoke(node_id) → 撤销所有涉及路径（源/目的 = 整组 Withdraw；仅中继 = 撤该候选保留其余 Update）；⑦**节点侧**（data.rs PathEntry）：路径表（每目标 2~4 候选）+ key_path_table；flow hash（五元组 FNV-1a）选路径；**路径归属**：PathUpdate/PathResponse 带 `source_node_id`，发送路径表只写自己发起的路径（source=自己），作为 dest/relay 参与者仅注入 key_path（防其他源的路径覆盖污染发送选择表）；⑧**v2 数据面**：42B 帧头（FRAME_HEADER §2.7），path_id 纳入 route_mac 与 AAD；`path_id=0` 回退 key_dst；互操作按 netmap `protocol_version`（注册上报）——v2 对 v1 对端恒发 34B v1 帧；⑨**PathProbe 运行时未启用**（协议已定义，活性由数据面心跳承担，v2 挂起）
+- **路径服务实现落档（2026-08-31，REQ-034，§3.11）**：①**Path\* 消息族**（proto MsgType 11~16）：PathRequest{ destination_node_id, max_candidates } / PathResponse{ destination, candidates[], path_version } / PathUpdate / PathWithdraw / PathProbe{ path_id, nonce, issued_at } / PathProbeResponse；CandidatePath{ path_id, path_epoch, hops[], expires_at, key_path }；②**PathMap**（rill-coord path_service.rs）：(source,dest) → PathSet{ version, candidates }；**候选 = 直连（hops=[dest]）+ 每条 relay 一条中继路径（hops=[relay, dest]）**，上限 max_candidates clamp(2,4)；relay 集合 = 能力位含 relay（0x01）的节点（netmap 变更同步）；③**幂等**：request() 已有未过期路径集直接返回（不重新分配 path_id——避免参与者间路径分叉）；过期按 PATH_DEFAULT_TTL(3600s) 全过期判定重建；④**key_path 参与者全量下发**：`key_path = KDF(主密钥, path_id, path_epoch)` 随 PathResponse/PathUpdate 推给**全部参与者**（source=选择方、dest=接收校验方、relay=转发校验方）——非参与者无 key_path 无法校验/转发（fail-closed）；⑤**推送机制**：v1 无主动推送通道 → 路径事件挂 pending（按 source 归类），随该节点心跳（HEARTBEAT 处理）取走推送（PathUpdate 全量替换/PathWithdraw 单条撤销）；**PathRequest 不回即时响应**（即时写回在并发下不可靠），路径集以心跳推送通道为权威下发路径，请求方幂等刷新直至收敛；⑥**吊销联动**：revoke(node_id) → 撤销所有涉及路径（源/目的 = 整组 Withdraw；仅中继 = 撤该候选保留其余 Update）；⑦**节点侧**（data.rs PathEntry）：路径表（每目标 2~4 候选）+ key_path_table；flow hash（五元组 FNV-1a）选路径；**路径归属**：PathUpdate/PathResponse 带 `source_node_id`，发送路径表只写自己发起的路径（source=自己），作为 dest/relay 参与者仅注入 key_path（防其他源的路径覆盖污染发送选择表）；⑧**v2 数据面**：42B 帧头（FRAME_HEADER §2.1；REQ-066 起为唯一帧头，原 §2.7 并入），path_id 纳入 route_mac 与 AAD；`path_id=0` = 默认路径（key_dst）；~~互操作按 netmap `protocol_version` 回退 34B v1 帧~~（REQ-066 删除：未发布无 v1 对端，统一 42B；控制面协商字段保留，仅用于路径服务门控）；⑨**PathProbe 运行时未启用**（协议已定义，活性由数据面心跳承担，v2 挂起）
 - **路径健康落档（2026-08-31，REQ-034，§3.11 快速切换实现）**：①**逐路径入站健康**：收帧按"帧实际到达的上一跳"（UDP 发送者归属节点，直连 = 源节点自身、经中继 = relay 节点）更新路径活性——首跳 == 入站跳的路径 ok（miss 清零）、其余 miss+1；直连帧全路径 ok，经中继的帧证明中继路径存活、直连路径持续 miss（不再"收包全恢复"——中继帧续命直连路径会卡死不对称拓扑切换）；②**端点级活性**：多端点节点（多宿主通告全部）按 `(端点归属, 端点)` 维护 miss，发送排序活性差者置后、同活性轮换上次未用者（UDP 黑洞端点：sendto 成功但包被网关丢弃，无法从收包侧感知，靠无响应信号逐个排除）；③**握手重试驱动 miss**：`HANDSHAKE_RETRY_INTERVAL=2s`——上次握手尝试超时无响应 → 主路径 miss + 端点 miss + 丢弃在途发起状态，下一次调用重新发起 msg1（懒握手在黑洞下永不收敛，重试驱动快速切换收敛）；发起方与响应方均受益：响应方经中继收到重复 msg1 → 入站健康使直连持续 miss → 响应改走中继路径；④**中继日志**：转发节点记录 `relayed frame to <dest>`（e2e 中继证据）
 - **多网络隔离落档（2026-09-01，REQ-010，§1.5 实现）**：①**CoordConfig 形态**：`networks: [{ name, master_key, auth_keys, announce_whitelist }]` 列表（breaking，仓库未发布）；扁平 `network/master_key/auth_keys/announce_whitelist` 移除；storage_path/signing_seed/TLS 共享；②**network_id = FNV-1a(name)**（确定性散列，0 保留）：跨重启/重载稳定（配置顺序变化不漂移），碰撞在配置加载时 fail-closed 拒绝；③**NetworkDomain**（rill-coord/src/domain.rs）：每网络独立 Registry（auth key 空间/白名单/条目）+ KeyManager（主密钥独立 → `key_dst = KDF(网络主密钥, node_id)`，跨网伪造 route_mac 必失配）+ PathService（relay 集合/PathMap 按网络独立）+ relay_list；**node_id 全局唯一分配**（跨网络不冲突，Directory/Liveness 按 node_id 键控）；④**归域**：auth key 内嵌网络（REQ-043），admission 按 key 网络选域，未知网络 → InvalidAuthKey（fail-closed）；配置层 key 放错网络段 → 拒绝启动；⑤**netmap 隔离**：`netmap_snapshot(network_id)` 过滤 + server 按注册节点网络推送（netmap/relay 列表/key_dst 全量只含本网）；⑥**路径同网门控**：跨网络 PathRequest → 空集（netmap 隔离下源本就看不到异网节点）；⑦**持久化 schema v2**：nodes 按 network_id 归域恢复、consumed tombstone 按 key 内嵌网络分组、key_versions/path_maps/relay_lists 按网络分组；⑧**覆盖层调整（SEC-24）**：跨网绑定注入 e2e 需完整恶意客户端（Noise 握手）且 netmap 隔离已结构性阻断攻击面 → 直接验证生产验签路径 `verify_binding`（集成）+ 跨网握手 prologue 拒绝（线级）
 - **消息限速与准入落档（2026-09-01，REQ-047，§3.13）**：①**连接级限速**（rill-mesh server.rs `ConnectionState.msg_bucket` 20/s 突发 40，桶空断连——handle_message 入口收口，handle_connection 与 rilld 连接循环共用）；②**Register 准入**（`CoordinatorServer.register_limiter` per-源 IP 0.5/s 突发 5 + `register_lockout` 失败锁定 5 次 → 30s×2ⁿ 封顶 1h；源 IP 取 TLS peer addr；成功清零、挑战路径不计失败但锁定期间一律拒绝）；③**心跳超频忽略**（`ConnectionState.last_heartbeat` + `heartbeat_min_interval` 默认 5s——server 字段可配，主机测试 300ms 心跳泵需调小）；④**PathRequest pending 上限**（节点 `pending_path_requests` 256 / rill-coord path_service per-source 1024 饱和丢弃）；⑤**观测**（`rate_limited` RateCounter，run_coord 周期摘要 `control rate-limited`——SEC-20 e2e 证据）；错误措辞统一 InvalidAuthKey 原已闭环（coordinator register admission 全映射）

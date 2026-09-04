@@ -1,14 +1,14 @@
 # landscape-rill 系统设计（design）
 
 > 系统行为的**权威描述**（唯一内容载体）。需求/动机见 [../requirements/README.md](../requirements/README.md)，验收见 [../tests/README.md](../tests/README.md)。
-> 版本：v1.1（2026-08-30 重构：分域目录 + 短名注册；§3 目录树：proto 拆分为独立 rill-proto crate，生成代码改 OUT_DIR 不入库）
+> 版本：v1.2（2026-09-03 修订：FRAME_HEADER 注册条目同步 42B 唯一帧头（REQ-066））
 
 ## 1. 域地图
 
 | 域 | 文件 | 短名 | 内容 |
 |---|---|---|---|
 | 总览 | [architecture.md](./architecture.md) | `ARCHITECTURE` | 整体架构、双数据面、数据流、非目标 |
-| mesh | [mesh/frame-header.md](./mesh/frame-header.md) | `FRAME_HEADER` | 34B 帧头、握手/心跳/广播规格、密钥体系 |
+| mesh | [mesh/frame-header.md](./mesh/frame-header.md) | `FRAME_HEADER` | 42B 帧头（含 path_id）、握手/心跳/广播规格、密钥体系 |
 | mesh | [mesh/control-plane.md](./mesh/control-plane.md) | `CONTROL_PLANE` | 控制面协议、状态模型、安全模型、联邦、路径服务 |
 | mesh | [mesh/connectivity.md](./mesh/connectivity.md) | `CONNECTIVITY` | 端点探测、直连验证、三层中继 |
 | legs | [legs/ts2021.md](./legs/ts2021.md) | `TS2021_LEG` | ts2021 兼容接入、headscale 过渡、官方客户端接入 |
@@ -51,7 +51,7 @@ landscape-rill/                  # cargo workspace（virtual）
 │   └── src/
 │       ├── crypto.rs            # HKDF-SHA256 / X25519 / ChaCha20-Poly1305 / route_mac
 │       ├── error.rs             # ErrorId trait + ErrorEnvelope（ERROR_ID）
-│       ├── frame.rs             # 34B 帧头编解码 + AEAD（FRAME_HEADER）
+│       ├── frame.rs             # 42B 帧头编解码 + AEAD（FRAME_HEADER）
 │       ├── handshake.rs         # Noise_XX 握手状态机与会话（FRAME_HEADER §2.4）
 │       ├── route.rs             # LPM 路由表 + fallback（ROUTE_ENGINE）
 │       └── control/             # 注册表/吊销/挑战/会话状态机（CONTROL_PLANE）

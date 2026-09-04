@@ -59,7 +59,7 @@ node-C 容器 ──┘
   - `tenancy`：单 coordinator 双网络隔离（CONTROL_PLANE §1.5，SEC-21~25）——lab
     （node-a1/a2）+ work（node-b1/b2）共用一个 coordinator，全部容器同 bridge（隔离是逻辑的）：
     组内双栈互通、跨网络不可达、netmap 各见本网条目；node-d 持未配置网络（ghost）key 注册被拒；
-    `e2e/mesh/tenancy/forge.py` 向 node-a2 注入伪造 34B 帧（route_mac 用 work 主密钥派生）
+    `e2e/mesh/tenancy/forge.py` 向 node-a2 注入伪造 42B 帧（route_mac 用 work 主密钥派生）
     断言 BadRouteMac 丢弃 + lab 主密钥正对照（越过 route_mac，证明 drop 因密钥不匹配）
 - **e2e 容器网段**（RFC 1918，避开 docker 默认池 172.17-172.30 与 CGNAT）：
   - `192.168.240.0/23`：mesh e2e 专用（direct 用 `192.168.240.0/24`，relay 的
@@ -86,7 +86,7 @@ node-C 容器 ──┘
 | 阶段 | 验证什么 | 状态 |
 |---|---|---|
 | P0 | headscale + derper 部署、官方 app（iOS/Android）入网端到端 | ✅ 已实证（#31，REQ-033；交互式登录真机挂账） |
-| P1 | mesh 骨架：注册/netmap/34B 帧转发/直连+中继/租户隔离 | 🚧 数据面/控制面主机+容器闭环（REQ-022~032）；直连/中继/租户未实现 |
+| P1 | mesh 骨架：注册/netmap/42B 帧转发/直连+中继/租户隔离 | 🚧 数据面/控制面主机+容器闭环（REQ-022~032）；直连/中继/租户未实现 |
 | P2 | 接入：ts2021 客户端接入（subnet router 广播）、dn42 接入（eBGP-lite 会话） | 🚧 dn42 leg 本地闭环 + FRR 互操作 e2e（DNL-01~07，DN42_LEG §7）；ts2021 未开始 |
 | P3 | 融合：路由引擎策略/exit 双向/自研 ts2021 服务端/Raft 切换 | ⏳ 未开始 |
 | P4 | XDP 快速路径与用户态路径一致性 | ⏳ 未开始 |

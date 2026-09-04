@@ -32,10 +32,10 @@ PathService 候选生成现状只产生深度 ≤2 的路径（direct + 单 rela
 ## 验收标准（草案）
 
 - 候选形状/上限/贪心不相交/参与者集合单测（含：两跳链中间 relay 收到且只收到自己参与的候选的 key_path）
-- e2e relay 场景扩展两跳链转发（v2 帧 path_id 逐跳转发断言）
+- e2e relay 场景扩展两跳链转发（路径帧 path_id 逐跳转发断言）
 - 现有单 relay 候选与心跳推送回归全绿
 
 ## 关联
 
-- 依赖：REQ-034（已 merged → CONTROL_PLANE §3.11 / FRAME_HEADER §9；PathService/路径消息族/v2 帧已落地）
+- 依赖：REQ-034（已 merged → CONTROL_PLANE §3.11 / FRAME_HEADER §9；PathService/路径消息族/路径帧已落地）
 - 关联：REQ-062（roster 为图输入；062 落地后池子自动收窄）

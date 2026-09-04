@@ -9,7 +9,7 @@
 - 测试层：单测
 - 状态：`已覆盖`
 - 证据：rill-core/src/frame/
-- 说明：帧头 roundtrip、固定 34B、多字节字段大端、XDP 固定偏移
+- 说明：帧头 roundtrip、固定 42B、多字节字段大端、XDP 固定偏移
 
 ## FRM-02 route_mac 认证（篡改拒绝/ttl 置零）
 
@@ -93,11 +93,11 @@
 
 ## FRM-12 帧格式 golden vectors 与超长帧丢弃
 
-- 关联 REQ：REQ-053
+- 关联 REQ：REQ-053 / REQ-066
 - 测试层：单测
 - 状态：`已覆盖`
 - 证据：rill-core/src/frame/、rill-mesh/src/data/tests.rs
-- 说明：encode/decode/auth_input 与规范逐字节绑定（对称漂移不可能无声通过）；超过接收上限的报文显式丢弃并计数，后续帧不受影响
+- 说明：encode/decode/auth_input 与规范逐字节绑定（对称漂移不可能无声通过）；收端仅接受 version=0x01（非法版本拒绝）；超过接收上限的报文显式丢弃并计数，后续帧不受影响
 
 ## 验收断言
 

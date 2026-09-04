@@ -25,7 +25,7 @@
 - 测试层：docker e2e + 单测
 - 状态：`已覆盖`
 - 证据：e2e/run_e2e.sh、rill-core/src/probe.rs、rill-mesh/src/data/
-- 说明：probe 小包（magic 4B + type 1B + from/to node_id + nonce 4B，独立于 34B 帧）互探；双方对全部候选端点发 PING，PONG nonce 匹配确认 → 端点活性恢复（e2e `probe confirmed direct via`）；单测 `probe_ping_replies_pong_and_matches`
+- 说明：probe 小包（magic 4B + type 1B + from/to node_id + nonce 4B，独立于 42B 帧）互探；双方对全部候选端点发 PING，PONG nonce 匹配确认 → 端点活性恢复（e2e `probe confirmed direct via`）；单测 `probe_ping_replies_pong_and_matches`
 
 ## CON-04 中继兜底（对称 NAT）
 
@@ -33,7 +33,7 @@
 - 测试层：docker e2e
 - 状态：`已覆盖`
 - 证据：e2e/run_e2e.sh、e2e/mesh/probe/、e2e/mesh/relay/、rill-node/src/runtime/
-- 说明：直连失败自动切中继：v2 帧走路径候选（PathService relay 路径 + 挂靠确认），v1 帧端点表追加确认中继端点（直连 miss 轮转回落，`apply_relay_endpoints`）；probe 场景 c→a 经 b 中继 + relay 场景回归
+- 说明：直连失败自动切中继：路径帧（path_id≠0）走路径候选（PathService relay 路径 + 挂靠确认），默认路径帧端点表追加确认中继端点（直连 miss 轮转回落，`apply_relay_endpoints`）；probe 场景 c→a 经 b 中继 + relay 场景回归
 
 ## CON-05 三层中继模型
 
@@ -65,7 +65,7 @@
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
 - 证据：rill-mesh/src/data/、rill-core/src/probe.rs
-- 说明：数据面 UDP 端口按首字节分派：`0x01..=0x0F` → 34B 帧（version 值域）；probe magic（LPRB）→ probe；都不匹配 → 丢弃（fail-closed，CN-02）；单测 `unknown_protocol_dropped`
+- 说明：数据面 UDP 端口按首字节分派：`0x01..=0x0F` → 42B 帧（version 值域，合法值 0x01）；probe magic（LPRB）→ probe；都不匹配 → 丢弃（fail-closed，CN-02）；单测 `unknown_protocol_dropped`
 
 ## CON-09 联邦边界（v2）
 
@@ -89,7 +89,7 @@
 - 测试层：单测 + docker e2e（`MESH_E2E_TRANSPORT=tcp`）
 - 状态：`已覆盖`
 - 证据：rill-mesh/src/data/transport.rs、rill-mesh/src/data/tests.rs、rill-mesh/src/data/relay.rs、e2e/setup.sh
-- 说明：报文语义 trait + UDP/TCP 两档；帧字节断言 `udp_datagram_is_bare_frame_bytes` / `tcp_wire_is_length_prefixed_frame_bytes`；TCP 全栈 `tcp_underlay_handshake_data_and_probe`；relay 择优 `relay_v1_forward_prefers_healthy_endpoint` / `relay_v2_forward_prefers_healthy_endpoint`；断线回喂 `tcp_send_failure_feeds_endpoint_miss`；e2e tcp 直连双栈收敛
+- 说明：报文语义 trait + UDP/TCP 两档；帧字节断言 `udp_datagram_is_bare_frame_bytes` / `tcp_wire_is_length_prefixed_frame_bytes`；TCP 全栈 `tcp_underlay_handshake_data_and_probe`；relay 择优 `relay_default_path_forward_prefers_healthy_endpoint` / `relay_path_forward_prefers_healthy_endpoint`；断线回喂 `tcp_send_failure_feeds_endpoint_miss`；e2e tcp 直连双栈收敛
 
 ## 验收断言
 

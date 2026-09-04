@@ -1,7 +1,7 @@
 # 路由策略引擎（ROUTE_ENGINE）
 
 > landscape-rill 的转发决策核心：单 TUN 汇合点，统一裁决流量走哪条接入。
-> 版本：v0.3（2026-08-31 修订：术语统一——节点类型 / "接入"叫法）｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023
+> 版本：v0.4（2026-09-03 修订：封装开销措辞同步 42B 帧头（MTU 86B，REQ-066））｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023
 
 ## 1. 定位
 
@@ -32,7 +32,7 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 
 | 来源 | 贡献的路由 | via |
 |---|---|---|
-| mesh | netmap 条目 `routes[]`（前缀公告，coordinator 白名单校验，见 CONTROL_PLANE §3.8） | rill 节点（34B 帧） |
+| mesh | netmap 条目 `routes[]`（前缀公告，coordinator 白名单校验，见 CONTROL_PLANE §3.8） | rill 节点（42B 帧） |
 | dn42 | BGP 学到的前缀（**仅 rill ext 持有**，不扩散进 mesh）；**多 rill ext 出口**：rill ext 节点将 dn42 空间（172.20/14、fd00::/8）公告进 mesh（白名单，DN42_LEG §2），内部节点 LPM 精确命中 + 多网关冗余 | dn42 隧道（eBGP 选路结果） |
 | ts2021 | 100.64/10 CGNAT、tailnet subnet routes、exit 默认路由 | tailnet peer（WG） |
 | 本地 | LAN 子网、WAN 默认 | 物理接口 |
@@ -75,7 +75,7 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 
 | 类型 | 机制 | NAT |
 |---|---|---|
-| mesh exit | 经 34B 帧送到 mesh 出口节点，出口节点仅透传 | 不 NAT（WAN NAT 兜底） |
+| mesh exit | 经 42B 帧送到 mesh 出口节点，出口节点仅透传 | 不 NAT（WAN NAT 兜底） |
 | ts2021 exit（使用） | 非本网流量封装发往 tailnet exit peer | 出口侧承担 |
 | ts2021 exit（被用作） | 解包 → 引擎 → tun0 → WAN | WAN NAT |
 | WAN 直连 | 目标非管理 LAN → 出 WAN | 网卡/上游 NAT |
@@ -87,12 +87,12 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 | 链路 | 封装开销（IPv4 估算） |
 |---|---|
 | tun0（LAN 侧） | 0（TUN 设备 MTU，配置决定） |
-| mesh 接入 | 34B 帧头 + 16B tag + 8B UDP + 20B IP = **78B**（IPv6 +20B） |
+| mesh 接入 | 42B 帧头 + 16B tag + 8B UDP + 20B IP = **86B**（IPv6 +20B） |
 | dn42 / ts2021 接入 | WireGuard 开销 ≈ 48B |
 
 ### 6.2 v1 策略（不做分片）
 
-- **不做帧内分片**：34B 帧 `len` 2B 上限维持，分片字段不引入（FRAME_HEADER 决策记录闭环）
+- **不做帧内分片**：42B 帧 `len` 2B 上限维持，分片字段不引入（FRAME_HEADER 决策记录闭环）
 - **tun0 MTU = 保守静态**：`物理出口 MTU - 最大封装开销`——一条安全值，所有路径都通；动态 per-dst PMTU 缓存留 v2
 - **MSS clamping**：tun0 侧改写 TCP SYN 的 MSS 到安全值——覆盖绝大多数流量，零协议改动
 - **ICMP/ICMPv6 PTB 透传**：用户态栈转发 PTB 给 tun0 侧（v1 含 IPv6——IPv6 禁止中间分片，不做则 IPv6 全废）

@@ -29,6 +29,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 
 | REQ | 类型 | 状态 | 优先级 | 提出 | 去向 |
 |---|---|---|---|---|---|
+| [REQ-066](./REQ-066.md) | 决策 | ✅ merged | — | 09-03 | FRAME_HEADER §2.1 |
 | [REQ-060](./REQ-060-existing-path-possession.md) | 需求 | ✅ merged | — | 09-02 | CONTROL_PLANE §2/§3.1/§3.9/§5.1 |
 | [REQ-059](./REQ-059-preauth-parse-alloc.md) | 需求 | ✅ merged | — | 09-02 | FRAME_HEADER §5.1 / CONNECTIVITY §2.1 / CONTROL_PLANE §3.13 |
 | [REQ-058](./REQ-058-revocation-canonical-keying.md) | 需求 | ✅ merged | — | 09-02 | CONTROL_PLANE §3.5/§3.1 |

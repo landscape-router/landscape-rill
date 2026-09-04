@@ -57,7 +57,7 @@
 - 测试层：单测 + 集成
 - 状态：`已覆盖`
 - 证据：rill-mesh/src/framing/、rill-mesh/src/data/
-- 说明：端口分派（CONNECTIVITY §2.1）：首字节 `0x01..=0x0F` → 34B 帧、probe magic（LPRB）→ probe、都不匹配 → 丢弃（fail-closed，CN-02）；单测 `unknown_protocol_dropped`（CON-08）
+- 说明：端口分派（CONNECTIVITY §2.1）：首字节 `0x01..=0x0F` → 42B 帧、probe magic（LPRB）→ probe、都不匹配 → 丢弃（fail-closed，CN-02）；单测 `unknown_protocol_dropped`（CON-08）
 
 ## SEC-08 解析鲁棒性（fail-closed）
 

@@ -118,6 +118,7 @@
 | REQ-058 | SEC-30 | 已覆盖 | rill-core/src/control/registry.rs、e2e/scenarios/recover.sh |
 | REQ-059 | SEC-08 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/、e2e/mesh/preauth_flood/、e2e/scenarios/preauth_flood.sh |
 | REQ-060 | CTL-20 | 已覆盖 | rill-coord/src/coordinator/、rill-mesh/src/control/、e2e/scenarios/recover.sh |
+| REQ-066 | FRM-12 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/tests.rs |
 
 ## 5. 维护规则
 
