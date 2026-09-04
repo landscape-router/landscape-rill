@@ -34,8 +34,8 @@ impl MeshData {
     }
 
     /// 构建加密数据帧（seq 自增）。需会话已建立。
-    /// 返回 (帧, 首跳)：有 v2 路径时首跳 = 路径第一跳（经 relay），帧为 v2 帧头；
-    /// 否则首跳 = None（直连 dest），帧为 v1 帧头（path_id=0 隐式默认路径，v1 兼容）。
+    /// 返回 (帧, 首跳)：有候选路径时首跳 = 路径第一跳（经 relay），帧签 key_path；
+    /// 否则首跳 = None（直连 dest），path_id=0 默认路径（key_dst）。
     pub fn build_data_frame(
         &mut self,
         to: u32,
@@ -48,75 +48,53 @@ impl MeshData {
                 "[mesh] data frame to {} via path {} hops {:?}",
                 to, p.path_id, p.hops
             ),
-            None => debug!("[mesh] data frame to {} via default path (v1)", to),
+            None => debug!("[mesh] data frame to {} via default path", to),
         }
-        let frame = match path {
-            Some(ref p) => self.build_typed_frame_v2(to, p, packet_type::UNICAST, payload)?,
-            None => self.build_typed_frame(to, packet_type::UNICAST, payload)?,
-        };
+        let path_id = path.as_ref().map(|p| p.path_id).unwrap_or(PATH_ID_DEFAULT);
+        let frame = self.build_typed_frame(to, path_id, packet_type::UNICAST, payload)?;
         let first_hop = path.as_ref().and_then(|p| p.hops.first()).copied();
         Ok((frame, first_hop))
     }
 
     /// 心跳帧（AEAD 空载荷，仅已建会话对；CONNECTIVITY §6 / FRAME_HEADER §2.5）。
-    /// 心跳恒走默认路径（v1 帧头 + key_dst）——路径活性由 PathProbe 承担。
+    /// 心跳恒走默认路径（path_id=0 + key_dst）——路径活性由 PathProbe 承担。
     pub fn build_heartbeat_frame(&mut self, to: u32) -> Result<Vec<u8>, SendError> {
-        self.build_typed_frame(to, packet_type::HEARTBEAT, &[])
+        self.build_typed_frame(to, PATH_ID_DEFAULT, packet_type::HEARTBEAT, &[])
     }
 
-    /// v2 数据帧：路径授权（key_path 签发 route_mac），path_id 纳入 AAD（FRAME_HEADER §9）
-    pub(super) fn build_typed_frame_v2(
-        &mut self,
-        to: u32,
-        path: &PathEntry,
-        packet_type: u8,
-        payload: &[u8],
-    ) -> Result<Vec<u8>, SendError> {
-        let session = self.sessions.get_mut(&to).ok_or(SendError::NoSession)?;
-        let key_path = self
-            .key_path_table
-            .get(&path.path_id)
-            .copied()
-            .ok_or(SendError::NoKeyDst)?;
-        let seq = session.next_seq();
-        let header = MeshFrameHeader {
-            version: VERSION2,
-            packet_type,
-            to_node_id: to,
-            from_node_id: self.self_node_id,
-            seq,
-            path_id: path.path_id,
-            ..Default::default()
-        };
-        build_frame(
-            &header,
-            &key_path,
-            &session.keys().tx_key,
-            session.keys().salt,
-            payload,
-        )
-        .map_err(|_| SendError::Aead)
-    }
-
+    /// 会话帧构建：显式路径（path_id≠0）由路径授权 key_path 签 route_mac，
+    /// path_id 纳入 AAD（FRAME_HEADER §2.1）；path_id=0 = 默认路径（key_dst）。
     pub(super) fn build_typed_frame(
         &mut self,
         to: u32,
+        path_id: u64,
         packet_type: u8,
         payload: &[u8],
     ) -> Result<Vec<u8>, SendError> {
         let session = self.sessions.get_mut(&to).ok_or(SendError::NoSession)?;
-        let key_dst = self.key_dst_table.get(&to).ok_or(SendError::NoKeyDst)?;
+        let route_key = if path_id != PATH_ID_DEFAULT {
+            self.key_path_table
+                .get(&path_id)
+                .copied()
+                .ok_or(SendError::NoKeyDst)?
+        } else {
+            self.key_dst_table
+                .get(&to)
+                .copied()
+                .ok_or(SendError::NoKeyDst)?
+        };
         let seq = session.next_seq();
         let header = MeshFrameHeader {
             packet_type,
             to_node_id: to,
             from_node_id: self.self_node_id,
             seq,
+            path_id,
             ..Default::default()
         };
         build_frame(
             &header,
-            key_dst,
+            &route_key,
             &session.keys().tx_key,
             session.keys().salt,
             payload,
@@ -153,7 +131,7 @@ impl MeshData {
         }
     }
 
-    /// 按路径首跳发送（v2）：首跳 = 路径第一跳（relay 或 dest 本身）。
+    /// 按首跳发送：首跳 = 路径第一跳（relay 或 dest 本身），None = 直连 dest。
     /// 多端点按活性排序逐个尝试（黑洞端点靠 miss 置后，见 order_endpoints）。
     pub async fn send_to_node_hop(
         &mut self,
@@ -165,9 +143,12 @@ impl MeshData {
         match self.endpoint_table.get(&hop) {
             Some(addrs) => {
                 let mut ordered = addrs.clone();
-                // v2 帧（版本字节 = 0x02）限定首跳自有端点：非参与者兜底中继
-                // 无法转发 v2，发了必丢（v1 保留兜底语义）
-                if frame.first() == Some(&VERSION2) {
+                // 路径帧（path_id≠0）限定首跳自有端点：非参与者兜底中继
+                // 无法转发路径帧，发了必丢（默认路径帧保留兜底语义）
+                if MeshFrameHeader::decode(frame)
+                    .map(|h| h.path_id != PATH_ID_DEFAULT)
+                    .unwrap_or(false)
+                {
                     self.retain_hop_endpoints(hop, &mut ordered);
                 }
                 self.order_endpoints(hop, to_node_id, &mut ordered);
@@ -345,7 +326,7 @@ impl MeshData {
 
     /// AEAD 解密收尾：已建会话的 UNICAST/HEARTBEAT 帧统一走这里。
     /// 就地解密（REQ-053）：明文写回接收缓冲，freeze 成 Bytes 零拷贝出帧。
-    /// 路由密钥按帧头版本选择：v1 = key_dst（默认路径）；v2 = 该 path_id 的 key_path
+    /// 路由密钥按 path_id 选择：显式路径 = key_path；path_id=0 = key_dst（默认路径）
     pub(super) fn handle_session_frame(
         &mut self,
         from: u32,
@@ -357,7 +338,7 @@ impl MeshData {
                 reason: DropReason::Short,
             };
         };
-        let route_key = if header.version == VERSION2 {
+        let route_key = if header.path_id != PATH_ID_DEFAULT {
             match self.key_path_table.get(&header.path_id) {
                 Some(k) => *k,
                 None => {
@@ -382,7 +363,7 @@ impl MeshData {
             };
         };
         match session.open_in_place(frame, &route_key, Instant::now()) {
-            Ok((h, pt_len)) => {
+            Ok((_, pt_len)) => {
                 if heartbeat && pt_len != 0 {
                     return IncomingEvent::Dropped {
                         reason: DropReason::Aead,
@@ -392,8 +373,7 @@ impl MeshData {
                     IncomingEvent::Heartbeat { from }
                 } else {
                     // 帧头区切离丢弃，明文区 freeze 零拷贝交付（REQ-053）
-                    let hlen = header_len(h.version);
-                    let _ = frame.split_to(hlen);
+                    let _ = frame.split_to(HEADER_LEN);
                     let payload = frame.split_to(pt_len).freeze();
                     IncomingEvent::Data { from, payload }
                 }

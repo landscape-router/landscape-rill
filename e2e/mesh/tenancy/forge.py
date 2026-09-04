@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SEC-22 跨网络伪造 route_mac 注入（CONNECTIVITY §2.1 / FRAME_HEADER §2.2 语义）。
 
-向目标节点 UDP 数据面端口注入一枚 34B v1 帧：route_mac 用指定主密钥派生。
+向目标节点 UDP 数据面端口注入一枚 42B 帧：route_mac 用指定主密钥派生。
 - 负对照（wrong key）：用 work 网络主密钥伪造 → 目标节点必须 BadRouteMac 丢弃
 - 正对照（correct key）：用 lab 网络主密钥（正确）→ 越过 route_mac，死在会话层
   （Aead/Replay/NoSession）——证明 drop 确因密钥不匹配而非脚本 bug
@@ -15,11 +15,12 @@ import socket
 import struct
 import sys
 
-MAGIC_LEN = 0  # 帧注入：非 probe，直接 34B 帧
-HEADER_LEN = 34
+MAGIC_LEN = 0  # 帧注入：非 probe，直接 42B 帧
+HEADER_LEN = 42
 TAG_LEN = 16
 VERSION = 0x01
 PACKET_TYPE_UNICAST = 0x01
+PATH_ID_DEFAULT = 0  # 默认路径（key_dst）
 
 
 def hkdf_extract(salt: bytes, ikm: bytes) -> bytes:
@@ -113,13 +114,14 @@ def build_frame(
 ) -> bytes:
     payload = b"SEC-22-forged-frame\x00\x00\x00\x00\x00"  # 无意义载荷（死在 route_mac）
     hlen_field = len(payload) + TAG_LEN
-    # v1 认证输入 = 帧头[0..18] ttl 置零
+    # 认证输入 = 帧头[0..18]（ttl 置零）|| path_id（8B）
     auth_input = (
         bytes([VERSION, PACKET_TYPE_UNICAST, 0x00, 0x00])
         + struct.pack(">I", to_node_id)
         + struct.pack(">I", from_node_id)
         + struct.pack(">I", seq)
         + struct.pack(">H", hlen_field)
+        + struct.pack(">Q", PATH_ID_DEFAULT)
     )
     mac = route_mac(derive_key_dst(master_key, to_node_id), auth_input)
     header = (
@@ -128,6 +130,7 @@ def build_frame(
         + struct.pack(">I", from_node_id)
         + struct.pack(">I", seq)
         + struct.pack(">H", hlen_field)
+        + struct.pack(">Q", PATH_ID_DEFAULT)
         + mac
     )
     assert len(header) == HEADER_LEN, f"header={len(header)}"

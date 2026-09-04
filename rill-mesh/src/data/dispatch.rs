@@ -5,7 +5,7 @@ use super::*;
 use tracing::debug;
 
 impl MeshData {
-    /// 收帧处理（CONNECTIVITY §2.1 端口分派）：首字节 0x01..=0x0F → 34B 帧；
+    /// 收帧处理（CONNECTIVITY §2.1 端口分派）：首字节 0x01..=0x0F → 42B 帧；
     /// 其余匹配 probe magic → probe 处理；都不匹配 → 丢弃（fail-closed）。
     /// 帧路径：relay 校验 → 按包类型分发（握手/数据/心跳/广播）。
     /// 入站路径记录 + 逐路径活性在分发前更新（帧实际到达的上一跳 = UDP 发送者归属）。
@@ -14,7 +14,7 @@ impl MeshData {
         let (from_addr, mut frame) = self.recv_frame().await?;
         let first = frame.first().copied();
         if matches!(first, Some(b) if (0x01..=0x0F).contains(&b)) {
-            // 34B 帧路径（version 值域 0x01..=0x0F，FRAME_HEADER §2.1）
+            // 42B 帧路径（version 值域 0x01..=0x0F，FRAME_HEADER §2.1）
             self.handle_frame(from_addr, &mut frame).await
         } else if frame.len() >= 4 && frame[..4] == crate::probe::PROBE_MAGIC {
             self.handle_probe(from_addr, &frame).await
@@ -130,7 +130,7 @@ impl MeshData {
                     self.ingress_hop.insert(from, ingress);
                     self.note_endpoint_ok(ingress, from_addr);
                     debug!("[mesh] frame from {} ingress {}", from, ingress);
-                    // v1 直连活性推断（与 v2 apply_ingress_health 同哲学）：
+                    // 直连活性推断（与 apply_ingress_health 同哲学）：
                     // 帧经中继到达 = 发送方直连端点不可达的入站证据 → 直连端点
                     // miss，后续发送排序让位中继兜底端点（纯响应侧无发起重试，
                     // 不降级则回包永远命中黑洞端点）。直连恢复（直连帧到达）

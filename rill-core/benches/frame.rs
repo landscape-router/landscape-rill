@@ -78,7 +78,7 @@ fn bench_frame(c: &mut Criterion) {
 fn bench_seal(c: &mut Criterion) {
     let payload = vec![0x5au8; 1400];
     let h = sample_header(3);
-    let (ai, ai_len) = h.auth_input();
+    let ai = h.auth_input();
     let mut group = c.benchmark_group("aead");
     group.throughput(Throughput::Bytes(1400));
     group.bench_function("seal_current", |b| {
@@ -87,13 +87,13 @@ fn bench_seal(c: &mut Criterion) {
                 black_box(&SESSION),
                 SALT,
                 7,
-                black_box(&ai[..ai_len]),
+                black_box(&ai[..]),
                 black_box(&payload),
             )
         })
     });
     group.bench_function("seal_naive_reference", |b| {
-        b.iter(|| naive_seal(black_box(&ai[..ai_len]), black_box(&payload)))
+        b.iter(|| naive_seal(black_box(&ai[..]), black_box(&payload)))
     });
     group.finish();
 }

@@ -1,7 +1,7 @@
-//! probe 小包编解码（CONNECTIVITY §2/§4，独立于 34B 帧）
+//! probe 小包编解码（CONNECTIVITY §2/§4，独立于 42B 帧）
 //!
 //! 线格式：`magic(4B) + type(1B) + from_node_id(4B) + to_node_id(4B) + nonce(4B) [+ payload]`
-//! - 不走 34B 帧转发路径（会话建立前使用，route_mac 链条不存在）；不经中继转发
+//! - 不走 42B 帧转发路径（会话建立前使用，route_mac 链条不存在）；不经中继转发
 //! - PING（请求）无认证（有意设计，§4.3 安全边界可接受）；PONG 回显 nonce 匹配确认
 //! - coordinator UDP 回显（STUN 式，§2）：PONG 携带 payload = seen 地址（"ip:port" UTF-8）
 //! - node_id = 0 表示 coordinator/未注册身份（节点互探用对方真实 id）

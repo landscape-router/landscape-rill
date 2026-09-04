@@ -73,10 +73,9 @@ impl MeshData {
             };
         }
         match open_frame_in_place(frame, &bkey, &bkey, 0) {
-            Ok((h, payload)) => {
+            Ok((_, payload)) => {
                 let pt_len = payload.len();
-                let hlen = header_len(h.version);
-                let _ = frame.split_to(hlen);
+                let _ = frame.split_to(HEADER_LEN);
                 let payload = frame.split_to(pt_len).freeze();
                 IncomingEvent::Broadcast { from, payload }
             }
@@ -90,7 +89,7 @@ impl MeshData {
     }
 
     /// 广播帧泛洪路径（FRAME_HEADER §2.6）：
-    /// version（已验）→ type=广播 → broadcast_key 存在 → route_mac（bkey）→
+    /// 版本已验（relay）→ type=广播 → broadcast_key 存在 → route_mac（bkey）→
     /// (from, seq) 去重（30s）→ ttl>0 → 原地 ttl-1 泛洪（除自己与源，出口令牌桶限速）；
     /// 自交付由 handle_frame 就地解密（REQ-053：整程零拷贝）。
     pub(super) async fn relay_broadcast(
@@ -108,8 +107,8 @@ impl MeshData {
                 reason: DropReason::NoKeyDst,
             };
         };
-        let (ai, ai_len) = header.auth_input();
-        if landscape_rill_core::crypto::route_mac(&bkey, &ai[..ai_len]) != header.route_mac {
+        let ai = header.auth_input();
+        if landscape_rill_core::crypto::route_mac(&bkey, &ai) != header.route_mac {
             return RelayOutcome::Dropped {
                 reason: DropReason::BadRouteMac,
             };

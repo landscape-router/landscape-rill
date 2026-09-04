@@ -1,4 +1,4 @@
-//! 中继转发（FRAME_HEADER §4）：帧头解析 → version/route_mac 校验 →
+//! 中继转发（FRAME_HEADER §4）：帧头解析 → 版本/route_mac 校验 →
 //! 端点/路径下一跳查表 → ttl 递减转发（不重签 route_mac）
 
 use super::*;
@@ -19,16 +19,18 @@ impl MeshData {
                 }
             }
         };
-        if header.version != VERSION && header.version != VERSION2 {
+        if header.version != VERSION {
             return RelayOutcome::Dropped {
                 reason: DropReason::BadVersion,
             };
         }
         if header.to_node_id == BROADCAST_NODE_ID {
             return self.relay_broadcast(&header, frame).await;
-        } // 路由密钥按帧头版本选择：v2 = 该 path_id 的 key_path（路径级授权，
-          // CONTROL_PLANE §3.11.5——转发节点必须持路径授权才能校验/转发）
-        let route_key = if header.version == VERSION2 {
+        }
+        // 路由密钥按路径选择：显式路径 = 该 path_id 的 key_path（路径级授权，
+        // CONTROL_PLANE §3.11.5——转发节点必须持路径授权才能校验/转发）；
+        // path_id=0 = 默认路径（key_dst）
+        let route_key = if header.path_id != PATH_ID_DEFAULT {
             match self.key_path_table.get(&header.path_id) {
                 Some(k) => *k,
                 None => {
@@ -47,8 +49,8 @@ impl MeshData {
                 }
             }
         };
-        let (ai, ai_len) = header.auth_input();
-        if landscape_rill_core::crypto::route_mac(&route_key, &ai[..ai_len]) != header.route_mac {
+        let ai = header.auth_input();
+        if landscape_rill_core::crypto::route_mac(&route_key, &ai) != header.route_mac {
             return RelayOutcome::Dropped {
                 reason: DropReason::BadRouteMac,
             };
@@ -63,10 +65,10 @@ impl MeshData {
                 reason: DropReason::TtlExpired,
             };
         }
-        // 转发下一跳节点：v2 路径 = 本节点在 hops 中的后继，v1 = 直连目标。
+        // 转发下一跳节点：显式路径 = 本节点在 hops 中的后继，默认路径 = 直连目标。
         // 端点按活性排序逐个尝试（REQ-054 决策 6：relay 侧同样择优，
         // 修复此前固定取 .first() 的缺口）
-        let next_node = if header.version == VERSION2 {
+        let next_node = if header.path_id != PATH_ID_DEFAULT {
             self.path_next_node(&header)
         } else {
             Some(header.to_node_id)
@@ -84,8 +86,8 @@ impl MeshData {
                 };
             }
         };
-        // v2 帧限定下一跳自有端点（非参与者兜底中继无法转发，见 paths.rs）
-        if header.version == VERSION2 {
+        // 路径帧限定下一跳自有端点（非参与者兜底中继无法转发，见 paths.rs）
+        if header.path_id != PATH_ID_DEFAULT {
             self.retain_hop_endpoints(next_node, &mut candidates);
         }
         self.order_endpoints(next_node, header.to_node_id, &mut candidates);
@@ -106,7 +108,7 @@ impl MeshData {
         }
     }
 
-    /// v2 路径转发下一跳节点：本节点在路径 hops 中的后继。
+    /// 路径转发下一跳节点：本节点在路径 hops 中的后继。
     /// 先查发送选择表（source = 自己），未命中查转发表（非自源路径中
     /// 自己是 hops 参与者的条目——中继转发的正常形态）
     pub(super) fn path_next_node(&self, header: &MeshFrameHeader) -> Option<u32> {

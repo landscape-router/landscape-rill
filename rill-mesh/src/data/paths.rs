@@ -1,4 +1,4 @@
-//! v2 路径面（CONTROL_PLANE §3.11 节点侧）：路径表 + key_path 表 +
+//! 路径面（CONTROL_PLANE §3.11 节点侧）：路径表 + key_path 表 +
 //! 路径/端点两级活性（miss 计数、入站跳归属、发送排序）
 
 use super::*;
@@ -151,11 +151,11 @@ impl MeshData {
         self.relay_endpoint_owner = owners;
     }
 
-    /// v2 路径帧端点过滤：路径授权逐跳签发，首跳之外的中继兜底端点
-    /// 收到 v2 帧无法校验/转发（NoKeyDst/NoEndpoint 必丢）——发送与转发
-    /// 目标必须限定首跳节点自有端点；v1 帧不受限（任意中继可按 to_node 转发）。
-    /// 兜底端点混入候选列表时，last-used 轮换会让 v2 帧相位锁定在死端点
-    /// （probe CI：回包全灭而心跳存活——v1 可经兜底中继转发，v2 不行）
+    /// 路径帧端点过滤：路径授权逐跳签发，首跳之外的中继兜底端点
+    /// 收到路径帧无法校验/转发（NoKeyDst/NoEndpoint 必丢）——发送与转发
+    /// 目标必须限定首跳节点自有端点；默认路径帧不受限（任意中继可按 to_node 转发）。
+    /// 兜底端点混入候选列表时，last-used 轮换会让路径帧相位锁定在死端点
+    /// （probe CI：回包全灭而心跳存活——默认路径帧可经兜底中继转发，路径帧不行）
     pub(super) fn retain_hop_endpoints(&self, hop: u32, addrs: &mut Vec<SocketAddr>) {
         addrs.retain(|a| self.relay_endpoint_owner.get(a).is_none_or(|&o| o == hop));
     }

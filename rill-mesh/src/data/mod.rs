@@ -1,9 +1,9 @@
 use bytes::{Bytes, BytesMut};
 use landscape_rill_coord::coordinator::CAPABILITY_BROADCAST;
 use landscape_rill_core::frame::{
-    build_frame, build_handshake_frame, decrement_ttl, frame_payload, header_len,
-    open_frame_in_place, packet_type, MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN,
-    HEADER_LEN_V2, TAG_LEN, VERSION, VERSION2,
+    build_frame, build_handshake_frame, decrement_ttl, frame_payload, open_frame_in_place,
+    packet_type, MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, PATH_ID_DEFAULT,
+    TAG_LEN, VERSION,
 };
 use landscape_rill_core::handshake::{
     HandshakeContext, HandshakeError, HandshakeInitiator, HandshakeResponder, Session,
@@ -37,12 +37,12 @@ pub const FLOOD_SEEN_TTL: Duration = Duration::from_secs(30);
 pub const PATH_HEALTH_MISS_LIMIT: u32 = 3;
 /// 丢帧摘要周期（LOGGING §5）：事件只计数不逐条输出，每周期最多 1 条摘要
 pub const DROP_STATS_PERIOD: Duration = landscape_rill_core::rate::RATE_SUMMARY_PERIOD;
-/// 数据面接收缓冲上限（REQ-053）：MTU(1420) + v2 帧头(42) + TAG(16) + 余量。
+/// 数据面接收缓冲上限（REQ-053）：MTU(1420) + 帧头(42) + TAG(16) + 余量。
 /// 超长报文被内核截断 → 显式丢弃计数（原为 65535 全收后解析失败丢弃，净效果相同）；
 /// 缓冲跨包复用后尺寸只影响常驻内存，不影响每包开销。
 pub const MAX_FRAME: usize = 2048;
 // 编译期确保上限覆盖最大合法帧（MTU 数据帧与全部握手帧）
-const _: () = assert!(MAX_FRAME >= HEADER_LEN_V2 + TAG_LEN + 1420);
+const _: () = assert!(MAX_FRAME >= HEADER_LEN + TAG_LEN + 1420);
 const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG1_PAYLOAD_LEN);
 const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG2_PAYLOAD_LEN);
 const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG3_PAYLOAD_LEN);
@@ -57,7 +57,7 @@ fn unix_seconds() -> u64 {
 /// coordinator 公钥持有者注入的身份绑定校验器（与签名算法解耦）
 pub type BindingVerifier = dyn Fn(u32, &[u8; 32], &[u8]) -> bool + Send + Sync;
 
-/// v2 候选路径条目（CONTROL_PLANE §3.11）：hops 显式（direct = [dest]，relay = [relay, dest]）
+/// 候选路径条目（CONTROL_PLANE §3.11）：hops 显式（direct = [dest]，relay = [relay, dest]）
 #[derive(Debug, Clone)]
 pub struct PathEntry {
     pub path_id: u64,
@@ -102,11 +102,11 @@ pub struct MeshData {
     peer_capabilities: HashMap<u32, u32>,
     /// 泛洪出口令牌桶（发送与转发共用）
     flood_bucket: TokenBucket,
-    /// v2 路径授权密钥：path_id → key_path（coordinator 签发，只发路径参与者）
+    /// 路径授权密钥：path_id → key_path（coordinator 签发，只发路径参与者）
     key_path_table: HashMap<u64, [u8; 32]>,
-    /// v2 候选路径表：dest → 候选路径集合（2~4 条）
+    /// 候选路径表：dest → 候选路径集合（2~4 条）
     path_table: HashMap<u32, Vec<PathEntry>>,
-    /// v2 转发路径表：path_id → hops（非自源路径中自己是 hops 参与者的条目；
+    /// 转发路径表：path_id → hops（非自源路径中自己是 hops 参与者的条目；
     /// 中继转发查表用，与发送选择表分离——按 path_id 全局查，不按 dest）
     forward_paths: HashMap<u64, PathEntry>,
     /// 主路径健康 miss 计数（快速切换，CONTROL_PLANE §3.11）
@@ -402,7 +402,7 @@ impl MeshData {
         self.initiators.remove(&peer);
     }
 
-    /// 到目的的首跳（候选路径第一条 hops[0]）；无路径表 = 直发（v1 语义）
+    /// 到目的的首跳（候选路径第一条 hops[0]）；无路径表 = 直发（默认路径）
     pub fn path_first_hop(&mut self, dest: u32) -> Option<u32> {
         self.pick_path(dest, 0)
             .and_then(|p| p.hops.first().copied())

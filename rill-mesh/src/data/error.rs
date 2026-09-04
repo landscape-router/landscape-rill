@@ -16,7 +16,7 @@ pub enum DropReason {
     UnsupportedType,
     Duplicate,
     RateLimited,
-    /// 非 34B 帧且非 probe（CONNECTIVITY §2.1 分派失败）
+    /// 非 42B 帧且非 probe（CONNECTIVITY §2.1 分派失败）
     UnknownProtocol,
 }
 

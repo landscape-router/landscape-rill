@@ -4,7 +4,7 @@
 use super::*;
 
 /// 挂靠中继条目（CONNECTIVITY §5）：端点 + 归属节点（netmap 端点匹配）+ 确认状态。
-/// confirmed = 节点侧 probe 确认可达（CON-04 挂靠）；v1 帧端点表追加为回退候选
+/// confirmed = 节点侧 probe 确认可达（CON-04 挂靠）；默认路径帧端点表追加为回退候选
 #[derive(Debug, Clone)]
 pub(crate) struct RelayEntry {
     pub endpoint: SocketAddr,
@@ -62,7 +62,7 @@ impl Node {
         }
     }
 
-    /// 中继挂靠（CONNECTIVITY §5，CON-04）：v1 帧端点表 = 直连端点 ++ 确认中继端点
+    /// 中继挂靠（CONNECTIVITY §5，CON-04）：默认路径帧端点表 = 直连端点 ++ 确认中继端点
     /// （直连 miss 轮转自然落到中继；miss_endpoint 逐个排除）
     pub(super) fn apply_relay_endpoints(&mut self) {
         let relays: Vec<SocketAddr> = self

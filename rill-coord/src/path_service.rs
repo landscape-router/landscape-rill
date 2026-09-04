@@ -249,7 +249,7 @@ impl PathService {
     }
 
     fn alloc_path_id(&mut self) -> u64 {
-        // path_id=0 保留（默认路径回退，v1 兼容）；从 1 起分配
+        // path_id=0 保留（默认路径）；从 1 起分配
         self.seq += 1;
         self.seq
     }

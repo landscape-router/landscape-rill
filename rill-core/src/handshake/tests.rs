@@ -320,7 +320,7 @@ fn session_open_in_place_parity_and_buffer_intact_on_failure() {
     let (h, vec_payload) = a_sess.open(&frame, &key_dst, now).unwrap();
     let mut buf = frame.clone();
     let (h2, pt_len) = b_sess.open_in_place(&mut buf, &key_dst, now).unwrap();
-    let hlen = crate::frame::header_len(h2.version);
+    let hlen = crate::frame::HEADER_LEN;
     assert_eq!(h, h2);
     assert_eq!(vec_payload, &buf[hlen..hlen + pt_len]);
     // 帧头区不受解密影响

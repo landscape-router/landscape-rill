@@ -1,6 +1,6 @@
 use super::*;
 use landscape_rill_core::crypto::{derive_key_dst, KEY_DST_LEN};
-use landscape_rill_core::frame::{build_frame, packet_type, HEADER_LEN_V2, TAG_LEN, VERSION2};
+use landscape_rill_core::frame::{build_frame, packet_type, TAG_LEN, VERSION};
 use landscape_rill_core::handshake::{BINDING_LEN, SESSION_KEY_LEN};
 use tokio::net::UdpSocket;
 
@@ -633,8 +633,8 @@ async fn unsupported_type_dropped() {
     let mut frame = vec![0u8; HEADER_LEN + 4];
     let mut h = header.clone();
     h.len = 4;
-    let (ai, ai_len) = h.auth_input();
-    h.route_mac = landscape_rill_core::crypto::route_mac(&node_key(2), &ai[..ai_len]);
+    let ai = h.auth_input();
+    h.route_mac = landscape_rill_core::crypto::route_mac(&node_key(2), &ai);
     h.encode(&mut frame);
     frame[HEADER_LEN..].copy_from_slice(b"ctrl");
     a.send_to_node(2, &frame).await.unwrap();
@@ -694,16 +694,16 @@ async fn tampered_frame_dropped() {
     );
 }
 
-// ==================== v2 路径（CONTROL_PLANE §3.11 / FRAME_HEADER §9） ====================
+// ==================== 路径数据面（CONTROL_PLANE §3.11 / FRAME_HEADER §9） ====================
 
 fn path_key(_path_id: u64) -> [u8; KEY_DST_LEN] {
     [0x77; 32] // 测试用 key_path（真实 = derive_key_path）
 }
 
 #[tokio::test]
-async fn v2_data_frame_roundtrip_via_direct_path() {
+async fn path_data_frame_roundtrip_via_direct_path() {
     let (mut a, mut b) = setup_pair().await;
-    // 完整握手（v1 帧）
+    // 完整握手
     let msg1 = a.initiate_handshake(2).unwrap().unwrap();
     a.send_to_node(2, &msg1).await.unwrap();
     assert_eq!(
@@ -728,11 +728,11 @@ async fn v2_data_frame_roundtrip_via_direct_path() {
     a.set_paths(2, vec![path.clone()]);
     a.set_key_path(0x100, path_key(0x100));
     b.set_key_path(0x100, path_key(0x100));
-    // v2 数据帧（42B + path_id）
+    // 路径数据帧（path_id 非零）
     let (frame, first_hop) = a.build_data_frame(2, b"hello path", 0x1234).unwrap();
     assert_eq!(first_hop, Some(2));
-    assert_eq!(frame.len(), HEADER_LEN_V2 + 10 + TAG_LEN);
-    assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION2);
+    assert_eq!(frame.len(), HEADER_LEN + 10 + TAG_LEN);
+    assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION);
     assert_eq!(MeshFrameHeader::decode(&frame).unwrap().path_id, 0x100);
     a.send_to_node_hop(2, first_hop, &frame).await.unwrap();
     // B 收帧：path_id 选 key_path 校验 + 解密
@@ -746,7 +746,7 @@ async fn v2_data_frame_roundtrip_via_direct_path() {
 }
 
 #[tokio::test]
-async fn v2_frame_without_key_path_dropped() {
+async fn path_frame_without_key_path_dropped() {
     // path_id 无对应 key_path → NoKeyDst（fail-closed）
     let (mut a, mut b) = setup_pair().await;
     let msg1 = a.initiate_handshake(2).unwrap().unwrap();
@@ -774,8 +774,8 @@ async fn v2_frame_without_key_path_dropped() {
 }
 
 #[tokio::test]
-async fn v2_frame_forwarded_through_relay_path() {
-    // A(1) → R(3) → B(2)：v2 帧经 relay 按路径转发（key_path 校验）
+async fn path_frame_forwarded_through_relay_path() {
+    // A(1) → R(3) → B(2)：路径帧经 relay 按路径转发（key_path 校验）
     // 握手直连（真实场景 netmap 全量互连）；数据面走 relay 路径
     let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
         .await
@@ -834,10 +834,10 @@ async fn v2_frame_forwarded_through_relay_path() {
     }
     a.set_paths(2, vec![path.clone()]);
     r.set_paths(2, vec![path.clone()]);
-    // A 发 v2 帧（首跳 = R）
+    // A 发路径帧（首跳 = R）
     let (frame, first_hop) = a.build_data_frame(2, b"via relay", 0xabc).unwrap();
     assert_eq!(first_hop, Some(3));
-    assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION2);
+    assert_eq!(MeshFrameHeader::decode(&frame).unwrap().version, VERSION);
     a.send_to_node_hop(2, first_hop, &frame).await.unwrap();
     // R 校验 key_path 并转发到 B
     let (_, mut rcv4) = r.recv_frame().await.unwrap();
@@ -1130,7 +1130,7 @@ async fn bad_version_dropped() {
         .unwrap();
     relay.set_key_dst(3, node_key(3));
     let mut frame = frame_from(1, 3, b"payload", 64, 1);
-    frame[0] = 0x03; // 非法版本（0x01=v1，0x02=v2）
+    frame[0] = 0x03; // 非法版本（合法值仅 0x01）
     assert_eq!(
         relay.relay(&mut frame).await,
         RelayOutcome::Dropped {
@@ -1140,13 +1140,13 @@ async fn bad_version_dropped() {
 }
 
 #[tokio::test]
-async fn v2_frame_shorter_than_header_rejected() {
+async fn frame_shorter_than_header_rejected() {
     let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
         .await
         .unwrap();
     let frame = frame_from(1, 3, b"payload", 64, 1);
-    let mut short = frame[..HEADER_LEN].to_vec(); // 34B
-    short[0] = VERSION2; // v2 帧头要求 42B
+    let mut short = frame[..HEADER_LEN - 1].to_vec(); // < 42B
+    short[0] = VERSION; // 版本字节合法仍按短帧拒绝
     assert_eq!(
         relay.relay(&mut short).await,
         RelayOutcome::Dropped {
@@ -1520,7 +1520,7 @@ async fn tcp_underlay_handshake_data_and_probe() {
     );
     // 数据往返
     let (frame, hop) = a.build_data_frame(2, b"via-tcp", 0x42).unwrap();
-    assert!(hop.is_none()); // v1 直连
+    assert!(hop.is_none()); // 直连（无路径表）
     a.send_to_node_hop(2, hop, &frame).await.unwrap();
     match b.handle_incoming().await.unwrap() {
         IncomingEvent::Data { from, payload } => {
@@ -1554,10 +1554,10 @@ async fn tcp_underlay_handshake_data_and_probe() {
     let _ = nonce;
 }
 
-/// relay 侧端点择优（v1 直连分支，REQ-054 决策 6）：
+/// relay 侧端点择优（默认路径分支，REQ-054 决策 6）：
 /// 首选端点 miss 高 → 置后，转发命中健康端点
 #[tokio::test]
-async fn relay_v1_forward_prefers_healthy_endpoint() {
+async fn relay_default_path_forward_prefers_healthy_endpoint() {
     let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 2)
         .await
         .unwrap();
@@ -1591,10 +1591,10 @@ async fn relay_v1_forward_prefers_healthy_endpoint() {
     .is_err());
 }
 
-/// relay 侧端点择优（v2 path_next_hop 分支，REQ-054 决策 6）：
+/// relay 侧端点择优（路径 path_next_hop 分支，REQ-054 决策 6）：
 /// 路径后继的多端点按活性排序转发
 #[tokio::test]
-async fn relay_v2_forward_prefers_healthy_endpoint() {
+async fn relay_path_forward_prefers_healthy_endpoint() {
     let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
         .await
         .unwrap();
@@ -1619,7 +1619,6 @@ async fn relay_v2_forward_prefers_healthy_endpoint() {
     );
 
     let header = MeshFrameHeader {
-        version: VERSION2,
         to_node_id: 2,
         from_node_id: 1,
         path_id: 0x300,
@@ -1672,7 +1671,7 @@ async fn tcp_send_failure_feeds_endpoint_miss() {
     assert_eq!(a.endpoint_health.get(&(2, dead_addr)), Some(&1));
 }
 
-/// v1 直连活性推断（REQ-054 决策 5 入站证据复用）：
+/// 直连活性推断（REQ-054 决策 5 入站证据复用）：
 /// 帧经中继到达 → 发送方直连端点 miss，回包排序让位中继兜底端点；
 /// 直连帧到达 → miss 清零自愈
 #[tokio::test]
@@ -1718,11 +1717,11 @@ async fn relayed_ingress_demotes_direct_endpoints() {
     assert_eq!(a.endpoint_health.get(&(2, c_ep)), Some(&0));
 }
 
-/// v2 中继转发表（非自源路径）：中继无发送路径表，仅持 forward_paths
+/// 中继转发表（非自源路径）：中继无发送路径表，仅持 forward_paths
 /// （自己是 hops 参与者的其他源路径）+ key_path → 按 path_id 转发成功。
 /// 此前转发只查发送表 → 中继永远 NoEndpoint（e2e probe CON-04 断链根因）
 #[tokio::test]
-async fn v2_relay_forwards_via_forward_table() {
+async fn relay_forwards_via_forward_table() {
     let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 3)
         .await
         .unwrap();
@@ -1739,7 +1738,6 @@ async fn v2_relay_forwards_via_forward_table() {
     });
 
     let header = MeshFrameHeader {
-        version: VERSION2,
         to_node_id: 2,
         from_node_id: 4,
         path_id: 0x300,
@@ -1836,10 +1834,10 @@ async fn wire_pair_1_3(a: &mut MeshData, c: &mut MeshData) {
 }
 
 #[tokio::test]
-async fn v2_send_targets_first_hop_owned_endpoints_only() {
+async fn path_send_targets_first_hop_owned_endpoints_only() {
     // 相位锁定修复（probe CI）：首跳候选列表混入其他中继的兜底端点时，
-    // v2 帧必须跳过（非参与者无法转发 → 必丢）；v1 帧保留兜底语义。
-    // 修复前 last-used 轮换让回包相位锁定在兜底死端点（心跳 v1 存活、ping v2 全灭）
+    // 路径帧必须跳过（非参与者无法转发 → 必丢）；默认路径帧保留兜底语义。
+    // 修复前 last-used 轮换让回包相位锁定在兜底死端点（心跳存活、路径帧全灭）
     let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
         .await
         .unwrap();
@@ -1870,7 +1868,7 @@ async fn v2_send_targets_first_hop_owned_endpoints_only() {
             expires_at: unix_seconds() + 3600,
         }],
     );
-    // v2 数据帧：必发往 b(4) 自有端点，兜底端点 d 不收
+    // 路径数据帧：必发往 b(4) 自有端点，兜底端点 d 不收
     let (frame, first_hop) = a.build_data_frame(3, b"ping", 7).unwrap();
     assert_eq!(first_hop, Some(4));
     assert!(a.send_to_node_hop(3, first_hop, &frame).await.unwrap());
@@ -1881,7 +1879,7 @@ async fn v2_send_targets_first_hop_owned_endpoints_only() {
         .unwrap();
     assert_eq!(&buf[..n], &frame[..]);
     assert!(d.try_recv(&mut buf).is_err());
-    // v1 对照：同一首跳的心跳帧仍可用兜底端点（last-used 轮换到 d）
+    // 默认路径对照：同一首跳的心跳帧仍可用兜底端点（last-used 轮换到 d）
     let hb = a.build_heartbeat_frame(3).unwrap();
     assert!(a.send_to_node_hop(3, Some(4), &hb).await.unwrap());
     let _ = tokio::time::timeout(Duration::from_secs(1), d.recv_from(&mut buf))
@@ -1892,8 +1890,8 @@ async fn v2_send_targets_first_hop_owned_endpoints_only() {
 }
 
 #[tokio::test]
-async fn v2_relay_forward_skips_fallback_endpoints() {
-    // 中继转发侧同理：下一跳候选混入其他中继兜底端点时，v2 帧只发自有端点
+async fn relay_forward_skips_fallback_endpoints() {
+    // 中继转发侧同理：下一跳候选混入其他中继兜底端点时，路径帧只发自有端点
     let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 4)
         .await
         .unwrap();
@@ -1912,7 +1910,6 @@ async fn v2_relay_forward_skips_fallback_endpoints() {
         expires_at: unix_seconds() + 3600,
     });
     let header = MeshFrameHeader {
-        version: VERSION2,
         to_node_id: 3,
         from_node_id: 1,
         path_id: 0x31,
