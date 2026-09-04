@@ -35,21 +35,35 @@ pub struct RouteEntry {
     pub metric: Option<u32>,
 }
 
+/// 存储即规范形态：len 位之外全零（含 v4 第 4 字节之后），由 [`Prefix::new`] 保证
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prefix {
-    pub bits: [u8; 16],
-    pub len: u8,
+    bits: [u8; 16],
+    len: u8,
     /// 地址族：true = IPv4。IPv6 短前缀（len ≤ 32）与 IPv4 靠此标志区分
-    pub v4: bool,
+    v4: bool,
 }
 
 impl Prefix {
-    pub fn new(bits: [u8; 16], len: u8) -> Self {
-        Self {
-            bits,
-            len,
-            v4: len <= 32,
+    /// 唯一构造入口：校验家族长度上限，u128 移位归零尾位（无 byte 级掩码算术）
+    pub fn new(bits: [u8; 16], len: u8, v4: bool) -> Option<Self> {
+        if len > if v4 { 32 } else { 128 } {
+            return None;
         }
+        if len == 0 {
+            return Some(Self {
+                bits: [0; 16],
+                len,
+                v4,
+            });
+        }
+        let shift = 128 - u32::from(len);
+        let significant = u128::from_be_bytes(bits) >> shift;
+        Some(Self {
+            bits: (significant << shift).to_be_bytes(),
+            len,
+            v4,
+        })
     }
 
     pub fn from_ip(addr: IpAddr) -> Self {
@@ -57,42 +71,36 @@ impl Prefix {
             IpAddr::V4(v4) => {
                 let mut bits = [0u8; 16];
                 bits[..4].copy_from_slice(&v4.octets());
-                Self {
-                    bits,
-                    len: 32,
-                    v4: true,
-                }
+                Self::new(bits, 32, true).expect("v4 /32 恒合法")
             }
-            IpAddr::V6(v6) => Self {
-                bits: v6.octets(),
-                len: 128,
-                v4: false,
-            },
+            IpAddr::V6(v6) => Self::new(v6.octets(), 128, false).expect("v6 /128 恒合法"),
         }
+    }
+
+    /// 前缀长度（非集合长度，is_empty 无意义）
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u8 {
+        self.len
+    }
+
+    pub fn is_v4(&self) -> bool {
+        self.v4
+    }
+
+    pub fn bits(&self) -> &[u8; 16] {
+        &self.bits
     }
 
     pub fn parse(cidr: &str) -> Result<Self, PrefixError> {
         let (addr, len) = cidr.split_once('/').ok_or(PrefixError::BadCidr)?;
         let len: u8 = len.parse().map_err(|_| PrefixError::BadCidr)?;
         let ip: IpAddr = addr.parse().map_err(|_| PrefixError::BadCidr)?;
-        let max_len = if ip.is_ipv4() { 32 } else { 128 };
-        if len > max_len {
-            return Err(PrefixError::BadCidr);
-        }
         let mut bits = [0u8; 16];
         match ip {
             IpAddr::V4(v4) => bits[..4].copy_from_slice(&v4.octets()),
             IpAddr::V6(v6) => bits.copy_from_slice(&v6.octets()),
         }
-        let mask = mask_bits(len);
-        for (b, m) in bits.iter_mut().zip(mask.iter()) {
-            *b &= *m;
-        }
-        Ok(Self {
-            bits,
-            len,
-            v4: matches!(ip, IpAddr::V4(_)),
-        })
+        Self::new(bits, len, ip.is_ipv4()).ok_or(PrefixError::BadCidr)
     }
 
     pub fn matches(&self, addr: &IpAddr) -> bool {
@@ -134,19 +142,6 @@ impl Prefix {
     pub fn is_covered_by(&self, other: &Prefix) -> bool {
         other.contains(self)
     }
-}
-
-fn mask_bits(len: u8) -> [u8; 16] {
-    let mut mask = [0u8; 16];
-    let full = len as usize / 8;
-    let rem = len as usize % 8;
-    for m in mask.iter_mut().take(full) {
-        *m = 0xff;
-    }
-    if rem != 0 {
-        mask[full] = 0xff << (8 - rem);
-    }
-    mask
 }
 
 pub mod error;
@@ -282,13 +277,42 @@ mod tests {
     #[test]
     fn parse_cidr_v4_v6() {
         let p = Prefix::parse("10.0.0.0/24").unwrap();
-        assert_eq!(p.len, 24);
-        assert_eq!(p.bits[..4], [10, 0, 0, 0]);
+        assert_eq!(p.len(), 24);
+        assert_eq!(p.bits()[..4], [10, 0, 0, 0]);
         let p = Prefix::parse("fd00::/8").unwrap();
-        assert_eq!(p.len, 8);
-        assert_eq!(p.bits[0], 0xfd);
+        assert_eq!(p.len(), 8);
+        assert_eq!(p.bits()[0], 0xfd);
         assert!(Prefix::parse("bad").is_err());
         assert!(Prefix::parse("10.0.0.0/33").is_err());
+    }
+
+    /// 唯一构造入口的守卫语义：家族长度上限 fail-closed、尾位/家族外字节归零
+    #[test]
+    fn new_validates_and_canonicalizes() {
+        assert!(Prefix::new([0xff; 16], 33, true).is_none());
+        assert!(Prefix::new([0xff; 16], 129, false).is_none());
+        assert!(Prefix::new([0xff; 16], 32, true).is_some());
+        assert!(Prefix::new([0xff; 16], 128, false).is_some());
+        // 脏尾位 + v4 第 4 字节之后的脏字节，一律归零
+        assert_eq!(
+            Prefix::new([0xff; 16], 24, true).unwrap(),
+            Prefix::parse("255.255.255.0/24").unwrap()
+        );
+        assert_eq!(
+            Prefix::new([0xff; 16], 48, false).unwrap(),
+            Prefix::parse("ffff:ffff:ffff::/48").unwrap()
+        );
+        assert_eq!(
+            Prefix::new([0xff; 16], 0, true).unwrap(),
+            Prefix::parse("0.0.0.0/0").unwrap()
+        );
+        // 规范形态可往返：parse("172.20.0.0/14") 对脏输入构造等价
+        let mut raw = [0u8; 16];
+        raw[..4].copy_from_slice(&[172, 20, 255, 255]);
+        assert_eq!(
+            Prefix::new(raw, 14, true).unwrap(),
+            Prefix::parse("172.20.0.0/14").unwrap()
+        );
     }
 
     #[test]

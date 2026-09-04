@@ -78,10 +78,10 @@ pub struct Registry {
 
 /// 前缀长度边界（CONTROL_PLANE §3.8）：IPv4 < /8、IPv6 < /32 拒绝
 fn route_len_ok(p: &Prefix) -> bool {
-    if p.v4 {
-        p.len >= 8
+    if p.is_v4() {
+        p.len() >= 8
     } else {
-        p.len >= 32
+        p.len() >= 32
     }
 }
 

@@ -244,7 +244,7 @@ mod tests {
         );
         c.announce_routes = vec!["10.0.0.0/24".into()];
         assert_eq!(c.validate(), Ok(()));
-        assert_eq!(Prefix::parse(&c.announce_routes[0]).unwrap().len, 24);
+        assert_eq!(Prefix::parse(&c.announce_routes[0]).unwrap().len(), 24);
     }
 
     #[test]

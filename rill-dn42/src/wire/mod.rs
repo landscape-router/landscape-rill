@@ -92,7 +92,8 @@ impl Message {
             }
             Message::Update(m) => {
                 // v4 NLRI 字段只承载 IPv4 unicast（其他地址族必须走 MP_REACH/MP_UNREACH）
-                if m.withdrawn.iter().any(|p| !p.v4) || m.announced.iter().any(|p| !p.v4) {
+                if m.withdrawn.iter().any(|p| !p.is_v4()) || m.announced.iter().any(|p| !p.is_v4())
+                {
                     return Err(WireError::BadUpdate);
                 }
                 let mut w = Vec::new();
@@ -537,36 +538,25 @@ fn read_nlris(mut buf: &[u8], v4: bool) -> Result<Vec<Prefix>, WireError> {
     let mut out = Vec::new();
     while !buf.is_empty() {
         let bits = buf[0];
-        let max = if v4 { 32 } else { 128 };
-        if bits as usize > max {
-            return Err(WireError::BadUpdate);
-        }
         let octets = bits as usize / 8 + usize::from(!bits.is_multiple_of(8));
         if buf.len() < 1 + octets {
             return Err(WireError::Truncated);
         }
         let mut pbits = [0u8; 16];
         pbits[..octets].copy_from_slice(&buf[1..1 + octets]);
-        // 尾部位归零（存储即规范形态，与 ROUTE_ENGINE §9 一致）
-        if octets * 8 > bits as usize {
-            let rem = bits as usize % 8;
-            pbits[octets - 1] &= 0xffu8 << (8 - rem);
-        }
-        out.push(Prefix {
-            bits: pbits,
-            len: bits,
-            v4,
-        });
+        // 长度上限 + 尾位归零（规范形态）都收在唯一构造入口
+        let prefix = Prefix::new(pbits, bits, v4).ok_or(WireError::BadUpdate)?;
+        out.push(prefix);
         buf = &buf[1 + octets..];
     }
     Ok(out)
 }
 
 fn write_nlri(out: &mut Vec<u8>, p: &Prefix) {
-    out.push(p.len);
-    let octets = p.len as usize / 8 + usize::from(!p.len.is_multiple_of(8));
-    let n = if p.v4 { 4 } else { 16 };
-    out.extend_from_slice(&p.bits[..octets.min(n)]);
+    out.push(p.len());
+    let octets = p.len() as usize / 8 + usize::from(!p.len().is_multiple_of(8));
+    let n = if p.is_v4() { 4 } else { 16 };
+    out.extend_from_slice(&p.bits()[..octets.min(n)]);
 }
 
 fn write_attr(out: &mut Vec<u8>, attr: &PathAttr) -> Result<(), WireError> {
@@ -615,7 +605,7 @@ fn write_attr(out: &mut Vec<u8>, attr: &PathAttr) -> Result<(), WireError> {
             }
             value.push(0);
             for p in nlri {
-                if p.v4 {
+                if p.is_v4() {
                     return Err(WireError::BadUpdate);
                 }
                 write_nlri(&mut value, p);
@@ -626,7 +616,7 @@ fn write_attr(out: &mut Vec<u8>, attr: &PathAttr) -> Result<(), WireError> {
             value.extend_from_slice(&afi.to_be_bytes());
             value.push(*safi);
             for p in nlri {
-                if p.v4 {
+                if p.is_v4() {
                     return Err(WireError::BadUpdate);
                 }
                 write_nlri(&mut value, p);

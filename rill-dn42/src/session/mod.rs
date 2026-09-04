@@ -507,13 +507,13 @@ fn export_messages(export: &ExportPolicy, cfg: &PeerConfig) -> Vec<Message> {
     let v4: Vec<Prefix> = export
         .own_prefixes
         .iter()
-        .filter(|p| p.v4)
+        .filter(|p| p.is_v4())
         .copied()
         .collect();
     let v6: Vec<Prefix> = export
         .own_prefixes
         .iter()
-        .filter(|p| !p.v4)
+        .filter(|p| !p.is_v4())
         .copied()
         .collect();
     let as_path = vec![Segment {

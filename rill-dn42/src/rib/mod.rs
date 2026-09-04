@@ -46,7 +46,7 @@ pub struct ApplyOutcome {
 type PfxKey = ([u8; 16], u8, bool);
 
 fn key(p: &Prefix) -> PfxKey {
-    (p.bits, p.len, p.v4)
+    (*p.bits(), p.len(), p.is_v4())
 }
 
 #[derive(Debug, Default)]
@@ -145,11 +145,7 @@ impl LocRib {
         let keys: Vec<PfxKey> = self.entries.keys().copied().collect();
         let mut changes = Vec::new();
         for k in keys {
-            let prefix = Prefix {
-                bits: k.0,
-                len: k.1,
-                v4: k.2,
-            };
+            let prefix = Prefix::new(k.0, k.1, k.2).expect("RIB key 来自规范形态前缀");
             if let Some(c) = self.remove_one(peer, &prefix) {
                 policy.note_withdrawn();
                 changes.extend(c);
