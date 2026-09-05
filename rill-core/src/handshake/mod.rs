@@ -8,6 +8,7 @@
 //! - rekey：显式触发（定时/控制面事件），旧 rx 密钥保留 5s 残留期，双重放窗口并存
 
 pub mod error;
+mod wire;
 pub use error::{HandshakeError, OpenError};
 
 use crate::frame::{
@@ -64,6 +65,17 @@ fn bind_transcript(
         .expand(SESSION_INFO, &mut out)
         .expect("hkdf expand");
     out
+}
+
+/// snow 返回的远端静态公钥 → 定长数组；长度不符 → 指定错误（CN-02：不 panic）
+fn peer_static(
+    state: &HandshakeState,
+    err: HandshakeError,
+) -> Result<[u8; SESSION_KEY_LEN], HandshakeError> {
+    match state.get_remote_static() {
+        Some(rs) => rs.try_into().map_err(|_| err),
+        None => Err(err),
+    }
 }
 
 /// 会话密钥：salt 由发起方生成随 msg3 携带；tx/rx 按方向独立
@@ -177,10 +189,7 @@ impl HandshakeInitiator {
         if !self.sent_msg3 {
             return Err(HandshakeError::WrongStep);
         }
-        let remote_static: [u8; SESSION_KEY_LEN] = match self.state.get_remote_static() {
-            Some(rs) if rs.len() == SESSION_KEY_LEN => rs.try_into().unwrap(),
-            _ => return Err(HandshakeError::PeerStaticMismatch),
-        };
+        let remote_static = peer_static(&self.state, HandshakeError::PeerStaticMismatch)?;
         if remote_static != self.expected_peer_static {
             return Err(HandshakeError::PeerStaticMismatch);
         }
@@ -229,15 +238,12 @@ impl HandshakeResponder {
         if self.read_msg1 {
             return Err(HandshakeError::WrongStep);
         }
-        if payload.len() != MSG1_PAYLOAD_LEN {
-            return Err(HandshakeError::MalformedPayload);
-        }
-        let target = u32::from_be_bytes(payload[..NODE_ID_LEN].try_into().unwrap());
-        if target != self.self_node_id {
+        let w = wire::WireMsg1::parse(payload)?;
+        if w.target.get() != self.self_node_id {
             return Err(HandshakeError::WrongTarget);
         }
         self.state
-            .read_message(&payload[NODE_ID_LEN..], &mut [])
+            .read_message(&w.body, &mut [])
             .map_err(HandshakeError::Noise)?;
         self.read_msg1 = true;
         Ok(())
@@ -272,29 +278,18 @@ impl HandshakeResponder {
         if !self.sent_msg2 {
             return Err(HandshakeError::WrongStep);
         }
-        if payload.len() != MSG3_PAYLOAD_LEN {
-            return Err(HandshakeError::MalformedPayload);
-        }
-        let binding = &payload[..BINDING_LEN];
-        let salt = u32::from_be_bytes(
-            payload[BINDING_LEN..BINDING_LEN + SALT_LEN]
-                .try_into()
-                .unwrap(),
-        );
+        let w = wire::WireMsg3::parse(payload)?;
         self.state
-            .read_message(&payload[BINDING_LEN + SALT_LEN..], &mut [])
+            .read_message(&w.body, &mut [])
             .map_err(HandshakeError::Noise)?;
-        let remote_static: [u8; SESSION_KEY_LEN] = match self.state.get_remote_static() {
-            Some(rs) if rs.len() == SESSION_KEY_LEN => rs.try_into().unwrap(),
-            _ => return Err(HandshakeError::BadBinding),
-        };
-        if !verify(claimed_node_id, &remote_static, binding) {
+        let remote_static = peer_static(&self.state, HandshakeError::BadBinding)?;
+        if !verify(claimed_node_id, &remote_static, &w.binding) {
             return Err(HandshakeError::BadBinding);
         }
         let h = self.state.get_handshake_hash().to_vec();
         let (k1, k2) = self.state.dangerously_get_raw_split();
         Ok(SessionKeys {
-            salt,
+            salt: w.salt.get(),
             tx_key: bind_transcript(&k2, &h),
             rx_key: bind_transcript(&k1, &h),
         })
