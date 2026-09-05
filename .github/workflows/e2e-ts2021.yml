@@ -1,0 +1,22 @@
+# ts2021 接入 e2e：lrill 自研客户端（GET /key → controlhttp 升级 → Noise IK → early payload →
+# HTTP/2 → /machine/register，auth key 预授权）+ 官方 tailscaled 经自建 headscale
+# 双节点同 tailnet 注册（TSL-04 控制面）。数据面互通为后续里程碑。
+# 场景目录约定见 docs/ci/README.md §1
+name: e2e-ts2021
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feature/**"]
+  workflow_dispatch:
+
+jobs:
+  ts2021:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: ts2021 register e2e
+        run: ./e2e/ts2021_register/run.sh

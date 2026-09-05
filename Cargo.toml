@@ -1,5 +1,5 @@
 [workspace]
-members = ["rill-core", "rill-coord", "rill-mesh", "rill-node", "rill-proto", "rill-macro", "rill-dn42", "rilld"]
+members = ["rill-core", "rill-coord", "rill-mesh", "rill-node", "rill-proto", "rill-macro", "rill-dn42", "rill-ts2021", "rilld"]
 resolver = "2"
 
 [workspace.package]
@@ -72,6 +72,10 @@ serde_json = "1.0.151"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
+
+# --- ts2021 leg (TS2021_LEG)：HTTP/2 会话层 + tailcfg JSON ---
+h2 = "0.4"
+http = "1"
 
 # --- Error handling (ERROR_ID) ---
 thiserror = "2.0"

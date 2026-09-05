@@ -11,6 +11,7 @@
 | `check.yml` | fmt / clippy(`-D warnings`) / `cargo nextest run --profile ci` / cargo audit / `ci/check-docs.sh` | PR + push（main + feature/**） | 是 |
 | `e2e-mesh.yml` | `build` job 编译一次：编译 cache（`~/.cargo` + `target`，内容键 `cargo-<os>-<rustc 版本>-<ISO 周>-<Cargo.lock hash>`，失效时机确定）加速增量编译 → release 二进制进 artifact → `mesh` job 八场景 matrix 并行（`needs: build` 下载 artifact，`E2E_SKIP_BUILD=1` 不再编译；每场景一 job，`fail-fast=false`）：direct（coord + node-a/b，IPv4+IPv6 ping）、relay（a—b—c 线形经 b 中继）、persist（REQ-037）、log（REQ-039）、reload（REQ-038 SIGHUP 重载）、tenancy（CONTROL_PLANE §1.5 双网络隔离 + forge.py 跨网伪造注入，SEC-21~25）、probe（CONNECTIVITY §2/§4/§5 回显/互探/relay RTT 排序/挂靠与故障切换 + SEC-26 限速）、recover（REQ-056/057 注册响应丢失 → 退避重连挑战恢复），`MESH_E2E_SCENARIO` 取矩阵值 | PR + push（main + feature/**） + workflow_dispatch | 否 |
 | `e2e-p0-tailscale.yml` | `e2e/p0_tailscale/run_p0.sh`（官方客户端入网，低频） | 仅 workflow_dispatch | 否 |
+| `e2e-ts2021.yml` | `e2e/ts2021_register/run.sh`：headscale（自签 TLS + 内嵌 DERP）+ lrill 自研 ts2021 客户端（/key → controlhttp 升级 → Noise IK → early payload → HTTP/2 → register）+ 官方 tailscaled 三容器，断言双节点同 tailnet（TSL-04 控制面） | PR + push（main + feature/**） + workflow_dispatch | 否 |
 | `e2e-probe-stress.yml` | probe 场景压力校验：常规时序 + 单核绑核（`MESH_E2E_CPUS=0` 慢机时序，曾暴露 v2 相位锁定残留）两阶段 × N 次重复（输入项 `iterations`，默认 5），统计通过率，任一迭代失败即红；编译 cache 与 e2e-mesh 同键共享 | 仅 workflow_dispatch | 否 |
 
 - 工具链 **stable**（`dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache`）；本地格式统一以 stable rustfmt 为准（nightly 与其一致，`cargo fmt` 前注意 rustup override）

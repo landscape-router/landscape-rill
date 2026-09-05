@@ -1,0 +1,43 @@
+# ts2021 注册 e2e：自建 headscale（自签 TLS + 内嵌 DERP）+ lrill 自研客户端 + 官方 tailscaled
+# 验证：lrill 经 /key 预取 → controlhttp 升级 → Noise IK → early payload → HTTP/2
+# → /machine/register（auth key）注册成功；官方 tailscaled 同网注册 —— 双节点同 tailnet（TSL-04 控制面）。
+services:
+  headscale:
+    image: ts2021-base
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    container_name: ts2021-headscale
+    command: ["headscale", "serve"]
+    volumes:
+      - ./build/headscale-config:/etc/headscale
+      - headscale-data:/var/lib/headscale
+    networks: [ts2021net]
+
+  lrill:
+    image: ts2021-base
+    container_name: ts2021-lrill
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY}"
+    command: ["/usr/local/bin/entry-lrill.sh"]
+    networks: [ts2021net]
+
+  node-c:
+    image: ts2021-base
+    container_name: ts2021-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY}"
+      TS_HOSTNAME: node-c
+    command: ["/usr/local/bin/entry-node.sh"]
+    networks: [ts2021net]
+
+volumes:
+  headscale-data:
+
+networks:
+  ts2021net:
+    driver: bridge
