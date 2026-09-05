@@ -1419,6 +1419,7 @@ dependencies = [
  "snow",
  "thiserror 2.0.20",
  "x25519-dalek",
+ "zerocopy",
 ]
 
 [[package]]

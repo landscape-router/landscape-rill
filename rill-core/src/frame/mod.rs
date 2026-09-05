@@ -1,4 +1,5 @@
 pub mod error;
+mod wire;
 pub use error::{DecodeError, OpenError};
 
 use crate::crypto::{self, AeadError};
@@ -18,8 +19,8 @@ pub const BROADCAST_NODE_ID: u32 = 0xFFFF_FFFF;
 /// path_id = 0 = 默认路径（key_dst 直连语义）
 pub const PATH_ID_DEFAULT: u64 = 0;
 
-/// 帧头字段偏移（FRAME_HEADER §2.1）。encode/decode/auth_input/frame_payload/
-/// 转发 TTL 递减共用，golden vectors 逐字节钉死绝对布局。
+/// 帧头字段绝对偏移(FRAME_HEADER §2.1)。实现已走 wire::WireHeader 视图
+/// (offset_of! 断言与此处互检);本模块仅供 golden 测试钉布局与文档对照。
 pub mod off {
     pub const VERSION: usize = 0;
     pub const PACKET_TYPE: usize = 1;
@@ -76,58 +77,18 @@ impl Default for MeshFrameHeader {
 impl MeshFrameHeader {
     pub fn encode(&self, out: &mut [u8]) {
         assert!(out.len() >= HEADER_LEN);
-        out[off::VERSION] = self.version;
-        out[off::PACKET_TYPE] = self.packet_type;
-        out[off::FLAGS] = self.flags;
-        out[off::TTL] = self.ttl;
-        out[off::TO_NODE..off::FROM_NODE].copy_from_slice(&self.to_node_id.to_be_bytes());
-        out[off::FROM_NODE..off::SEQ].copy_from_slice(&self.from_node_id.to_be_bytes());
-        out[off::SEQ..off::LEN].copy_from_slice(&self.seq.to_be_bytes());
-        out[off::LEN..off::PATH_ID].copy_from_slice(&self.len.to_be_bytes());
-        out[off::PATH_ID..off::ROUTE_MAC].copy_from_slice(&self.path_id.to_be_bytes());
-        out[off::ROUTE_MAC..HEADER_LEN].copy_from_slice(&self.route_mac);
+        wire::WireHeader::from(self).write_into(out);
     }
 
     /// 解码不校验 version 字节（宽容解析）；版本白名单由 validate_frame/relay 强制
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        if buf.len() < HEADER_LEN {
-            return Err(DecodeError::Truncated);
-        }
-        let to_node_id = u32::from_be_bytes(buf[off::TO_NODE..off::FROM_NODE].try_into().unwrap());
-        let from_node_id = u32::from_be_bytes(buf[off::FROM_NODE..off::SEQ].try_into().unwrap());
-        let seq = u32::from_be_bytes(buf[off::SEQ..off::LEN].try_into().unwrap());
-        let len = u16::from_be_bytes(buf[off::LEN..off::PATH_ID].try_into().unwrap());
-        let path_id = u64::from_be_bytes(buf[off::PATH_ID..off::ROUTE_MAC].try_into().unwrap());
-        let mut rm = [0u8; ROUTE_MAC_LEN];
-        rm.copy_from_slice(&buf[off::ROUTE_MAC..HEADER_LEN]);
-        Ok(Self {
-            version: buf[off::VERSION],
-            packet_type: buf[off::PACKET_TYPE],
-            flags: buf[off::FLAGS],
-            ttl: buf[off::TTL],
-            to_node_id,
-            from_node_id,
-            seq,
-            len,
-            path_id,
-            route_mac: rm,
-        })
+        Ok(Self::from(wire::WireHeader::parse(buf)?))
     }
 
     /// 认证输入：帧头[0..18]（ttl 置零）|| path_id。
     /// route_mac 与 AEAD AAD 共用（FRAME_HEADER §2.2/§3.1）。
     pub fn auth_input(&self) -> [u8; AUTH_INPUT_LEN] {
-        let mut out = [0u8; AUTH_INPUT_LEN];
-        out[off::VERSION] = self.version;
-        out[off::PACKET_TYPE] = self.packet_type;
-        out[off::FLAGS] = self.flags;
-        out[off::TTL] = 0;
-        out[off::TO_NODE..off::FROM_NODE].copy_from_slice(&self.to_node_id.to_be_bytes());
-        out[off::FROM_NODE..off::SEQ].copy_from_slice(&self.from_node_id.to_be_bytes());
-        out[off::SEQ..off::LEN].copy_from_slice(&self.seq.to_be_bytes());
-        out[off::LEN..off::PATH_ID].copy_from_slice(&self.len.to_be_bytes());
-        out[off::PATH_ID..off::ROUTE_MAC].copy_from_slice(&self.path_id.to_be_bytes());
-        out
+        wire::WireHeader::from(self).auth_input()
     }
 }
 
@@ -174,22 +135,13 @@ pub fn build_handshake_frame(header: &MeshFrameHeader, key_dst: &[u8], payload: 
 
 /// 提取帧载荷（按帧头 len 截取，含长度校验；数据帧 len 含 TAG）
 pub fn frame_payload(frame: &[u8]) -> Option<&[u8]> {
-    if frame.len() < HEADER_LEN {
-        return None;
-    }
-    let len = u16::from_be_bytes(frame[off::LEN..off::PATH_ID].try_into().unwrap()) as usize;
-    if frame.len() < HEADER_LEN + len {
-        return None;
-    }
-    Some(&frame[HEADER_LEN..HEADER_LEN + len])
+    wire::WireHeader::split(frame).map(|(_, payload)| payload)
 }
 
 /// 转发路径原地 TTL 递减（FRAME_HEADER §4：ttl 不参与认证，转发不重签 route_mac）。
-/// 调用方保证 ttl ≥ 1（wrap 语义与原 `out[3] -= 1` 一致）。
+/// 调用方保证 ttl ≥ 1（wrap 语义保持）。
 pub fn decrement_ttl(frame: &mut [u8]) {
-    if !frame.is_empty() {
-        frame[off::TTL] = frame[off::TTL].wrapping_sub(1);
-    }
+    wire::WireHeader::decrement_ttl(frame);
 }
 
 /// open_frame / open_frame_in_place 共享的帧校验（REQ-053）：
@@ -198,22 +150,19 @@ fn validate_frame(
     frame: &[u8],
     key_dst: &[u8],
 ) -> Result<(MeshFrameHeader, usize, usize), OpenError> {
-    if frame.is_empty() {
-        return Err(OpenError::Decode(DecodeError::Truncated));
-    }
-    let header = MeshFrameHeader::decode(frame).map_err(OpenError::Decode)?;
-    if header.version != VERSION {
+    let w = wire::WireHeader::parse(frame).map_err(OpenError::Decode)?;
+    if w.version != VERSION {
         return Err(OpenError::Version);
     }
-    let ai = header.auth_input();
-    if crypto::route_mac(key_dst, &ai) != header.route_mac {
+    let ai = w.auth_input();
+    if crypto::route_mac(key_dst, &ai) != w.route_mac {
         return Err(OpenError::RouteMac);
     }
-    let end = HEADER_LEN + header.len as usize;
+    let end = HEADER_LEN + w.len.get() as usize;
     if frame.len() < end {
         return Err(OpenError::TruncatedPayload);
     }
-    Ok((header, HEADER_LEN, end))
+    Ok((MeshFrameHeader::from(w), HEADER_LEN, end))
 }
 
 /// 原地解密入口（REQ-053）：在 frame 缓冲上直接解密，载荷借用返回（零拷贝）。
@@ -609,10 +558,19 @@ mod tests {
     }
 
     #[test]
-    fn decrement_ttl_wraps_and_ignores_empty() {
-        let mut frame = [0x01u8, 0x03, 0xAB, 0x2A];
+    fn decrement_ttl_wraps_and_ignores_truncated() {
+        // ≥42B:正常递减;ttl=0 wrap 到 0xFF(调用方保证 ttl ≥ 1)
+        let mut frame = [0u8; HEADER_LEN];
+        frame[off::TTL] = 7;
         decrement_ttl(&mut frame);
-        assert_eq!(frame[3], 0x29);
+        assert_eq!(frame[off::TTL], 6);
+        frame[off::TTL] = 0;
+        decrement_ttl(&mut frame);
+        assert_eq!(frame[off::TTL], 0xFF);
+        // 不足整头(含空):忽略不 panic(CN-02;旧实现会 panic 或误改字节)
+        let mut short = [0x01u8, 0x03, 0xAB, 0x2A];
+        decrement_ttl(&mut short);
+        assert_eq!(short, [0x01, 0x03, 0xAB, 0x2A]);
         let mut empty: [u8; 0] = [];
         decrement_ttl(&mut empty);
     }

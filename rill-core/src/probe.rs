@@ -7,6 +7,11 @@
 //! - node_id = 0 表示 coordinator/未注册身份（节点互探用对方真实 id）
 //! - 解析 fail-closed：长度严格校验，非法输入一律丢弃（CN-02）
 
+use core::mem::size_of;
+
+use zerocopy::byteorder::big_endian::U32;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 pub const PROBE_MAGIC: [u8; 4] = *b"LPRB";
 /// 固定头长（不含 payload）：magic 4 + type 1 + from 4 + to 4 + nonce 4
 pub const PROBE_HEADER_LEN: usize = 17;
@@ -27,6 +32,19 @@ pub mod probe_type {
 
 /// coordinator 回显请求的 to_node_id 标记（0 = 未注册身份）
 pub const NODE_ID_COORDINATOR: u32 = 0;
+
+/// 17B probe 头线格式视图(CONNECTIVITY §4.2;声明即布局)
+#[derive(Debug, Clone, Copy, KnownLayout, Immutable, FromBytes, IntoBytes, Unaligned)]
+#[repr(C, packed)]
+struct ProbeHeader {
+    magic: [u8; 4],
+    packet_type: u8,
+    from_node_id: U32,
+    to_node_id: U32,
+    nonce: U32,
+}
+
+const _: () = assert!(size_of::<ProbeHeader>() == PROBE_HEADER_LEN);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbePacket {
@@ -61,31 +79,37 @@ impl ProbePacket {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(PROBE_HEADER_LEN + self.payload.len());
-        out.extend_from_slice(&PROBE_MAGIC);
-        out.push(self.packet_type);
-        out.extend_from_slice(&self.from_node_id.to_be_bytes());
-        out.extend_from_slice(&self.to_node_id.to_be_bytes());
-        out.extend_from_slice(&self.nonce.to_be_bytes());
+        let h = ProbeHeader {
+            magic: PROBE_MAGIC,
+            packet_type: self.packet_type,
+            from_node_id: U32::new(self.from_node_id),
+            to_node_id: U32::new(self.to_node_id),
+            nonce: U32::new(self.nonce),
+        };
+        out.extend_from_slice(h.as_bytes());
         out.extend_from_slice(&self.payload);
         out
     }
 
     /// 解析（fail-closed）：magic 不匹配 / 长度不足 / 载荷超限 → None
     pub fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < PROBE_HEADER_LEN || buf[..4] != PROBE_MAGIC {
-            return None;
-        }
+        let h = Self::parse_header(buf)?;
         let payload = &buf[PROBE_HEADER_LEN..];
         if payload.len() > PROBE_PAYLOAD_MAX {
             return None;
         }
         Some(Self {
-            packet_type: buf[4],
-            from_node_id: u32::from_be_bytes(buf[5..9].try_into().ok()?),
-            to_node_id: u32::from_be_bytes(buf[9..13].try_into().ok()?),
-            nonce: u32::from_be_bytes(buf[13..17].try_into().ok()?),
+            packet_type: h.packet_type,
+            from_node_id: h.from_node_id.get(),
+            to_node_id: h.to_node_id.get(),
+            nonce: h.nonce.get(),
             payload: payload.to_vec(),
         })
+    }
+
+    fn parse_header(buf: &[u8]) -> Option<&ProbeHeader> {
+        let (h, _) = ProbeHeader::ref_from_prefix(buf).ok()?;
+        (h.magic == PROBE_MAGIC).then_some(h)
     }
 }
 

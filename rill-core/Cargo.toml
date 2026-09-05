@@ -15,6 +15,7 @@ snow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+zerocopy.workspace = true
 landscape-rill-macro = { path = "../rill-macro" }
 
 [[bench]]

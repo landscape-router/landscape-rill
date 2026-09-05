@@ -76,6 +76,9 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 # --- Error handling (ERROR_ID) ---
 thiserror = "2.0"
 
+# --- Wire-format views (rill-core frame/probe, FRAME_HEADER §2.1) ---
+zerocopy = { version = "0.8", features = ["derive"] }
+
 # --- Error derive macro (rill-macro) ---
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
