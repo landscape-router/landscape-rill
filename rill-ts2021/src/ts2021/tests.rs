@@ -1,7 +1,7 @@
 //! ts2021 会话层测试：进程内对照服务端（字面量 HTTP 头 + noise 握手 + early payload
 //! 分片 record + h2 server），全链路验证 controlhttp 升级 → ts2021 connect → register。
 
-use super::{connect, generate_keypair};
+use super::{connect, generate_keypair, load_or_create_machine_key};
 use crate::base64;
 use crate::controlbase::stream::NoiseStream;
 use crate::controlbase::tests::{control_key_pub, TestServer};
@@ -156,4 +156,26 @@ async fn upgrade_rejects_non_101() {
     .unwrap_err();
     assert!(err.to_string().contains("400"), "err={err}");
     server.await.unwrap();
+}
+
+#[test]
+fn machine_key_persistence_roundtrip() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!("lrill-mkey-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    let k1 = load_or_create_machine_key(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "密钥文件应为 0600"
+    );
+    // 再次加载 = 同一密钥（重启身份稳定）
+    let k2 = load_or_create_machine_key(&path).unwrap();
+    assert_eq!(k1, k2);
+
+    // 损坏文件 → 显式报错（不静默重新生成，防身份漂移）
+    std::fs::write(&path, "zzzz").unwrap();
+    assert!(load_or_create_machine_key(&path).is_err());
+    let _ = std::fs::remove_file(&path);
 }

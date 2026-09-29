@@ -202,11 +202,14 @@ impl NetPeer {
         parse_node_public(&self.key)
     }
 
-    /// AllowedIPs 中的首个 IPv4（无 CIDR 掩码剥离）
+    /// AllowedIPs 中本对端的 tailnet IPv4（/32 主机路由）。
+    /// exit node 的 AllowedIPs 含 0.0.0.0/0 默认路由——不能取（dst 会变 0.0.0.0）。
     pub fn first_ipv4(&self) -> Option<std::net::Ipv4Addr> {
         self.allowed_ips.iter().find_map(|a| {
-            let ip = a.split('/').next()?;
-            ip.parse().ok()
+            if !a.ends_with("/32") {
+                return None;
+            }
+            a.split('/').next()?.parse().ok()
         })
     }
 }

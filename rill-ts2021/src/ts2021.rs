@@ -307,5 +307,40 @@ pub fn generate_keypair() -> io::Result<([u8; 32], [u8; 32])> {
     Ok((private, public))
 }
 
+fn from_hex64(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut k = [0u8; 32];
+    for (i, pair) in s.as_bytes().chunks(2).enumerate() {
+        let hi = (pair[0] as char).to_digit(16)? as u8;
+        let lo = (pair[1] as char).to_digit(16)? as u8;
+        k[i] = hi << 4 | lo;
+    }
+    Some(k)
+}
+
+/// 机器私钥持久化（TSL-10）：文件存在即读（hex），否则生成并以 0600 落盘（create_new 防并发覆写）。
+/// 重启复用同一 machine key → 服务端节点身份稳定（node key 每次新生成 = 轮换路径）。
+pub fn load_or_create_machine_key(path: &std::path::Path) -> io::Result<[u8; 32]> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::read_to_string(path) {
+        Ok(s) => from_hex64(s.trim())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "machine key file corrupt")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let (privk, _) = generate_keypair()?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            f.write_all(crate::tailcfg::hex(&privk).as_bytes())?;
+            Ok(privk)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests;

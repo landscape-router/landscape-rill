@@ -31,7 +31,7 @@ mkdir -p "$BUILD_DIR/headscale-config"
   "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VER}/headscale_${HEADSCALE_VER}_linux_amd64"
 if [ ! -d "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64" ]; then
   curl -sL -o "$BUILD_DIR/tailscale.tgz" \
-    "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VER}_amd64.tgz"
+  "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VER}_amd64.tgz"
   tar xzf "$BUILD_DIR/tailscale.tgz" -C "$BUILD_DIR"
 fi
 
@@ -101,7 +101,10 @@ logtail:
   enabled: false
 EOF
 
-cleanup() { $COMPOSE down -v >/dev/null 2>&1 || true; }
+cleanup() {
+  $COMPOSE down -v >/dev/null 2>&1 || true
+  docker network rm ts2021exit >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 echo "==> 5/8 构建镜像 + 启动 headscale"
@@ -122,10 +125,30 @@ TS_AUTHKEY=$(docker exec ts2021-headscale headscale preauthkeys create --user "$
 echo "authkey=$TS_AUTHKEY"
 export TS_AUTHKEY
 
-echo "==> 7/8 启动 lrill（自研客户端）+ node-c（官方 tailscaled）"
+# exit 转发目标（TSL-06）：独立 docker 网络（node-c 不接入）的网关。
+# 目标不能在本网段：tailscaled 对 0.0.0.0/0 广播做 shrink（剔除本机直连网段与 RFC1918，
+# guest-wifi 语义），docker 网段全是 RFC1918 —— 目标子网需 node-c 显式子网广播 + headscale 审批
+docker network inspect ts2021exit >/dev/null 2>&1 || docker network create ts2021exit >/dev/null
+EXIT_NET=$(docker network inspect ts2021exit --format '{{range .IPAM.Config}}{{.Gateway}} {{.Subnet}}{{end}}')
+export TS_EXIT_TARGET="${EXIT_NET%% *}"
+export TS_ADVERTISE_ROUTE="${EXIT_NET##* }"
+echo "exit target=$TS_EXIT_TARGET subnet=$TS_ADVERTISE_ROUTE"
+
+echo "==> 7/8 启动 lrill（自研客户端）+ node-c（官方 tailscaled，advertise-exit-node + 目标子网）"
 $COMPOSE up -d --force-recreate lrill node-c
 
-echo "==> 8/8 断言：双节点注册 + lrill WG ping node-c + node-c 反向 ping lrill"
+echo "==> 7.5/8 审批 node-c 路由（exit 0.0.0.0/0 + ::/0 + 目标子网，headscale 侧放行）"
+for i in $(seq 1 30); do
+  ROUTES=$(docker exec ts2021-headscale headscale nodes list-routes 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+  echo "$ROUTES" | grep -q "0.0.0.0/0" && break
+  sleep 2
+done
+NODE_C_ID=$(docker exec ts2021-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+  | grep "node-c" | awk -F'|' '{gsub(/ /, "", $1); print $1}' | head -1)
+docker exec ts2021-headscale headscale nodes approve-routes -i "$NODE_C_ID" \
+  -r "0.0.0.0/0,::/0,$TS_ADVERTISE_ROUTE" >/dev/null 2>&1 || true
+
+echo "==> 8/8 断言：双节点注册 + lrill WG ping node-c + node-c 反向 ping lrill + exit 转发"
 ok=""
 for i in $(seq 1 45); do
   if docker logs ts2021-lrill 2>&1 | grep -q "PEER_PING_OK"; then
@@ -170,5 +193,50 @@ if [ "$REV_OK" != "yes" ]; then
 fi
 docker exec ts2021-node-c ping -c3 "$LRILL_IP" || true
 
-echo "PASS: lrill（自研 ts2021 客户端）经 headscale 入网，与官方 tailscaled 双向 WG ping 互通"
+# exit 断言（TSL-06）：lrill 经 node-c（exit node）转发 ping 独立网络网关（MASQUERADE + 回程）
+EXIT_OK=""
+for i in $(seq 1 45); do
+  if docker logs ts2021-lrill 2>&1 | grep -q "EXIT_PING_OK"; then
+    EXIT_OK=yes; break
+  fi
+  sleep 2
+done
+if [ "$EXIT_OK" != "yes" ]; then
+  echo "FAIL: lrill 经 exit node(node-c) 转发 ping 外部地址不通"
+  echo "--- lrill 日志 ---"; docker logs ts2021-lrill 2>&1 | tail -20
+  echo "--- node-c 路由 ---"; docker exec ts2021-headscale headscale nodes list-routes 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true
+  exit 1
+fi
+
+# 重启断言（TSL-10）：machine key 持久 → 节点身份稳定（ID 不变、无重复注册）；
+# node key 每次轮换 → 注册更新后数据面重建（再次 PEER_PING_OK）
+node_id() {
+  docker exec ts2021-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep "lrill-ts2021" | awk -F'|' '{gsub(/ /, "", $1); print $1}' | head -1
+}
+ID_BEFORE=$(node_id)
+PINGS_BEFORE=$(docker logs ts2021-lrill 2>&1 | grep -c PEER_PING_OK)
+docker restart ts2021-lrill >/dev/null
+ok2=""
+for i in $(seq 1 45); do
+  if [ "$(docker logs ts2021-lrill 2>&1 | grep -c PEER_PING_OK)" -gt "$PINGS_BEFORE" ]; then
+    ok2=yes; break
+  fi
+  sleep 2
+done
+if [ "$ok2" != "yes" ]; then
+  echo "FAIL: lrill 重启后数据面未重建（node key 轮换路径）"
+  echo "--- lrill 日志 ---"; docker logs ts2021-lrill 2>&1 | tail -20
+  exit 1
+fi
+NODES2=$(docker exec ts2021-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+ROWS2=$(echo "$NODES2" | grep -c "lrill-ts2021")
+ID_AFTER=$(node_id)
+if [ "$ROWS2" != "1" ] || [ "$ID_BEFORE" != "$ID_AFTER" ]; then
+  echo "FAIL: 重启后节点身份不稳定 rows=$ROWS2 id $ID_BEFORE -> $ID_AFTER"
+  echo "$NODES2"
+  exit 1
+fi
+
+echo "PASS: lrill（自研 ts2021 客户端）经 headscale 入网，与官方 tailscaled 双向 WG ping + exit 转发互通（重启身份稳定）"
 docker logs ts2021-lrill 2>&1 | grep -E "REGISTER_OK|WG_PEER|PEER_PING_OK" | head -5 || true

@@ -19,6 +19,8 @@ services:
     container_name: ts2021-lrill
     environment:
       TS_AUTHKEY: "${TS_AUTHKEY}"
+      # exit 转发目标（TSL-06）：独立网络网关，run.sh 创建网络后注入
+      TS_EXIT_TARGET: "${TS_EXIT_TARGET:-}"
       # 失败时 run.sh dump lrill 日志，调试行（derp 帧/echo 应答）便于 CI 排障
       LRILL_DEBUG: "1"
     command: ["/usr/local/bin/entry-lrill.sh"]
@@ -34,6 +36,10 @@ services:
     environment:
       TS_AUTHKEY: "${TS_AUTHKEY}"
       TS_HOSTNAME: node-c
+      # 作 exit node 供 lrill 转发断言（TSL-06，路由需 headscale 审批）
+      TS_ADVERTISE_EXIT: "1"
+      # exit 目标子网（独立网络，run.sh 注入；RFC1918 被默认路由剔除，需显式广播）
+      TS_ADVERTISE_ROUTE: "${TS_ADVERTISE_ROUTE:-}"
     command: ["/usr/local/bin/entry-node.sh"]
     networks: [ts2021net]
 

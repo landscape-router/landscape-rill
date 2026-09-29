@@ -1,11 +1,13 @@
 //! ts2021 入网探针（TSL-04，e2e lrill 侧入口）：
 //! TLS → GET /key → controlhttp 升级 → Noise IK → register（auth key）
 //! → /machine/map 长轮询拉 netmap → boringtun WG 会话 ping 唯一 peer
-//! → 成功打印 PEER_PING_OK 后常驻应答对端 ICMP echo（供反向 ping 断言）。
+//! → 成功打印 PEER_PING_OK；可选经 exit peer 转发 ping 非本网地址（EXIT_PING_OK，
+//! TSL-06）；随后常驻应答对端 ICMP echo（供反向 ping 断言）。
 //!
 //! 用法：
 //!   ts2021-probe --host <host:port> --authkey <key> --ca <ca.pem>
-//!                [--hostname <name>] [--ping-peer]
+//!                [--hostname <name>] [--state <machine.key>] [--ping-peer]
+//!                [--ping-exit <ipv4>]（经 peer 转发，peer 需为已审批 exit node）
 
 use landscape_rill_ts2021::controlhttp;
 use landscape_rill_ts2021::tailcfg::{RegisterResponse, CURRENT_CAP_VERSION};
@@ -14,13 +16,14 @@ use landscape_rill_ts2021::wg::{icmp_echo_request, parse_icmp_echo, IcmpEcho, Wg
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, ServerName};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_rustls::client::TlsStream;
 type Derp = landscape_rill_ts2021::derp::DerpClient<TlsStream<tokio::net::TcpStream>>;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 const PING_IDENT: u16 = 0x5211;
+const EXIT_PING_IDENT: u16 = 0x5212;
 const PING_ATTEMPTS: u32 = 45;
 const MAP_RETRIES: u32 = 30;
 
@@ -73,6 +76,7 @@ async fn run() -> Result<RegisterResponse, Box<dyn std::error::Error + Send + Sy
     let ca_path = arg_value("--ca");
     let hostname = arg_opt("--hostname").unwrap_or_else(|| "lrill-ts2021".to_owned());
     let ping_peer = arg_flag("--ping-peer");
+    let ping_exit: Option<Ipv4Addr> = arg_opt("--ping-exit").and_then(|s| s.parse().ok());
 
     // TLS 信任锚：自签 CA（e2e 预生成；官方客户端无跳过校验开关，同 P0 语义）
     let mut roots = rustls::RootCertStore::empty();
@@ -102,7 +106,17 @@ async fn run() -> Result<RegisterResponse, Box<dyn std::error::Error + Send + Sy
     .await?;
 
     // 连接 2：controlhttp 升级 + Noise IK + register
-    let (machine_key, _) = ts2021::generate_keypair()?;
+    // machine key 可持久（--state，重启身份稳定）；node key 每次新生成 = 轮换路径
+    let machine_key = match arg_opt("--state") {
+        Some(p) => {
+            let path = std::path::PathBuf::from(p);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            ts2021::load_or_create_machine_key(&path)?
+        }
+        None => ts2021::generate_keypair()?.0,
+    };
     let (node_priv, node_pub) = ts2021::generate_keypair()?;
     let (_disco_priv, disco_pub) = ts2021::generate_keypair()?;
     if std::env::var("LRILL_DEBUG").is_ok() {
@@ -198,31 +212,48 @@ async fn run() -> Result<RegisterResponse, Box<dyn std::error::Error + Send + Sy
     let peer_endpoint: Option<SocketAddr> = peer.endpoints.first().and_then(|e| e.parse().ok());
     ping_peer_flow(
         &node_priv,
-        peer_key,
-        self_v4,
-        target,
+        PeerFlow {
+            peer_key,
+            self_v4,
+            target,
+            peer_endpoint,
+            exit_target: ping_exit,
+        },
         derp,
         Arc::new(udp),
-        peer_endpoint,
     )
     .await?;
     Ok(resp)
 }
 
-/// WG 会话（DERP + 直连 UDP 双路）：定时器驱动 + 收包（应答 echo request /
-/// 匹配 echo reply），ping 通后常驻应答对端反向 ping。
-async fn ping_peer_flow(
-    node_priv: &[u8; 32],
+/// WG 会话参数（对端密钥/地址/端点 + exit 目标）
+struct PeerFlow {
     peer_key: [u8; 32],
     self_v4: Ipv4Addr,
     target: Ipv4Addr,
+    peer_endpoint: Option<SocketAddr>,
+    exit_target: Option<Ipv4Addr>,
+}
+
+/// WG 会话（DERP + 直连 UDP 双路）：定时器驱动 + 收包（应答 echo request /
+/// 匹配 echo reply），ping 通后可选经 exit peer 转发 ping 外部地址，随后常驻。
+async fn ping_peer_flow(
+    node_priv: &[u8; 32],
+    flow: PeerFlow,
     derp: Arc<AsyncMutex<Derp>>,
     udp: Arc<tokio::net::UdpSocket>,
-    peer_endpoint: Option<SocketAddr>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let PeerFlow {
+        peer_key,
+        self_v4,
+        target,
+        peer_endpoint,
+        exit_target,
+    } = flow;
     let peer_key: &'static [u8; 32] = Box::leak(Box::new(peer_key));
     let tunn = Arc::new(Mutex::new(WgTunnel::new(node_priv, peer_key, 1)));
     let got_reply = Arc::new(AtomicBool::new(false));
+    let got_exit = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
     // 双路发送：直连 UDP（对端端点已知时）+ DERP
@@ -239,6 +270,15 @@ async fn ping_peer_flow(
         let _ = derp.lock().await.send(peer_key, b).await;
     }
 
+    // echo reply 按 ident 分派（直连 ping / exit 转发 ping）
+    fn dispatch_reply(ident: u16, got_reply: &AtomicBool, got_exit: &AtomicBool) {
+        match ident {
+            PING_IDENT => got_reply.store(true, Ordering::SeqCst),
+            EXIT_PING_IDENT => got_exit.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+    }
+
     // 发起握手（双路）
     let init = tunn.lock().unwrap().ensure_initiated();
     for b in &init {
@@ -249,6 +289,7 @@ async fn ping_peer_flow(
     // 单所有权持有 derp，避免 recv 持锁跨 await 阻塞发送路径。
     let task_tunn = tunn.clone();
     let task_reply = got_reply.clone();
+    let task_exit = got_exit.clone();
     let task_tx = tx.clone();
     let task_udp = udp.clone();
     tokio::spawn(async move {
@@ -304,8 +345,8 @@ async fn ping_peer_flow(
                             let _ = task_tx.send(b);
                         }
                     }
-                    IcmpEcho::Reply { .. } => {
-                        task_reply.store(true, Ordering::SeqCst);
+                    IcmpEcho::Reply { ident, .. } => {
+                        dispatch_reply(ident, &task_reply, &task_exit);
                     }
                     IcmpEcho::Other => {}
                 }
@@ -316,6 +357,7 @@ async fn ping_peer_flow(
     // UDP 收包任务（直连路径）
     let udp_tunn = tunn.clone();
     let udp_reply = got_reply.clone();
+    let udp_exit = got_exit.clone();
     let _udp_tx = tx.clone();
     let udp_sock = udp.clone();
     tokio::spawn(async move {
@@ -337,8 +379,8 @@ async fn ping_peer_flow(
                             let _ = udp_sock.send_to(&b, src_addr).await;
                         }
                     }
-                    IcmpEcho::Reply { .. } => {
-                        udp_reply.store(true, Ordering::SeqCst);
+                    IcmpEcho::Reply { ident, .. } => {
+                        dispatch_reply(ident, &udp_reply, &udp_exit);
                     }
                     IcmpEcho::Other => {}
                 }
@@ -346,23 +388,64 @@ async fn ping_peer_flow(
         }
     });
 
-    // ping 循环：周期发 echo request，收到 reply 即成功
-    for seq in 1..=PING_ATTEMPTS as u16 {
-        let req = icmp_echo_request(self_v4, target, PING_IDENT, seq, b"lrill-ts2021");
-        let wg = tunn.lock().unwrap().encapsulate(&req);
-        for b in wg {
-            tx.send(b)?;
-        }
-        for _ in 0..10 {
-            if got_reply.load(Ordering::SeqCst) {
-                println!("PEER_PING_OK {target} seq={seq}");
-                // 常驻：应答对端反向 ping（entry 脚本断言 node-c ping 本节点）
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                }
+    // 周期发 echo request 直至对应 flag 置位（每次 10×200ms 观察窗）
+    async fn ping_until(
+        tunn: &Arc<Mutex<WgTunnel>>,
+        tx: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        src: Ipv4Addr,
+        dst: Ipv4Addr,
+        ident: u16,
+        payload: &[u8],
+        got: &AtomicBool,
+    ) -> Result<u16, String> {
+        for seq in 1..=PING_ATTEMPTS as u16 {
+            let req = icmp_echo_request(src, dst, ident, seq, payload);
+            for b in tunn.lock().unwrap().encapsulate(&req) {
+                let _ = tx.send(b);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            for _ in 0..10 {
+                if got.load(Ordering::SeqCst) {
+                    return Ok(seq);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+        Err(format!("ping {dst} 超时（{PING_ATTEMPTS} 次尝试）"))
+    }
+
+    let seq = ping_until(
+        &tunn,
+        &tx,
+        self_v4,
+        target,
+        PING_IDENT,
+        b"lrill-ts2021",
+        &got_reply,
+    )
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    println!("PEER_PING_OK {target} seq={seq}");
+
+    // exit 使用（TSL-06）：非本网目的经同一 peer 会话转发（peer = 已审批 exit node）
+    if let Some(exit_dst) = exit_target {
+        match ping_until(
+            &tunn,
+            &tx,
+            self_v4,
+            exit_dst,
+            EXIT_PING_IDENT,
+            b"lrill-exit",
+            &got_exit,
+        )
+        .await
+        {
+            Ok(seq) => println!("EXIT_PING_OK {exit_dst} seq={seq}"),
+            Err(_) => eprintln!("EXIT_PING_FAIL {exit_dst}"),
         }
     }
-    Err(format!("WG ping {target} 超时（{PING_ATTEMPTS} 次尝试）").into())
+
+    // 常驻：应答对端反向 ping（entry 脚本断言 node-c ping 本节点）
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
 }
