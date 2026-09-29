@@ -106,6 +106,20 @@ else
 fi
 
 echo "==> DNL-05: import policy 负向（10.99.0.0/16 白名单外，必须被拒）"
+# 先等对端确实公告了该前缀（排除"根本没公告"的假阴性；慢 CI 上 bgpd 收敛可能滞后），
+# 再验 node-a 拒收 —— 顺序反过来会有"先判拒、后公告"的假阳性窗口
+ANNOUNCED=0
+for i in $(seq 1 15); do
+  if docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast" 2>/dev/null | grep -q "10.99.0.0/16"; then
+    ANNOUNCED=1
+    break
+  fi
+  sleep 1
+done
+if [ "$ANNOUNCED" != "1" ]; then
+  echo "FAIL: DNL-05 对端始终未公告 10.99.0.0/16（前置异常）"
+  exit 1
+fi
 REJECT_OK=1
 for i in $(seq 1 10); do
   if docker exec mesh-node-a ping -c1 -W1 10.99.0.1 >/dev/null 2>&1; then
@@ -114,16 +128,10 @@ for i in $(seq 1 10); do
   fi
   sleep 1
 done
-# FRR 侧确认该前缀确实公告了（排除"根本没公告"的假阴性）
-if docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast" 2>/dev/null | grep -q "10.99.0.0/16"; then
-  ANNOUNCED=1
-else
-  ANNOUNCED=0
-fi
-if [ "$REJECT_OK" = "1" ] && [ "$ANNOUNCED" = "1" ]; then
+if [ "$REJECT_OK" = "1" ]; then
   echo "PASS: DNL-05 白名单外前缀已公告但 node-a 拒收（不可达）"
 else
-  echo "FAIL: DNL-05 白名单外前缀泄漏（announced=$ANNOUNCED reachable=$((1-REJECT_OK))）"
+  echo "FAIL: DNL-05 白名单外前缀泄漏"
   exit 1
 fi
 
