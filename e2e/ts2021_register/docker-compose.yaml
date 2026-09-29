@@ -19,6 +19,8 @@ services:
     container_name: ts2021-lrill
     environment:
       TS_AUTHKEY: "${TS_AUTHKEY}"
+      # 失败时 run.sh dump lrill 日志，调试行（derp 帧/echo 应答）便于 CI 排障
+      LRILL_DEBUG: "1"
     command: ["/usr/local/bin/entry-lrill.sh"]
     networks: [ts2021net]
 

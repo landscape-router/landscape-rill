@@ -3,7 +3,10 @@
 //! 握手顺序：controlbase 完成 → 读 early payload → HTTP/2 prior-knowledge → POST。
 
 use crate::controlbase::NoiseStream;
-use crate::tailcfg::{register_request_json, EarlyNoise, RegisterResponse};
+use crate::tailcfg::{
+    map_endpoints_update_json, map_request_json, register_request_json, EarlyNoise, MapResponse,
+    RegisterResponse,
+};
 use bytes::Bytes;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -69,6 +72,126 @@ where
 }
 
 impl ControlClient {
+    /// POST JSON 到 control 路径，返回 (status, body bytes)
+    async fn post_json(&mut self, host: &str, path: &str, body: Vec<u8>) -> io::Result<Vec<u8>> {
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("https://{host}{path}"))
+            .header("content-type", "application/json")
+            .body(())
+            .expect("static request builder");
+        let (response, mut req_stream) = self
+            .send_request
+            .clone()
+            .ready()
+            .await
+            .map_err(h2_err)?
+            .send_request(request, false)
+            .map_err(h2_err)?;
+        req_stream
+            .send_data(Bytes::from(body), true)
+            .map_err(h2_err)?;
+        let response = response.await.map_err(h2_err)?;
+        let status = response.status();
+        let body = collect_body(response.into_body()).await?;
+        if !status.is_success() {
+            return Err(io::Error::other(format!(
+                "{path} rejected: {status}: {}",
+                String::from_utf8_lossy(&body)
+            )));
+        }
+        Ok(body)
+    }
+
+    /// POST /machine/map（Stream=true 长轮询）：读首个含 netmap 的 MapResponse。
+    /// 线格式：每帧 = 4B LE 长度头（headscale writeMap reservedResponseHeaderSize）+ JSON；
+    /// keepalive 帧跳过。headscale 0.29 对 Stream=false 不回 body（poll.go serve），
+    /// 完整 netmap 仅长轮询下发。
+    /// Lite 端点更新（Stream=false + OmitPeers=true）：上报本端 UDP 端点，服务端回 200 空 body
+    pub async fn map_endpoints_update(
+        &mut self,
+        node_key: &[u8; 32],
+        disco_key: &[u8; 32],
+        hostname: &str,
+        host: &str,
+        endpoints: &[String],
+        preferred_derp: Option<u16>,
+    ) -> io::Result<()> {
+        let body =
+            map_endpoints_update_json(node_key, disco_key, hostname, endpoints, preferred_derp);
+        self.post_json(host, "/machine/map", body).await?;
+        Ok(())
+    }
+
+    pub async fn map(
+        &mut self,
+        node_key: &[u8; 32],
+        disco_key: &[u8; 32],
+        hostname: &str,
+        host: &str,
+        preferred_derp: Option<u16>,
+    ) -> io::Result<MapResponse> {
+        let body = map_request_json(node_key, disco_key, hostname, &[], true, preferred_derp);
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("https://{host}/machine/map"))
+            .header("content-type", "application/json")
+            .body(())
+            .expect("static request builder");
+        let (response, mut req_stream) = self
+            .send_request
+            .clone()
+            .ready()
+            .await
+            .map_err(h2_err)?
+            .send_request(request, false)
+            .map_err(h2_err)?;
+        req_stream
+            .send_data(Bytes::from(body), true)
+            .map_err(h2_err)?;
+        let response = response.await.map_err(h2_err)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(io::Error::other(format!("map rejected: {status}")));
+        }
+        let mut reader = BodyReader {
+            body: response.into_body(),
+            cur: Bytes::new(),
+        };
+        loop {
+            let mut len_buf = [0u8; 4];
+            reader.read_exact(&mut len_buf).await?;
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len > MAX_MAP_FRAME {
+                return Err(io::Error::other("map frame too large"));
+            }
+            let mut json = vec![0u8; len];
+            reader.read_exact(&mut json).await?;
+            let map: MapResponse = serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if std::env::var("LRILL_DEBUG").is_ok() {
+                let v: serde_json::Value = serde_json::from_slice(&json).unwrap_or_default();
+                eprintln!(
+                    "[dbg] map frame keys: {:?}",
+                    v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+                );
+                eprintln!(
+                    "[dbg] DERPMap: {}",
+                    v.get("DERPMap")
+                        .map(|d| d.to_string())
+                        .unwrap_or_default()
+                        .chars()
+                        .take(400)
+                        .collect::<String>()
+                );
+            }
+            if map.node.is_some() {
+                return Ok(map);
+            }
+            // keepalive 帧：继续等首个全量 netmap
+        }
+    }
+
     /// POST /machine/register（auth key 预授权路径，REQ-021/TS2021_LEG §3.2）。
     /// `host` 作为请求 :authority（如 "headscale:8080"）。
     pub async fn register(
@@ -108,6 +231,48 @@ impl ControlClient {
         serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
+
+/// 长轮询响应体读取：h2 分块 → 连续字节流（帧头/帧体 read_exact）
+struct BodyReader {
+    body: h2::RecvStream,
+    cur: Bytes,
+}
+
+impl BodyReader {
+    async fn read_exact(&mut self, out: &mut [u8]) -> io::Result<()> {
+        let mut filled = 0;
+        while filled < out.len() {
+            if self.cur.is_empty() {
+                match self.body.data().await {
+                    Some(c) => {
+                        let c = c.map_err(h2_err)?;
+                        let n = c.len();
+                        self.body
+                            .flow_control()
+                            .release_capacity(n)
+                            .map_err(h2_err)?;
+                        self.cur = c;
+                    }
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "map long-poll closed mid-frame",
+                        ))
+                    }
+                }
+            }
+            let n = (out.len() - filled).min(self.cur.len());
+            out[filled..filled + n].copy_from_slice(&self.cur[..n]);
+            let _ = n;
+            let taken = self.cur.split_to(n);
+            filled += n;
+            let _ = taken;
+        }
+        Ok(())
+    }
+}
+
+const MAX_MAP_FRAME: usize = 1024 * 1024;
 
 async fn collect_body(mut body: h2::RecvStream) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();

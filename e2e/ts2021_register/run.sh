@@ -35,11 +35,11 @@ if [ ! -d "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64" ]; then
   tar xzf "$BUILD_DIR/tailscale.tgz" -C "$BUILD_DIR"
 fi
 
-echo "==> 2/8 构建 lrill ts2021-register（release）"
+echo "==> 2/8 构建 lrill ts2021-probe（release）"
 if [ "${E2E_SKIP_BUILD:-0}" != "1" ]; then
-  (cd "$ROOT_DIR" && cargo build --release -p landscape-rill-ts2021 --bin ts2021-register)
+  (cd "$ROOT_DIR" && cargo build --release -p landscape-rill-ts2021 --bin ts2021-probe)
 fi
-cp "$ROOT_DIR/target/release/ts2021-register" "$BUILD_DIR/ts2021-register"
+cp "$ROOT_DIR/target/release/ts2021-probe" "$BUILD_DIR/ts2021-probe"
 cp "$E2E_DIR/entry-node.sh" "$E2E_DIR/entry-lrill.sh" "$E2E_DIR/Dockerfile" "$BUILD_DIR/"
 
 echo "==> 3/8 生成 CA 与 headscale 证书"
@@ -125,24 +125,50 @@ export TS_AUTHKEY
 echo "==> 7/8 启动 lrill（自研客户端）+ node-c（官方 tailscaled）"
 $COMPOSE up -d --force-recreate lrill node-c
 
-echo "==> 8/8 断言：headscale 节点表出现 lrill-ts2021 与 node-c"
+echo "==> 8/8 断言：双节点注册 + lrill WG ping node-c + node-c 反向 ping lrill"
 ok=""
-for i in $(seq 1 30); do
-  NODES=$(docker exec ts2021-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-  if echo "$NODES" | grep -q "lrill-ts2021" && echo "$NODES" | grep -q "node-c"; then
+for i in $(seq 1 45); do
+  if docker logs ts2021-lrill 2>&1 | grep -q "PEER_PING_OK"; then
     ok=yes; break
   fi
   sleep 2
 done
 docker exec ts2021-headscale headscale nodes list || true
-
-if [ "$ok" != "yes" ]; then
+NODES=$(docker exec ts2021-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+if [ -z "$(echo "$NODES" | grep "lrill-ts2021")" ] || [ -z "$(echo "$NODES" | grep "node-c")" ]; then
   echo "FAIL: 双节点未全部注册"
   echo "--- headscale 日志 ---"; docker logs ts2021-headscale 2>&1 | tail -15
-  echo "--- lrill 日志 ---";    docker logs ts2021-lrill 2>&1 | tail -20
+  echo "--- lrill 日志 ---";    docker logs ts2021-lrill 2>&1 | tail -25
   echo "--- node-c 日志 ---";   docker logs ts2021-node-c 2>&1 | tail -10
   exit 1
 fi
 
-echo "PASS: lrill（自研 ts2021 客户端）经 headscale 注册成功，官方 tailscaled 同 tailnet 入网"
-docker logs ts2021-lrill 2>&1 | grep -A8 '^{' | head -14 || true
+if [ "$ok" != "yes" ]; then
+  echo "FAIL: lrill 未完成 WG ping peer"
+  echo "--- lrill 日志 ---";  docker logs ts2021-lrill 2>&1 | tail -25
+  echo "--- node-c 日志 ---"; docker logs ts2021-node-c 2>&1 | tail -10
+  exit 1
+fi
+
+# 反向断言：官方 tailscaled ping lrill 的 tailnet IP（lrill 常驻应答 echo）
+LRILL_IP=$(echo "$NODES" | grep "lrill-ts2021" | grep -oE "100\.64\.[0-9]+\.[0-9]+" | head -1)
+echo "lrill tailnet ip: $LRILL_IP（node-c 反向 ping）"
+REV_OK=""
+for i in $(seq 1 15); do
+  if docker exec ts2021-node-c ping -c1 -W2 "$LRILL_IP" >/dev/null 2>&1; then
+    REV_OK=yes; break
+  fi
+  sleep 2
+done
+if [ "$REV_OK" != "yes" ]; then
+  echo "FAIL: node-c 反向 ping lrill 不通（$LRILL_IP）"
+  docker exec ts2021-node-c ping -c3 -W2 "$LRILL_IP" || true
+  echo "--- lrill 日志 ---"
+  docker logs ts2021-lrill 2>&1 | tail -20
+  echo "--- node-c 日志 ---"; docker logs ts2021-node-c 2>&1 | tail -15
+  exit 1
+fi
+docker exec ts2021-node-c ping -c3 "$LRILL_IP" || true
+
+echo "PASS: lrill（自研 ts2021 客户端）经 headscale 入网，与官方 tailscaled 双向 WG ping 互通"
+docker logs ts2021-lrill 2>&1 | grep -E "REGISTER_OK|WG_PEER|PEER_PING_OK" | head -5 || true

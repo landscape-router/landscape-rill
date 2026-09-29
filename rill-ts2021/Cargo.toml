@@ -9,8 +9,11 @@ landscape-rill-core = { path = "../rill-core" }
 landscape-rill-macro = { path = "../rill-macro" }
 h2.workspace = true
 http.workspace = true
+boringtun.workspace = true
 bytes.workspace = true
 chacha20poly1305.workspace = true
+crypto_box = "0.9"
+rand.workspace = true
 rustls.workspace = true
 rustls-pki-types = { workspace = true, features = ["std"] }
 serde.workspace = true

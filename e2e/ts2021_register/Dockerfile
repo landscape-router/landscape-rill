@@ -7,8 +7,8 @@ COPY tailscale_*/tailscaled /usr/local/bin/tailscaled
 COPY tailscale_*/tailscale /usr/local/bin/tailscale
 COPY entry-node.sh /usr/local/bin/entry-node.sh
 COPY entry-lrill.sh /usr/local/bin/entry-lrill.sh
-COPY ts2021-register /usr/local/bin/ts2021-register
+COPY ts2021-probe /usr/local/bin/ts2021-probe
 COPY ca.pem /usr/local/share/ca-certificates/ts2021-ca.crt
 RUN chmod +x /usr/local/bin/headscale /usr/local/bin/tailscaled /usr/local/bin/tailscale \
- && chmod +x /usr/local/bin/entry-node.sh /usr/local/bin/entry-lrill.sh /usr/local/bin/ts2021-register \
+ && chmod +x /usr/local/bin/entry-node.sh /usr/local/bin/entry-lrill.sh /usr/local/bin/ts2021-probe \
  && update-ca-certificates

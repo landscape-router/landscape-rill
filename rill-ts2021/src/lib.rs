@@ -7,5 +7,7 @@
 pub mod base64;
 pub mod controlbase;
 pub mod controlhttp;
+pub mod derp;
 pub mod tailcfg;
 pub mod ts2021;
+pub mod wg;
