@@ -47,6 +47,18 @@ const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG1_PAYLOAD_LEN);
 const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG2_PAYLOAD_LEN);
 const _: () = assert!(MAX_FRAME >= HEADER_LEN + MSG3_PAYLOAD_LEN);
 
+/// mesh 帧的 underlay 封装开销（ROUTE_ENGINE §6.1）：42B 帧头 + 16B tag +
+/// 8B UDP + 20B IP（v4 底网）；IPv6 底网再 +20B。tun0 保守 MTU 与 PTB
+/// next-hop MTU 均由此推导（rill-node packet::mtu 消费）
+pub const ENCAP_OVERHEAD_V4: u16 = 86;
+pub const ENCAP_OVERHEAD_V6: u16 = 106;
+
+/// EMSGSIZE 判定（DF 超限发送，ROUTE_ENGINE §6.2）：ErrorKind::MessageSize
+/// 未稳定，按 errno 判定（lan.rs 侧 PTB 触发共用）
+pub fn is_emsgsize(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EMSGSIZE)
+}
+
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -143,6 +155,9 @@ pub struct MeshData {
     telemetry_drops_global: u64,
     /// PONG 确认的直连对：peer → (端点, RTT)
     direct_pairs: HashMap<u32, (SocketAddr, u32)>,
+    /// DF 超限（EMSGSIZE）时推导的内层 next-hop MTU（PMTU − 封装开销），
+    /// 单发取走：上层伪造 PTB 用（ROUTE_ENGINE §6.2）
+    ptb_next_hop_mtu: Option<u16>,
 }
 
 /// per-peer 数据面流量区间计数（tx 归业务终点/转发下一跳，rx 归发送方）
@@ -273,6 +288,7 @@ impl MeshData {
             telemetry_drops: HashMap::new(),
             telemetry_drops_global: 0,
             direct_pairs: HashMap::new(),
+            ptb_next_hop_mtu: None,
         })
     }
 

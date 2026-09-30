@@ -1534,6 +1534,7 @@ dependencies = [
  "landscape-rill-core",
  "landscape-rill-macro",
  "landscape-rill-proto",
+ "libc",
  "quick-protobuf",
  "rand",
  "rcgen",

@@ -5,6 +5,7 @@
 //! 无 tun 环境（无 /dev/net/tun）下全链路可主机验证；run() 仅在容器环境启用 tun。
 
 use crate::config::{Config, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_SESSION_REKEY_HOURS};
+use crate::packet::mtu::{build_ptb, clamp_mss, is_tcp_syn, TUN_CONSERVATIVE_MTU};
 use crate::packet::{parse_packet, PacketInfo, TransportProto};
 use crate::tun::{TunConfig, TunDevice};
 use crate::BoxResult;
@@ -16,6 +17,7 @@ use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::rate::{RateCounter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
 use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
+use landscape_rill_mesh::data::is_emsgsize;
 use landscape_rill_mesh::data::{
     IncomingEvent, MeshData, PathEntry, TcpTransport, UdpTransport, Underlay, UnderlayKind,
 };

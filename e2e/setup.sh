@@ -36,6 +36,10 @@ elif [ "$SCENARIO" = "recover" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/recover/docker-compose.yaml"
 elif [ "$SCENARIO" = "dn42" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/dn42/docker-compose.yaml"
+elif [ "$SCENARIO" = "mtu" ]; then
+  # MTU 场景（ROUTE_ENGINE §6，RTE-07）：direct 拓扑 + 底网 MTU 1400
+  #（tun 配置仍 1420 → 断言 MSS clamp 与伪造 PTB；路由注入走 direct 分支）
+  COMPOSE="docker compose -f $E2E_DIR/mesh/mtu/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then

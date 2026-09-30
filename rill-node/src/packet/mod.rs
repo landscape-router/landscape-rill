@@ -18,6 +18,7 @@ pub struct PacketInfo {
 }
 
 pub mod error;
+pub mod mtu;
 pub use error::PacketError;
 
 pub fn parse_packet(buf: &[u8]) -> Result<PacketInfo, PacketError> {

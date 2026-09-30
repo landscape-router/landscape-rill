@@ -1,7 +1,7 @@
 # 路由策略引擎（ROUTE_ENGINE）
 
 > landscape-rill 的转发决策核心：单 TUN 汇合点，统一裁决流量走哪条接入。
-> 版本：v0.4（2026-09-03 修订：封装开销措辞同步 42B 帧头（MTU 86B，REQ-066））｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023
+> 版本：v0.5（2026-09-29 修订：§6.3 MTU 实现级决定落档（RTE-07））｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023
 
 ## 1. 定位
 
@@ -98,6 +98,14 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 - **ICMP/ICMPv6 PTB 透传**：用户态栈转发 PTB 给 tun0 侧（v1 含 IPv6——IPv6 禁止中间分片，不做则 IPv6 全废）
 - 实现要点：伪造 PTB 时**源地址 = 被封装包的目标地址**（ICMP 语义要求）
 - UDP 大包无回退机制：PTB 通知源端，应用层自行处理（v1 接受）
+
+### 6.3 实现级决定（2026-09-29 落档，RTE-07）
+
+- **tun0 默认 MTU = 1394**（1500 − 106，按 IPv6 底座最坏情形取值；`rill-node/src/packet/mtu.rs`）
+- **底座 socket 置 DF**（`IP_MTU_DISCOVER=IP_PMTUDISC_DO`）：超限发送返回 `EMSGSIZE` 而非静默 IP 分片——EMSGSIZE 即 PTB 回馈的触发信号
+- **PTB next-hop MTU = 底座路径 MTU − 封装开销**（临时 connect 探测 `IP_MTU`；开销按**底座地址族**取 86/106，与内层包族无关），下限 576（RFC 1191）
+- **MSS clamp 目标 = min(配置 tun0 MTU, 1394)**：v4 MSS ≤ mtu−40、v6 ≤ mtu−60；TCP 校验和按 RFC 1624 增量改写
+- **ICMPv6 PTB 细节**：quote ≤ 1232B、hop limit 255（RFC 4443）；版本半字节须显式写 0x60（零化缓冲内不显式写则内核拒收）
 
 ## 7. DNS 分类语义（P4 实现，语义已定稿 REQ-021）
 

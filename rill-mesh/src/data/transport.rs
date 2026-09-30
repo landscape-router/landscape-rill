@@ -14,6 +14,67 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tracing::debug;
 
+/// 平台 socket 原语（ROUTE_ENGINE §6.2）：DF 置位 / PMTU 读取。
+/// crate 级 deny(unsafe_code) 在此放开——setsockopt/getsockopt 封装是唯一例外
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod raw {
+    use std::io;
+    use std::os::unix::io::RawFd;
+
+    /// IP_PMTUDISC_DO：禁止内核 IP 分片，超 PMTU 发送显式 EMSGSIZE
+    pub(super) fn set_pmtudisc_do(fd: RawFd, v6: bool) -> io::Result<()> {
+        let val: libc::c_int = libc::IP_PMTUDISC_DO;
+        let (level, opt) = if v6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_MTU_DISCOVER)
+        };
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                opt,
+                &val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&val) as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// 读内核当前 PMTU 估计（仅对已连接 socket 有效）
+    pub(super) fn path_mtu(fd: RawFd, v6: bool) -> io::Result<u32> {
+        let mut val: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let (level, opt) = if v6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_MTU)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_MTU)
+        };
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                level,
+                opt,
+                &mut val as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc != 0 || val <= 0 {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "path mtu not learned",
+            ))
+        } else {
+            Ok(val as u32)
+        }
+    }
+}
+
 /// 连接表容量上限：超限整体清空（对端重连为惰性 connect，连接风暴有界）
 pub const MAX_TCP_CONNS: usize = 1024;
 
@@ -33,6 +94,11 @@ pub trait UnderlayTransport: Send + Sync + 'static {
         buf: &mut BytesMut,
     ) -> impl Future<Output = io::Result<SocketAddr>> + Send;
     fn local_endpoint(&self) -> io::Result<SocketAddr>;
+
+    /// 探测到 addr 的当前路径 MTU（内核路由级 PMTU 估计，不实际发包）。
+    /// 发送 EMSGSIZE 后调用可读到刚更新的 PMTU（PTB next-hop 推导，
+    /// ROUTE_ENGINE §6.2）；流式传输无逐帧 MTU → Err
+    fn path_mtu(&self, addr: SocketAddr) -> io::Result<u32>;
 }
 
 // ==================== 裸 UDP（默认档） ====================
@@ -43,9 +109,15 @@ pub struct UdpTransport {
 
 impl UdpTransport {
     pub async fn bind(bind: SocketAddr) -> io::Result<Self> {
-        Ok(Self {
-            socket: UdpSocket::bind(bind).await?,
-        })
+        let socket = UdpSocket::bind(bind).await?;
+        // DF 置位（ROUTE_ENGINE §6.2）：超大帧显式 EMSGSIZE（喂上层 PTB 机制），
+        // 而非内核静默 IP 分片（分片使 underlay 开销无界）
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            raw::set_pmtudisc_do(socket.as_raw_fd(), bind.is_ipv6())?;
+        }
+        Ok(Self { socket })
     }
 }
 
@@ -70,6 +142,27 @@ impl UnderlayTransport for UdpTransport {
 
     fn local_endpoint(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+
+    fn path_mtu(&self, addr: SocketAddr) -> io::Result<u32> {
+        // IP_MTU 仅对已连接 socket 有效：临时 socket connect 目标后读内核 PMTU 缓存
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let bind: &str = if addr.is_ipv6() {
+                "[::]:0"
+            } else {
+                "0.0.0.0:0"
+            };
+            let sock = std::net::UdpSocket::bind(bind)?;
+            sock.connect(addr)?;
+            raw::path_mtu(sock.as_raw_fd(), addr.is_ipv6())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = addr;
+            Err(io::Error::new(io::ErrorKind::Unsupported, "unix only"))
+        }
     }
 }
 
@@ -207,6 +300,14 @@ impl UnderlayTransport for TcpTransport {
     fn local_endpoint(&self) -> io::Result<SocketAddr> {
         Ok(self.local)
     }
+
+    fn path_mtu(&self, _addr: SocketAddr) -> io::Result<u32> {
+        // 流式传输无逐帧 MTU 上限（内核自行分段），PMTU 概念不适用
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "tcp underlay has no per-frame mtu",
+        ))
+    }
 }
 
 // ==================== 传输谱系（REQ-054 决策 4） ====================
@@ -251,6 +352,13 @@ impl UnderlayTransport for Underlay {
         match self {
             Self::Udp(u) => u.local_endpoint(),
             Self::Tcp(t) => t.local_endpoint(),
+        }
+    }
+
+    fn path_mtu(&self, addr: SocketAddr) -> io::Result<u32> {
+        match self {
+            Self::Udp(u) => u.path_mtu(addr),
+            Self::Tcp(t) => t.path_mtu(addr),
         }
     }
 }
@@ -331,6 +439,25 @@ mod tests {
         let mut buf3 = BytesMut::new();
         b.recv_frame(&mut buf3).await.unwrap();
         assert_eq!(&buf3[..], &f1[..]);
+    }
+
+    #[tokio::test]
+    async fn udp_df_emsgsize_and_path_mtu_probe() {
+        // DF 置位断言（ROUTE_ENGINE §6.2）：超 PMTU 发送显式 EMSGSIZE（而非静默分片），
+        // 且 path_mtu 能读到内核 PMTU（loopback ≥ 1500）
+        let ua = UdpTransport::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let ub = UdpTransport::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let b_ep = ub.local_endpoint().unwrap();
+        // loopback MTU 65536；70000B 同时超 u16 IP 总长上限 → 必 EMSGSIZE
+        let big = vec![0u8; 70000];
+        let err = ua.send_frame(b_ep, &big).await.unwrap_err();
+        assert!(crate::data::is_emsgsize(&err));
+        let mtu = ua.path_mtu(b_ep).unwrap();
+        assert!(mtu >= 1500, "loopback pmtu {mtu}");
     }
 
     #[tokio::test]

@@ -58,6 +58,7 @@ tokio = { version = "1.53.1", features = [
 bytes = "1.12.1"
 
 # --- Networking & system ---
+libc = "0.2"
 tun = { version = "0.8.1", features = ["async"] }
 rtnetlink = "0.21.0"
 netlink-packet-route = "0.30.0"

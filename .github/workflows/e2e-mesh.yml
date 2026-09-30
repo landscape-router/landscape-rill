@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42]
+        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

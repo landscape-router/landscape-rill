@@ -22,7 +22,8 @@ impl Default for TunConfig {
     fn default() -> Self {
         Self {
             name: "land0".into(),
-            mtu: 1420,
+            // 保守静态 MTU（ROUTE_ENGINE §6.2）：1500 − mesh 最坏封装开销
+            mtu: crate::packet::mtu::TUN_CONSERVATIVE_MTU,
             address4: None,
             address6: None,
         }

@@ -218,7 +218,8 @@ fn default_tun_name() -> String {
 }
 
 fn default_mtu() -> u16 {
-    1420
+    // tun0 保守静态 MTU（ROUTE_ENGINE §6.2），与 TunConfig::default 一致
+    landscape_rill_node::packet::mtu::TUN_CONSERVATIVE_MTU
 }
 
 /// [u8; 32] ⇄ 64 字符 hex（无第三方 hex crate）

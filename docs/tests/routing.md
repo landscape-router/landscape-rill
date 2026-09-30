@@ -54,10 +54,10 @@
 ## RTE-07 MTU/PTB
 
 - 关联 REQ：REQ-009
-- 测试层：e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：tun0 保守静态 MTU + MSS clamping + ICMP/ICMPv6 PTB 透传未验证
+- 测试层：单测 + e2e
+- 状态：`已覆盖`
+- 证据：rill-node/src/packet/mtu.rs、e2e/scenarios/mtu.sh
+- 说明：6 单测（clamp/PTB 构造）；1400 底座上 MSS clamp 生效（mss 1342 = 1394−40−12 timestamps）、DF 大包 PTB 回馈 v4/v6（next-hop mtu = 1314 = 1400−86）、PTB 后小包连通
 
 ## RTE-08 前缀公告边界
 
@@ -75,5 +75,5 @@
 - [x] RTE-04：首选停机 → 自动切次选
 - [ ] RTE-05：dn42 直连断 → mesh 出口 → 丢弃（fallback 链核心已实现，链路待验证）
 - [ ] RTE-06：exit 透传/使用/被用作语义（待实现）
-- [ ] RTE-07：大包不黑洞、MSS clamping 生效、PTB 透传（待验证）
+- [x] RTE-07：大包不黑洞、MSS clamping 生效、PTB 透传（mtu 场景通过）
 - [ ] RTE-08：过短前缀不混入公告（已闭环，CTL-10）；走 exit 语义待实现（P3）

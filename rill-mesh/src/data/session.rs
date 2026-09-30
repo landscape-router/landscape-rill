@@ -139,6 +139,8 @@ impl MeshData {
         first_hop: Option<u32>,
         frame: &[u8],
     ) -> std::io::Result<bool> {
+        // 每次发送重置 PTB 槽：残留值不得服务后续发送（ROUTE_ENGINE §6.2）
+        self.ptb_next_hop_mtu = None;
         // 首跳防自环：coordinator 签发的路径 hops 可能含发送者自身
         //（如 2 节点互为 relay 的拓扑）——发送给自己只会白耗一跳，直连目标即可
         let hop = first_hop
@@ -167,7 +169,25 @@ impl MeshData {
                             self.note_tx(to_node_id, frame.len());
                             return Ok(true);
                         }
-                        Err(e) => last_err = Some(e),
+                        Err(e) => {
+                            // DF 超限（EMSGSIZE）：读内核 PMTU 推导内层可用 MTU，
+                            // 供上层伪造 PTB；探测失败保持 None（上层保守值兜底）
+                            if is_emsgsize(&e) {
+                                self.ptb_next_hop_mtu =
+                                    self.underlay.path_mtu(addr).ok().map(|pmtu| {
+                                        let overhead = if addr.is_ipv6() {
+                                            ENCAP_OVERHEAD_V6
+                                        } else {
+                                            ENCAP_OVERHEAD_V4
+                                        };
+                                        // 下限 576（RFC 1191 最小重组缓冲）防畸形值
+                                        pmtu.saturating_sub(overhead as u32)
+                                            .clamp(576, u32::from(u16::MAX))
+                                            as u16
+                                    });
+                            }
+                            last_err = Some(e);
+                        }
                     }
                 }
                 // 发送失败（无路由等）→ 主路径 + 端点 miss，推进快速切换
@@ -185,6 +205,11 @@ impl MeshData {
                 Ok(false)
             }
         }
+    }
+
+    /// 取走 EMSGSIZE 推导的内层 next-hop MTU（每次发送清零）
+    pub fn take_ptb_mtu(&mut self) -> Option<u16> {
+        self.ptb_next_hop_mtu.take()
     }
 
     /// 握手分发：按载荷长度区分 msg1/msg2/msg3（36/144/132B，互不重叠）。

@@ -5,6 +5,26 @@ use super::*;
 impl Node {
     /// LAN 侧入包（tun0 读取的原始 IP 包）：路由裁决 → 懒握手 → 加密帧发送
     pub async fn pump_lan_packet(&mut self, packet: &[u8]) -> LanOutcome {
+        // MSS clamp（ROUTE_ENGINE §6.2）：SYN 的 MSS 压到 min(配置 MTU, 保守值)；
+        // 非 SYN 零拷贝直读（预检先行，避免逐包拷贝）
+        let clamped;
+        let packet = if is_tcp_syn(packet) {
+            let mtu = self
+                .tun
+                .as_ref()
+                .map(|t| t.mtu())
+                .unwrap_or(TUN_CONSERVATIVE_MTU)
+                .min(TUN_CONSERVATIVE_MTU);
+            let mut buf = packet.to_vec();
+            if clamp_mss(&mut buf, mtu) {
+                clamped = buf;
+                &clamped
+            } else {
+                packet
+            }
+        } else {
+            packet
+        };
         let Ok(info) = parse_packet(packet) else {
             return LanOutcome::Dropped;
         };
@@ -85,6 +105,17 @@ impl Node {
                         Ok((frame, first_hop)) => {
                             match self.mesh.send_to_node_hop(peer, first_hop, &frame).await {
                                 Ok(true) => LanOutcome::Sent { peer },
+                                Err(e) if is_emsgsize(&e) => {
+                                    // DF 超限（EMSGSIZE）：v1 无帧内分片，伪造 PTB
+                                    // 回注源端收缩 PMTU（§6.2；src = 内层 dst，
+                                    // 探测失败时保守值兜底）
+                                    let next_hop_mtu =
+                                        self.mesh.take_ptb_mtu().unwrap_or(TUN_CONSERVATIVE_MTU);
+                                    if let Some(ptb) = build_ptb(packet, next_hop_mtu) {
+                                        self.write_lan(&ptb).await;
+                                    }
+                                    LanOutcome::Dropped
+                                }
                                 _ => LanOutcome::Dropped,
                             }
                         }
@@ -159,6 +190,7 @@ impl Node {
                 let flow = flow_hash(&info);
                 match self.mesh.build_data_frame(peer, packet, flow) {
                     Ok((frame, first_hop)) => {
+                        // EMSGSIZE 同样按 drop：PTB 回注 dn42 腿不在 v1 范围（§6.2 仅 tun0 侧）
                         let ok = self
                             .mesh
                             .send_to_node_hop(peer, first_hop, &frame)
@@ -183,17 +215,34 @@ impl Node {
     }
 
     pub(super) async fn write_lan(&mut self, payload: &[u8]) {
-        if let Some(tun) = self.tun.as_mut() {
-            let _ = tun.write_packet(payload).await;
-            // 记录组播指纹：内核会把写入的组播包回送入 tun（回环），防再泛洪
-            if let Ok(info) = parse_packet(payload) {
-                if info.dst.is_multicast() {
-                    let now = Instant::now();
-                    self.recent_multicast_writes
-                        .retain(|_, t| now.duration_since(*t) < MULTICAST_REWRITE_GUARD);
-                    self.recent_multicast_writes
-                        .insert((info.src, info.dst, info.total_len), now);
+        let Some(tun) = self.tun.as_mut() else {
+            return;
+        };
+        // MSS clamp（§6.2）：mesh → LAN 方向的 SYN 同样压 MSS（对端不参与改写）
+        let clamped;
+        let payload = {
+            let mtu = tun.mtu().min(TUN_CONSERVATIVE_MTU);
+            if is_tcp_syn(payload) {
+                let mut buf = payload.to_vec();
+                if clamp_mss(&mut buf, mtu) {
+                    clamped = buf;
+                    &clamped
+                } else {
+                    payload
                 }
+            } else {
+                payload
+            }
+        };
+        let _ = tun.write_packet(payload).await;
+        // 记录组播指纹：内核会把写入的组播包回送入 tun（回环），防再泛洪
+        if let Ok(info) = parse_packet(payload) {
+            if info.dst.is_multicast() {
+                let now = Instant::now();
+                self.recent_multicast_writes
+                    .retain(|_, t| now.duration_since(*t) < MULTICAST_REWRITE_GUARD);
+                self.recent_multicast_writes
+                    .insert((info.src, info.dst, info.total_len), now);
             }
         }
     }

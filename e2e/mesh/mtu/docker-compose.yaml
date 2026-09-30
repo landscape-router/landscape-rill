@@ -1,0 +1,63 @@
+# MTU 场景（ROUTE_ENGINE §6，RTE-07）：direct 拓扑 + 底网 MTU 1400
+#（driver_opts 强制 docker bridge MTU）；节点配置仍 tun mtu 1420（> 保守值 1394），
+# 断言 MSS clamp（协商 1354）与 DF 超限 → 伪造 PTB（next-hop 1314 = 1400−86）。
+# 拓扑/网段说明同 direct/docker-compose.yaml。
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    environment:
+      # 调试透传（丢帧 reason 等 debug 日志）
+      RUST_LOG: ${MESH_E2E_RUST_LOG:-info}
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+networks:
+  mesh:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24
