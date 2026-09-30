@@ -2,7 +2,7 @@
 
 > **新 session 入口文档**：先读本文档恢复设计上下文，再按 §5 文档地图选择后续阅读。
 > 本文档记录已收敛的术语、信任模型、外部参考与挂账项，不承载具体协议细节（细节在各设计文档）。
-> 版本：v0.5（2026-09-05 修订：进度注记——ts2021 控制面链路通（lrill 经 headscale 注册成功））
+> 版本：v0.6（2026-09-30 修订：进度注记——P2 ts2021 接入闭环：数据面 + subnet router + exit 双向 + DERP）
 
 ## 1. 项目定位
 
@@ -12,7 +12,7 @@
 - **不做**多 TUN 网卡模型（明确否决内核 WireGuard 多网卡方案）
 - 转发决策在**用户态路由策略引擎**中完成；tun0 作为 LAN 侧接口，目标不属于管理 LAN 的流量出 WAN 网卡，WAN 侧 NAT 兜底（mesh exit 因此可透传不 NAT）
 
-**当前阶段：mesh 接入实现闭环**（核心模块 121+ 单测、docker e2e、IPv6 双栈、P0 官方客户端实证，见 requirements/ REQ-022~REQ-033）；文档为需求-设计-验收三层演进体系（[README.md](./README.md)）。
+**当前阶段：三条接入腿闭环**（mesh 骨架 REQ-022~REQ-032 / dn42 M1-M2 / ts2021 接入 TSL-04~08·10 e2e + CI 固化，核心模块 411 单测、docker e2e、IPv6 双栈）；文档为需求-设计-验收三层演进体系（[README.md](./README.md)）。
 
 ## 2. 需求与决策库
 
@@ -156,4 +156,4 @@ docs/README.md（入口：阅读路线 + 三张图）
 | P4 | 性能与联邦：XDP 快速路径 + DNS 统一 + 联邦 v2 + 帧头 path_id 数据面（§3.11） |
 | P5 | 远期：路径服务扩展——多跳中继链 / 多路双发（REQ-061/063，NAT1 准入同批评估） |
 
-**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环），P2 接入推进中——dn42 M1/M2 落地；ts2021 控制面链路通（lrill 经自建 headscale 注册，TS2021_LEG §2.2，数据面挂账）。**
+**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10 e2e + CI；增量 peer 帧 PeersChanged/PeersRemoved 解析缺口挂 REQ-067）。**

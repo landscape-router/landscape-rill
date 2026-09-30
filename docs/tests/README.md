@@ -113,6 +113,7 @@
 | REQ-063 | — | 📌 proposed（无验收场景） | — |
 | REQ-064 | — | 📌 proposed（无验收场景） | — |
 | REQ-065 | — | 📌 proposed（无验收场景） | — |
+| REQ-067 | — | 📌 proposed（无验收场景） | — |
 | REQ-056 | CTL-18 | 已覆盖 | rill-node/src/runtime/reconnect.rs、e2e/mesh/recover/、e2e/scenarios/recover.sh |
 | REQ-057 | CTL-19 | 已覆盖 | rill-core/src/control/、rill-mesh/src/control/、rill-coord/src/coordinator/、e2e/scenarios/recover.sh |
 | REQ-058 | SEC-30 | 已覆盖 | rill-core/src/control/registry.rs、e2e/scenarios/recover.sh |
