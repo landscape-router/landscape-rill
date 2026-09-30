@@ -272,11 +272,16 @@ for i in $(seq 1 30); do
 done
 docker exec tsrt-rill-b ip route add 100.64.0.0/10 dev land0 2>/dev/null || true
 docker exec tsrt-rill-ext ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+# mesh 预热：内核 → TUN 触发 rill-ext⇄rill-b 懒握手（互探周期 30s，表序
+# 黑洞端点需 1~2 周期降级让位，提前触发把收敛移出断言窗）
+docker exec tsrt-rill-ext ping -c3 -W1 10.42.0.1 >/dev/null 2>&1 || true
 
 echo "==> 8/8 断言"
 dump() {
   echo "--- headscale 路由 ---"
   docker exec tsrt-headscale headscale nodes list-routes 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true
+  echo "--- headscale/derper 日志 ---"
+  docker logs tsrt-headscale 2>&1 | tail -40
   echo "--- rill-ext 日志/路由 ---"
   docker logs tsrt-rill-ext 2>&1 | tail -40
   docker exec tsrt-rill-ext ip route 2>/dev/null || true
@@ -284,12 +289,14 @@ dump() {
   docker logs tsrt-rill-b 2>&1 | tail -20
   echo "--- node-c 状态/日志 ---"
   docker exec tsrt-node-c tailscale --socket=/var/run/tailscale/tailscaled.sock status 2>&1 || true
+  docker exec tsrt-node-c timeout 5 tailscale --socket=/var/run/tailscale/tailscaled.sock ping --timeout=3s --c=3 100.64.0.2 2>&1 || true
   docker logs tsrt-node-c 2>&1 | tail -15
 }
 
 # TSL-05：node-c ping mesh 资源（10.42.0.1 经 subnet router）+ 自家 LAN（10.43.0.1）
+# 窗口取 75 次（≈5min）：mesh 互探冷启动 + tailnet 握手 + 审批传播串联，慢机上 >3min
 ok=""
-for i in $(seq 1 45); do
+for i in $(seq 1 75); do
   if docker exec tsrt-node-c ping -c1 -W2 10.42.0.1 >/dev/null 2>&1 \
      && docker exec tsrt-node-c ping -c1 -W2 10.43.0.1 >/dev/null 2>&1; then
     ok=yes; break

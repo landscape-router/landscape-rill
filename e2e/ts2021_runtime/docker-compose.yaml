@@ -38,6 +38,9 @@ services:
       - /dev/net/tun
     cap_add: [NET_ADMIN, NET_RAW]
     command: ["/usr/local/bin/entry-rill.sh"]
+    environment:
+      LRILL_DEBUG: "${LRILL_DEBUG:-}"
+      RUST_LOG: "${TSRT_RUST_LOG:-info}"
     volumes:
       - ./build/rill-ext.json:/etc/landscape/overlay.json
     networks:

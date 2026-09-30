@@ -168,9 +168,24 @@ pub(crate) async fn spawn_ts2021_leg(cfg: &Ts2021Config) -> BoxResult<Ts2021Leg>
     let advertise = Arc::new(std::sync::Mutex::new(static_advertise.clone()));
     let (poke_tx, poke_rx) = tokio::sync::watch::channel(0u64);
 
-    // 数据面 UDP socket（直连路径）先绑定，端点交控制面任务上报
+    // 数据面 UDP socket（直连路径）先绑定，端点交控制面任务上报。
+    // 端点必须带真实源 IP：0.0.0.0 对端不可拨（wireguard-go "no UDP or
+    // DERP addr" 只能等 magicsock lazyEndpoint 从流量源地址反推，竞态分钟级）
     let udp = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await?);
-    let udp_endpoint = format!("{}", udp.local_addr()?);
+    let port = udp.local_addr()?.port();
+    let host_port = cfg.control_url.trim_start_matches("https://").to_owned();
+    let real_ip = async {
+        let mut addrs = tokio::net::lookup_host(host_port.as_str()).await.ok()?;
+        let a = addrs.find(|a| a.is_ipv4())?;
+        let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
+        probe.connect(a).await.ok()?;
+        Some(probe.local_addr().ok()?.ip())
+    }
+    .await;
+    let udp_endpoint = match real_ip {
+        Some(ip) => format!("{ip}:{port}"),
+        None => format!("0.0.0.0:{port}"),
+    };
 
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(128);
     let (ev_tx, ev_rx) = mpsc::channel::<Ts2021Event>(16);
@@ -240,6 +255,39 @@ async fn send_wg(
 
 /// 发送产物（锁内封装完成，锁外异步发送）
 type Emit = ([u8; 32], Vec<SocketAddr>, Vec<Vec<u8>>);
+
+/// netmap 全量替换会话表：在场 peer 保留既有 WgTunnel（含活会话），
+/// 仅刷新端点/AllowedIPs；新建消失差集。全量重建会杀活会话——对端
+/// 按旧 session index 续传，boringtun 静默丢弃，最长 REKEY_AFTER(90s) 才恢复
+fn merge_sessions(
+    old: &mut HashMap<String, PeerSess>,
+    peers: Vec<Ts2021Peer>,
+    node_priv: &[u8; 32],
+) -> HashMap<String, PeerSess> {
+    let mut fresh = HashMap::new();
+    for p in peers {
+        match old.remove(&p.id) {
+            Some(mut sess) => {
+                sess.endpoints = p.endpoints;
+                sess.allowed_ips = p.allowed_ips;
+                fresh.insert(p.id, sess);
+            }
+            None => {
+                let id = p.id.clone();
+                fresh.insert(
+                    id,
+                    PeerSess {
+                        key: p.key,
+                        endpoints: p.endpoints.clone(),
+                        allowed_ips: p.allowed_ips.clone(),
+                        tunnel: WgTunnel::new(node_priv, &p.key, index_of(&p.id)),
+                    },
+                );
+            }
+        }
+    }
+    fresh
+}
 
 /// 出站明文封装（peer 匹配）或定时器帧（全 peer）；std Mutex 不跨 await
 fn collect_emit(
@@ -317,21 +365,7 @@ async fn run_data_plane(
             match cmd.try_recv() {
                 Ok(DataCmd::SetPeers(peers)) => {
                     let mut s = sessions.lock().unwrap();
-                    *s = peers
-                        .into_iter()
-                        .map(|p| {
-                            let id = p.id.clone();
-                            (
-                                id,
-                                PeerSess {
-                                    key: p.key,
-                                    endpoints: p.endpoints.clone(),
-                                    allowed_ips: p.allowed_ips.clone(),
-                                    tunnel: WgTunnel::new(&node_priv, &p.key, index_of(&p.id)),
-                                },
-                            )
-                        })
-                        .collect();
+                    *s = merge_sessions(&mut s, peers, &node_priv);
                 }
                 Ok(DataCmd::SetDerp(d, _region)) => {
                     *derp.lock().await = Some(*d);
@@ -494,7 +528,8 @@ impl Node {
 
 /// 控制面任务：establish（TLS → GET /key → noise 升级 → register）→ 长轮询流。
 /// 流断开 / DERP 失联 → 重建连接（同 machine/node keys 重注册幂等，TSL-10 语义）；
-/// 广播变更（poke）→ 同连接重发 MapRequest（Hostinfo 只在新请求生效）
+/// 广播变更（poke）→ 只发 Lite 端点更新（Hostinfo.RoutableIPs 任何请求生效），
+/// 长轮询流全程持有（tailscaled 同源语义）
 #[allow(clippy::too_many_arguments)]
 async fn run_control(
     cfg: Ts2021Config,
@@ -571,8 +606,25 @@ async fn run_control(
                     },
                     _ = poke_rx.changed() => {
                         let _ = poke_rx.borrow_and_update();
-                        info!("[ts2021] advertise changed, re-issuing map request");
-                        hold = false;
+                        // 广播变更只发 Lite 更新（OmitPeers=true）：Hostinfo.RoutableIPs
+                        // 在任何 MapRequest 生效；长轮询流保持持有——重建流存在
+                        // headscale 侧竞态（旧流关闭处理晚于新流注册，e2e 实证）
+                        let routables = advertise.lock().unwrap().clone();
+                        let endpoints = [udp_endpoint.to_owned()];
+                        if let Err(e) = client
+                            .map_endpoints_update(
+                                &node_pub,
+                                &disco_pub,
+                                &cfg.hostname,
+                                &host_port,
+                                &endpoints,
+                                preferred_derp,
+                                &routables,
+                            )
+                            .await
+                        {
+                            debug!("[ts2021] advertise lite update failed: {e}");
+                        }
                     }
                     _ = derp_lost_rx.recv() => {
                         info!("[ts2021] derp lost, re-establishing");
@@ -729,4 +781,82 @@ async fn establish(
         return Err(format!("ts2021 register rejected: {}", resp.error).into());
     }
     Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use landscape_rill_ts2021::wg::icmp_echo_request;
+    use std::net::Ipv4Addr;
+
+    /// netmap 全量重放不得杀活会话（对端按旧 session index 续传，
+    /// 重建隧道 = 最长 REKEY_AFTER 90s 数据面黑洞，e2e 实证）
+    #[test]
+    fn merge_sessions_preserves_live_session() {
+        let (our_priv, our_pub) = ts2021::generate_keypair().unwrap();
+        let (peer_priv, peer_pub) = ts2021::generate_keypair().unwrap();
+        let id = tailcfg::hex(&peer_pub);
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            id.clone(),
+            PeerSess {
+                key: peer_pub,
+                endpoints: vec![],
+                allowed_ips: vec!["10.99.0.0/24".to_owned()],
+                tunnel: WgTunnel::new(&our_priv, &peer_pub, 7),
+            },
+        );
+        // 对侧（模拟 tailscaled）：握手 initiation → 我侧应答 → 双侧会话建立
+        let mut peer_side = WgTunnel::new(&peer_priv, &our_pub, 9);
+        let init = peer_side.ensure_initiated();
+        let (_, emits) = decap_session(&mut sessions, Some(&peer_pub), None, &init[0]);
+        let resp = emits[0].2[0].clone();
+        peer_side.decapsulate(None, &resp);
+        assert!(peer_side.session_established());
+        // 握手后数据可解（我侧会话存在的唯一可靠观测：stats 首包数据后才置位）
+        let data = peer_side.encapsulate(&icmp_echo_request(
+            "10.99.0.2".parse::<Ipv4Addr>().unwrap(),
+            "10.99.0.1".parse().unwrap(),
+            1,
+            1,
+            b"lrill",
+        ));
+        let (plain, _) = decap_session(&mut sessions, Some(&peer_pub), None, &data[0]);
+        assert!(plain.is_some());
+
+        // 同 peer netmap 重放（端点/AllowedIPs 更新）：隧道保留，会话存活
+        let replay = Ts2021Peer {
+            id: id.clone(),
+            key: peer_pub,
+            endpoints: vec!["192.0.2.10:41641".parse().unwrap()],
+            allowed_ips: vec!["10.99.0.0/24".to_owned()],
+        };
+        let mut merged = merge_sessions(&mut sessions, vec![replay], &our_priv);
+        assert_eq!(
+            merged[&id].endpoints,
+            vec!["192.0.2.10:41641".parse::<SocketAddr>().unwrap()]
+        );
+        // 重放后旧会话数据仍可解（重建隧道时此处为 None）
+        let data2 = peer_side.encapsulate(&icmp_echo_request(
+            "10.99.0.2".parse().unwrap(),
+            "10.99.0.1".parse().unwrap(),
+            1,
+            2,
+            b"lrill",
+        ));
+        let (plain2, _) = decap_session(&mut merged, Some(&peer_pub), None, &data2[0]);
+        assert!(plain2.is_some(), "netmap 重放后活会话应继续解包");
+
+        // 差集语义：消失 peer 移除，新增 peer 建隧道
+        let (_, gone_pub) = ts2021::generate_keypair().unwrap();
+        let gone = Ts2021Peer {
+            id: tailcfg::hex(&gone_pub),
+            key: gone_pub,
+            endpoints: vec![],
+            allowed_ips: vec![],
+        };
+        let fresh = merge_sessions(&mut merged, vec![gone], &our_priv);
+        assert!(!fresh.contains_key(&id));
+        assert!(fresh.len() == 1);
+    }
 }
