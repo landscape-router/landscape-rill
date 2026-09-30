@@ -109,6 +109,10 @@ impl Node {
         // 退避推进：仍 pending = 上轮 PING 无 PONG（发送只发生在本函数，
         // 周期开始时在途探测必然已等满一个周期）
         for (_, ep) in self.mesh.take_pending_probes() {
+            // 无 PONG 同时喂端点级 miss（排序让位）：多宿主通告 + 部分可达
+            // 拓扑下，msg2 回包命中表序黑洞端点会永久卡死握手（无会话即无
+            // 心跳/发起重试信号可用，CONNECT_PLANE §3.11 ②）
+            self.mesh.note_probe_miss(ep);
             let miss = self
                 .probe_backoff
                 .get(&ep)

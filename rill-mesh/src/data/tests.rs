@@ -1591,6 +1591,41 @@ async fn relay_default_path_forward_prefers_healthy_endpoint() {
     .is_err());
 }
 
+/// probe 无 PONG → 端点降级（2026-09-30，CONTROL_PLANE §3.11 ②）：
+/// 多宿主通告 + 部分可达拓扑，表序首端点黑洞（sendto 成功但被网关丢弃）。
+/// 建会话前的响应方回包（msg2）按表序选址命中黑洞端点，无会话即无心跳
+/// miss / 发起重试可用——互探 PONG 缺席是唯一无响应信号，降级后让位健康端点
+#[tokio::test]
+async fn probe_miss_demotes_blackhole_endpoint_for_replies() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let dead = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let live = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead.local_addr().unwrap();
+    let live_addr = live.local_addr().unwrap();
+    a.set_key_dst(2, node_key(2));
+    a.set_endpoints(2, vec![dead_addr, live_addr]);
+
+    let frame = b"\x01reply-frame";
+    // 初始表序：首端点（黑洞）优先——UDP sendto 成功，帧静默丢弃
+    assert!(a.send_to_node_hop(2, None, frame).await.unwrap());
+    assert_eq!(a.last_sent_endpoint.get(&2), Some(&dead_addr));
+
+    // 互探周期无 PONG → miss+1，发送让位次端点
+    a.note_probe_miss(dead_addr);
+    assert!(a.send_to_node_hop(2, None, frame).await.unwrap());
+    assert_eq!(a.last_sent_endpoint.get(&2), Some(&live_addr));
+    let mut buf = [0u8; 64];
+    let (n, _) = live.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], frame);
+
+    // PONG 恢复 → miss 清零，回证据中性（表序优先，非粘性记忆）
+    a.note_probe_ok(dead_addr);
+    assert!(a.send_to_node_hop(2, None, frame).await.unwrap());
+    assert_eq!(a.last_sent_endpoint.get(&2), Some(&dead_addr));
+}
+
 /// relay 侧端点择优（路径 path_next_hop 分支，REQ-054 决策 6）：
 /// 路径后继的多端点按活性排序转发
 #[tokio::test]

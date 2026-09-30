@@ -270,6 +270,17 @@ impl MeshData {
         }
     }
 
+    /// probe 无响应（CONNECTIVITY §4.1 反向证据）：PONG 缺席 = 端点黑洞 →
+    /// miss+1 发送排序让位。建会话前的响应方回包（msg2）只能按端点表序选
+    /// 址——黑洞端点 sendto 成功但被丢弃，且无会话即无心跳 miss、无发起
+    /// 重试可依赖，PONG 缺席是此时唯一的无响应信号（CONTROL_PLANE §3.11 ②）
+    pub fn note_probe_miss(&mut self, addr: SocketAddr) {
+        if let Some(owner) = self.endpoint_owner(addr) {
+            let m = self.endpoint_health.entry((owner, addr)).or_insert(0);
+            *m = m.saturating_add(1);
+        }
+    }
+
     /// 当前端点表（互探用：对全部 peer 候选端点发 PING，CONNECTIVITY §4）
     pub fn peer_endpoints(&self) -> Vec<(u32, Vec<SocketAddr>)> {
         self.endpoint_table
