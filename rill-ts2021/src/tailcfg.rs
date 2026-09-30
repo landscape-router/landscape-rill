@@ -127,18 +127,24 @@ pub fn map_request_json(
     serde_json::to_vec(&body).expect("serialize MapRequest")
 }
 
-/// Lite 端点更新（Stream=false + OmitPeers=true）：服务端只存端点并回 200 空 body
+/// Lite 端点更新（Stream=false + OmitPeers=true）：服务端只存端点并回 200 空 body。
+/// Hostinfo 必须与长轮询请求同构（含 RoutableIPs）——服务端按请求内 Hostinfo 覆写
+/// 节点广播路由，缺省即清空（tailscaled 每个 MapRequest 都带全量 Hostinfo，同源）
 pub fn map_endpoints_update_json(
     node_key: &[u8; 32],
     disco_key: &[u8; 32],
     hostname: &str,
     endpoints: &[String],
     preferred_derp: Option<u16>,
+    routable_ips: &[String],
 ) -> Vec<u8> {
-    let hostinfo = match preferred_derp {
+    let mut hostinfo = match preferred_derp {
         Some(rid) => serde_json::json!({"Hostname": hostname, "NetInfo": {"PreferredDERP": rid}}),
         None => serde_json::json!({"Hostname": hostname}),
     };
+    if !routable_ips.is_empty() {
+        hostinfo["RoutableIPs"] = serde_json::json!(routable_ips);
+    }
     let body = serde_json::json!({
         "Version": CURRENT_CAP_VERSION,
         "NodeKey": format!("nodekey:{}", hex(node_key)),
@@ -156,8 +162,10 @@ pub fn map_endpoints_update_json(
 pub struct MapResponse {
     #[serde(rename = "Node")]
     pub node: Option<NetNode>,
+    /// None = 本帧不带 peer 集合（keepalive/轻量更新，语义为"不变更"）；
+    /// Some = 全量替换。tailcfg 区分缺省与空集，serde(default) Vec 会把缺省坍缩成空
     #[serde(rename = "Peers", default)]
-    pub peers: Vec<NetPeer>,
+    pub peers: Option<Vec<NetPeer>>,
     #[serde(rename = "DERPMap", default)]
     pub derp_map: Option<serde_json::Value>,
 }

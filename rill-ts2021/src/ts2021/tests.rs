@@ -179,3 +179,16 @@ fn machine_key_persistence_roundtrip() {
     assert!(load_or_create_machine_key(&path).is_err());
     let _ = std::fs::remove_file(&path);
 }
+
+/// MapResponse Peers 缺省语义：headscale 轻量更新帧不带 Peers 字段 = "不变更"；
+/// serde(default) Vec 会把缺省坍缩成空集，netmap 全量替换语义下会误清空会话表
+#[test]
+fn map_response_peers_absent_vs_empty() {
+    let lite: crate::tailcfg::MapResponse =
+        serde_json::from_str(r#"{"Node":{"Key":"nodekey:aa"},"KeepAlive":true}"#).unwrap();
+    assert!(lite.peers.is_none(), "缺省 Peers 必须解析为 None（不变更）");
+
+    let full: crate::tailcfg::MapResponse =
+        serde_json::from_str(r#"{"Node":{"Key":"nodekey:aa"},"Peers":[]}"#).unwrap();
+    assert_eq!(full.peers.as_deref().map(|p| p.len()), Some(0));
+}

@@ -53,7 +53,13 @@ impl WgTunnel {
             };
             match result {
                 TunnResult::Done => break,
-                TunnResult::Err(_) => break, // 解析失败/无会话：丢弃（fail-closed）
+                TunnResult::Err(e) => {
+                    // 解析失败/无会话：丢弃（fail-closed）；错误形态经 LRILL_DEBUG 观测
+                    if std::env::var("LRILL_DEBUG").is_ok() {
+                        eprintln!("[dbg] wg decap err: {e:?} ({}B)", datagram.len());
+                    }
+                    break;
+                }
                 TunnResult::WriteToNetwork(bytes) => out.to_send.push(bytes.to_vec()),
                 TunnResult::WriteToTunnelV4(bytes, _) | TunnResult::WriteToTunnelV6(bytes, _) => {
                     out.plaintext = Some(bytes.to_vec())

@@ -232,7 +232,9 @@ async fn send_wg(
         let _ = udp.send_to(bytes, ep).await;
     }
     if let Some(d) = derp.lock().await.as_mut() {
-        let _ = d.send(key, bytes).await;
+        if let Err(e) = d.send(key, bytes).await {
+            debug!("[ts2021] derp send failed: {e}");
+        }
     }
 }
 
@@ -372,6 +374,12 @@ async fn run_data_plane(
                         let mut s = sessions.lock().unwrap();
                         decap_session(&mut s, Some(&pkt.source), None, &pkt.data)
                     };
+                    debug!(
+                        "[ts2021] derp decap: {}B plain={} emits={}",
+                        pkt.data.len(),
+                        plain.is_some(),
+                        emits.len()
+                    );
                     for (key, endpoints, frames) in emits {
                         for b in frames {
                             send_wg(&udp, &derp, &key, &endpoints, &b).await;
@@ -542,29 +550,36 @@ async fn run_control(
                     break;
                 }
             };
-            tokio::select! {
-                r = stream.next_netmap() => match r {
-                    Ok(map) => {
-                        apply_netmap(
-                            &map, &mut client, &connector, &node_pub, &node_priv,
-                            &disco_pub, &cfg.hostname, &host_port, &udp_endpoint,
-                            &mut preferred_derp, &ev_tx, &cmd_tx,
-                        )
-                        .await;
+            // 长轮询流保持持有：后续 netmap 以新帧继续到达（断开重连会造成
+            // headscale 侧 online 状态抖动，peer 撤订阅户路由）
+            let mut hold = true;
+            while hold {
+                tokio::select! {
+                    r = stream.next_netmap() => match r {
+                        Ok(map) => {
+                            apply_netmap(
+                                &map, &mut client, &connector, &node_pub, &node_priv,
+                                &disco_pub, &cfg.hostname, &host_port, &udp_endpoint,
+                                &advertise, &mut preferred_derp, &ev_tx, &cmd_tx,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            debug!("[ts2021] map stream closed: {e}");
+                            hold = false;
+                        }
+                    },
+                    _ = poke_rx.changed() => {
+                        let _ = poke_rx.borrow_and_update();
+                        info!("[ts2021] advertise changed, re-issuing map request");
+                        hold = false;
                     }
-                    Err(e) => {
-                        debug!("[ts2021] map stream closed: {e}");
+                    _ = derp_lost_rx.recv() => {
+                        info!("[ts2021] derp lost, re-establishing");
+                        preferred_derp = None;
+                        hold = false;
                         stream_ok = false;
                     }
-                },
-                _ = poke_rx.changed() => {
-                    let _ = poke_rx.borrow_and_update();
-                    info!("[ts2021] advertise changed, re-issuing map request");
-                }
-                _ = derp_lost_rx.recv() => {
-                    info!("[ts2021] derp lost, re-establishing");
-                    preferred_derp = None;
-                    stream_ok = false;
                 }
             }
         }
@@ -599,12 +614,16 @@ async fn apply_netmap(
     hostname: &str,
     host_port: &str,
     udp_endpoint: &str,
+    advertise: &Arc<std::sync::Mutex<Vec<String>>>,
     preferred_derp: &mut Option<u16>,
     ev_tx: &mpsc::Sender<Ts2021Event>,
     cmd_tx: &mpsc::Sender<DataCmd>,
 ) {
-    let peers: Vec<Ts2021Peer> = map
-        .peers
+    // 无 Peers 字段 = 不变更（keepalive/轻量更新帧），整帧跳过
+    let Some(map_peers) = map.peers.as_ref() else {
+        return;
+    };
+    let peers: Vec<Ts2021Peer> = map_peers
         .iter()
         .filter_map(|p| {
             let key = p.node_key().ok()?;
@@ -633,10 +652,13 @@ async fn apply_netmap(
                         .send(DataCmd::SetDerp(Box::new(derp), dn.region_id))
                         .await;
                 }
-                Err(e) => debug!("[ts2021] derp connect failed: {e}"),
+                Err(e) => warn!("[ts2021] derp connect failed: {e}"),
             }
         }
         let endpoints = [udp_endpoint.to_owned()];
+        // Lite 更新带同构 Hostinfo（含 RoutableIPs）：服务端按请求覆写广播路由，
+        // 缺省会清空（tailscaled 每个 MapRequest 全量 Hostinfo，同源）
+        let routables = advertise.lock().unwrap().clone();
         if let Err(e) = client
             .map_endpoints_update(
                 node_pub,
@@ -645,6 +667,7 @@ async fn apply_netmap(
                 host_port,
                 &endpoints,
                 *preferred_derp,
+                &routables,
             )
             .await
         {

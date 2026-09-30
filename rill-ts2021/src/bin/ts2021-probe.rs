@@ -157,7 +157,7 @@ async fn run() -> Result<RegisterResponse, Box<dyn std::error::Error + Send + Sy
             .map(&node_pub, &disco_pub, &hostname, &host, None)
             .await?;
         derp_node = map.derp_node();
-        if let Some(p) = map.peers.first() {
+        if let Some(p) = map.peers.as_ref().and_then(|ps| ps.first()) {
             if p.first_ipv4().is_some() {
                 self_v4 = map.self_ipv4();
                 peer = Some(p.clone());
@@ -205,6 +205,7 @@ async fn run() -> Result<RegisterResponse, Box<dyn std::error::Error + Send + Sy
             &host,
             &endpoints,
             Some(derp_node.region_id),
+            &[],
         )
         .await?;
 

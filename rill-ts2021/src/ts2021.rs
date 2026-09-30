@@ -108,6 +108,7 @@ impl ControlClient {
     /// keepalive 帧跳过。headscale 0.29 对 Stream=false 不回 body（poll.go serve），
     /// 完整 netmap 仅长轮询下发。
     /// Lite 端点更新（Stream=false + OmitPeers=true）：上报本端 UDP 端点，服务端回 200 空 body
+    #[allow(clippy::too_many_arguments)]
     pub async fn map_endpoints_update(
         &mut self,
         node_key: &[u8; 32],
@@ -116,9 +117,16 @@ impl ControlClient {
         host: &str,
         endpoints: &[String],
         preferred_derp: Option<u16>,
+        routable_ips: &[String],
     ) -> io::Result<()> {
-        let body =
-            map_endpoints_update_json(node_key, disco_key, hostname, endpoints, preferred_derp);
+        let body = map_endpoints_update_json(
+            node_key,
+            disco_key,
+            hostname,
+            endpoints,
+            preferred_derp,
+            routable_ips,
+        );
         self.post_json(host, "/machine/map", body).await?;
         Ok(())
     }
