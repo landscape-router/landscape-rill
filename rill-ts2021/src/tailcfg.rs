@@ -166,6 +166,15 @@ pub struct MapResponse {
     /// Some = 全量替换。tailcfg 区分缺省与空集，serde(default) Vec 会把缺省坍缩成空
     #[serde(rename = "Peers", default)]
     pub peers: Option<Vec<NetPeer>>,
+    /// 增量帧（REQ-067，capver≥5 delta 编码）：全条目 upsert（Node 同构）
+    #[serde(rename = "PeersChanged", default)]
+    pub peers_changed: Option<Vec<NetPeer>>,
+    /// 增量帧：删除的数字 node ID（NodeID = int64 裸数字上线路）
+    #[serde(rename = "PeersRemoved", default)]
+    pub peers_removed: Option<Vec<i64>>,
+    /// 增量帧（capver≥33/36）：字段级 patch，仅出现字段替换
+    #[serde(rename = "PeersChangedPatch", default)]
+    pub peers_changed_patch: Option<Vec<PeerPatch>>,
     #[serde(rename = "DERPMap", default)]
     pub derp_map: Option<serde_json::Value>,
 }
@@ -202,12 +211,30 @@ pub struct NetNode {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetPeer {
+    /// 数字 node ID（服务端稳定标识，PeersRemoved/patch 关联用；缺省 = None）
+    #[serde(rename = "ID", default)]
+    pub nid: Option<i64>,
     #[serde(rename = "Key")]
     pub key: String,
     #[serde(rename = "Endpoints", default)]
     pub endpoints: Vec<String>,
     #[serde(rename = "AllowedIPs", default)]
     pub allowed_ips: Vec<String>,
+}
+
+/// PeersChangedPatch 条目（REQ-067）：仅解析消费的字段——Key/Endpoints/
+/// AllowedIPs；Online/PeerSeen/KeyExpiry/DERP 区域等显式不解析（观测在
+/// 应用层按条数 debug 日志，不静默丢弃）
+#[derive(Debug, Clone, Deserialize)]
+pub struct PeerPatch {
+    #[serde(rename = "NodeID", default)]
+    pub node_id: Option<i64>,
+    #[serde(rename = "Key", default)]
+    pub key: Option<String>,
+    #[serde(rename = "Endpoints", default)]
+    pub endpoints: Option<Vec<String>>,
+    #[serde(rename = "AllowedIPs", default)]
+    pub allowed_ips: Option<Vec<String>>,
 }
 
 impl NetPeer {
@@ -235,5 +262,69 @@ impl MapResponse {
             let ip = a.split('/').next()?;
             ip.parse().ok()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_key_hex(b: u8) -> String {
+        format!("nodekey:{}", hex(&[b; 32]))
+    }
+
+    /// 增量帧解码（REQ-067）：PeersChanged/PeersRemoved/PeersChangedPatch
+    /// 各自独立缺省（None ≠ 空集坍缩）；NetPeer 数字 node ID；patch 仅出现字段
+    #[test]
+    fn map_response_decodes_incremental_peer_frames() {
+        let full: MapResponse = serde_json::from_value(serde_json::json!({
+            "Node": {"Addresses": ["100.64.0.2/32"]},
+            "Peers": [{
+                "ID": 7,
+                "Key": node_key_hex(0x11),
+                "Endpoints": ["192.0.2.10:41641"],
+                "AllowedIPs": ["10.99.0.0/24"]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(full.peers.as_ref().unwrap()[0].nid, Some(7));
+        assert!(full.peers_changed.is_none());
+        assert!(full.peers_removed.is_none());
+        assert!(full.peers_changed_patch.is_none());
+
+        let delta: MapResponse = serde_json::from_value(serde_json::json!({
+            "PeersChanged": [{
+                "ID": 7,
+                "Key": node_key_hex(0x22),
+                "Endpoints": ["192.0.2.11:41641"]
+            }],
+            "PeersRemoved": [9, 12],
+            "PeersChangedPatch": [
+                {"NodeID": 3, "Endpoints": ["192.0.2.12:41641"], "Online": true}
+            ]
+        }))
+        .unwrap();
+        // 增量帧不带 Peers：缺省保持 None（serde(default) Vec 会坍缩成空）
+        assert!(delta.peers.is_none());
+        let changed = delta.peers_changed.as_ref().unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].nid, Some(7));
+        assert_eq!(changed[0].key, node_key_hex(0x22));
+        assert_eq!(delta.peers_removed.as_ref().unwrap(), &[9, 12]);
+        let patch = &delta.peers_changed_patch.as_ref().unwrap()[0];
+        assert_eq!(patch.node_id, Some(3));
+        assert!(patch.key.is_none());
+        assert_eq!(
+            patch.endpoints.as_ref().unwrap(),
+            &vec!["192.0.2.12:41641".to_owned()]
+        );
+
+        // keepalive 帧（无任何 peer 字段）
+        let ka: MapResponse = serde_json::from_value(serde_json::json!({
+            "ControlTime": "2026-09-30T00:00:00Z", "KeepAlive": true
+        }))
+        .unwrap();
+        assert!(ka.peers.is_none() && ka.peers_changed.is_none());
+        assert!(ka.peers_removed.is_none() && ka.peers_changed_patch.is_none());
     }
 }

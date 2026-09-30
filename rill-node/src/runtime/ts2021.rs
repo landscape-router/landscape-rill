@@ -31,6 +31,8 @@ const CONTROL_BACKOFF_MAX: Duration = Duration::from_secs(300);
 pub struct Ts2021Peer {
     /// hex(node key)——RouteVia::Tailnet 载荷与 WG 会话表键
     pub id: String,
+    /// 服务端数字 node ID——增量帧（PeersChanged/Removed/Patch）关联键；0 = 未携带
+    pub nid: i64,
     pub key: [u8; 32],
     pub endpoints: Vec<SocketAddr>,
     /// AllowedIPs 原文（发送侧 peer 匹配与引擎路由注入各取所需）
@@ -548,6 +550,8 @@ async fn run_control(
     let host_port = cfg.control_url.trim_start_matches("https://").to_owned();
     let mut backoff = Duration::from_secs(1);
     let mut preferred_derp: Option<u16> = None;
+    // netmap 快照（数字 node ID 键控）：全量帧重建 / 增量帧合并的基线
+    let mut snapshot: HashMap<i64, Ts2021Peer> = HashMap::new();
     // TLS 信任锚 = 配置 CA（自签，同 mesh 控制面哲学）；establish 与 DERP 共用
     let connector = match tls_connector(&cfg.ca_cert_path) {
         Ok(c) => c,
@@ -596,6 +600,7 @@ async fn run_control(
                                 &map, &mut client, &connector, &node_pub, &node_priv,
                                 &disco_pub, &cfg.hostname, &host_port, &udp_endpoint,
                                 &advertise, &mut preferred_derp, &ev_tx, &cmd_tx,
+                                &mut snapshot,
                             )
                             .await;
                         }
@@ -654,7 +659,9 @@ fn tls_connector(ca_cert_path: &str) -> BoxResult<tokio_rustls::TlsConnector> {
 }
 
 /// netmap 应用：peer 快照下发（Node 路由注入 + 数据面会话表）+ DERP 连接 +
-/// Lite 端点上报（对端 netmap 获知本端 UDP 端点与 HomeDERP，反向可达前提）
+/// Lite 端点上报（对端 netmap 获知本端 UDP 端点与 HomeDERP，反向可达前提）。
+/// 全量帧（Peers）重建快照；增量帧（PeersChanged/Removed/Patch）在快照上合并
+/// 后同样走 Netmap + SetPeers 下发（merge_sessions 保活语义对两者一致）
 #[allow(clippy::too_many_arguments)]
 async fn apply_netmap(
     map: &MapResponse,
@@ -670,62 +677,178 @@ async fn apply_netmap(
     preferred_derp: &mut Option<u16>,
     ev_tx: &mpsc::Sender<Ts2021Event>,
     cmd_tx: &mpsc::Sender<DataCmd>,
+    snapshot: &mut HashMap<i64, Ts2021Peer>,
 ) {
-    // 无 Peers 字段 = 不变更（keepalive/轻量更新帧），整帧跳过
-    let Some(map_peers) = map.peers.as_ref() else {
-        return;
-    };
-    let peers: Vec<Ts2021Peer> = map_peers
-        .iter()
-        .filter_map(|p| {
-            let key = p.node_key().ok()?;
-            Some(Ts2021Peer {
-                id: tailcfg::hex(&key),
-                key,
-                endpoints: p.endpoints.iter().filter_map(|e| e.parse().ok()).collect(),
-                allowed_ips: p.allowed_ips.clone(),
+    if let Some(map_peers) = map.peers.as_ref() {
+        let mut synth = 0i64;
+        let peers: Vec<Ts2021Peer> = map_peers
+            .iter()
+            .filter_map(|p| {
+                let key = p.node_key().ok()?;
+                Some(Ts2021Peer {
+                    id: tailcfg::hex(&key),
+                    nid: p.nid.unwrap_or_else(|| {
+                        synth -= 1;
+                        synth
+                    }),
+                    key,
+                    endpoints: p.endpoints.iter().filter_map(|e| e.parse().ok()).collect(),
+                    allowed_ips: p.allowed_ips.clone(),
+                })
             })
-        })
-        .collect();
-    info!("[ts2021] netmap applied: {} peer(s)", peers.len());
-    let _ = ev_tx
-        .send(Ts2021Event::Netmap {
-            peers: peers.clone(),
-        })
-        .await;
-    let _ = cmd_tx.send(DataCmd::SetPeers(peers)).await;
-    if let Some(dn) = map.derp_node() {
-        // DERP 连接（region 变化才重建；身份 = node key，tailscaled 同源）
-        if *preferred_derp != Some(dn.region_id) {
-            match connect_derp(connector, &dn, node_pub, node_priv).await {
-                Ok(derp) => {
-                    *preferred_derp = Some(dn.region_id);
-                    let _ = cmd_tx
-                        .send(DataCmd::SetDerp(Box::new(derp), dn.region_id))
-                        .await;
+            .collect();
+        // 全量替换增量合并基线（快照键 = 数字 node ID）
+        *snapshot = peers.iter().map(|p| (p.nid, p.clone())).collect();
+        info!("[ts2021] netmap applied: {} peer(s)", peers.len());
+        let _ = ev_tx
+            .send(Ts2021Event::Netmap {
+                peers: peers.clone(),
+            })
+            .await;
+        let _ = cmd_tx.send(DataCmd::SetPeers(peers)).await;
+        if let Some(dn) = map.derp_node() {
+            // DERP 连接（region 变化才重建；身份 = node key，tailscaled 同源）
+            if *preferred_derp != Some(dn.region_id) {
+                match connect_derp(connector, &dn, node_pub, node_priv).await {
+                    Ok(derp) => {
+                        *preferred_derp = Some(dn.region_id);
+                        let _ = cmd_tx
+                            .send(DataCmd::SetDerp(Box::new(derp), dn.region_id))
+                            .await;
+                    }
+                    Err(e) => warn!("[ts2021] derp connect failed: {e}"),
                 }
-                Err(e) => warn!("[ts2021] derp connect failed: {e}"),
+            }
+            let endpoints = [udp_endpoint.to_owned()];
+            // Lite 更新带同构 Hostinfo（含 RoutableIPs）：服务端按请求覆写广播路由，
+            // 缺省会清空（tailscaled 每个 MapRequest 全量 Hostinfo，同源）
+            let routables = advertise.lock().unwrap().clone();
+            if let Err(e) = client
+                .map_endpoints_update(
+                    node_pub,
+                    disco_pub,
+                    hostname,
+                    host_port,
+                    &endpoints,
+                    *preferred_derp,
+                    &routables,
+                )
+                .await
+            {
+                debug!("[ts2021] endpoints update failed: {e}");
             }
         }
-        let endpoints = [udp_endpoint.to_owned()];
-        // Lite 更新带同构 Hostinfo（含 RoutableIPs）：服务端按请求覆写广播路由，
-        // 缺省会清空（tailscaled 每个 MapRequest 全量 Hostinfo，同源）
-        let routables = advertise.lock().unwrap().clone();
-        if let Err(e) = client
-            .map_endpoints_update(
-                node_pub,
-                disco_pub,
-                hostname,
-                host_port,
-                &endpoints,
-                *preferred_derp,
-                &routables,
-            )
-            .await
-        {
-            debug!("[ts2021] endpoints update failed: {e}");
+    } else if let Some(stats) = apply_delta(snapshot, map) {
+        // 增量帧不触发 Lite/DERP：端点广播节奏维持全量帧路径（delta 频率高——
+        // 对端 online 抖动即产生，逐帧 Lite 只会放大服务端写放大）
+        info!(
+            "[ts2021] netmap delta applied: +{} -{} ~{} → {} peer(s)",
+            stats.changed,
+            stats.removed,
+            stats.patched,
+            snapshot.len()
+        );
+        let mut peers: Vec<Ts2021Peer> = snapshot.values().cloned().collect();
+        peers.sort_by_key(|p| p.nid);
+        let _ = ev_tx
+            .send(Ts2021Event::Netmap {
+                peers: peers.clone(),
+            })
+            .await;
+        let _ = cmd_tx.send(DataCmd::SetPeers(peers)).await;
+    }
+    // 无任何 peer 字段 = keepalive/轻量更新帧，整帧跳过
+}
+
+/// 增量帧合并统计（观测/单测断言用）
+#[derive(Debug, Default, PartialEq)]
+struct DeltaStats {
+    changed: usize,
+    removed: usize,
+    patched: usize,
+}
+
+/// 字段存在且非空（增量帧判定）
+fn non_empty<T>(v: &Option<Vec<T>>) -> bool {
+    v.as_ref().is_some_and(|v| !v.is_empty())
+}
+
+/// 增量 peer 帧合并（REQ-067，TS2021_LEG §3.3.2）：快照按数字 node ID 键控，
+/// hex(node key) 仍是 WG 会话身份——key 轮换 = 同 nid 整条替换，下游
+/// merge_sessions 走旧删新建（旧会话拆、新隧道建）。I/O-free 纯快照变换。
+/// 返回 None = 本帧无增量字段（keepalive）；未携带 nid 的 patch/removed 条目
+/// 无法关联，跳过（全量 Peers 帧总是携带 ID，稳态不落此分支）
+fn apply_delta(snapshot: &mut HashMap<i64, Ts2021Peer>, map: &MapResponse) -> Option<DeltaStats> {
+    if !(non_empty(&map.peers_changed)
+        || non_empty(&map.peers_removed)
+        || non_empty(&map.peers_changed_patch))
+    {
+        return None;
+    }
+    let mut stats = DeltaStats::default();
+    let mut synth = snapshot
+        .keys()
+        .copied()
+        .filter(|k| *k < 0)
+        .min()
+        .unwrap_or(0);
+    if let Some(changed) = map.peers_changed.as_ref() {
+        for p in changed {
+            let Ok(key) = p.node_key() else {
+                continue;
+            };
+            let nid = p.nid.unwrap_or_else(|| {
+                synth -= 1;
+                synth
+            });
+            snapshot.insert(
+                nid,
+                Ts2021Peer {
+                    id: tailcfg::hex(&key),
+                    nid,
+                    key,
+                    endpoints: p.endpoints.iter().filter_map(|e| e.parse().ok()).collect(),
+                    allowed_ips: p.allowed_ips.clone(),
+                },
+            );
+            stats.changed += 1;
         }
     }
+    if let Some(removed) = map.peers_removed.as_ref() {
+        for nid in removed {
+            if snapshot.remove(nid).is_some() {
+                stats.removed += 1;
+            }
+        }
+    }
+    if let Some(patches) = map.peers_changed_patch.as_ref() {
+        for patch in patches {
+            let Some(nid) = patch.node_id else {
+                continue;
+            };
+            let Some(peer) = snapshot.get_mut(&nid) else {
+                continue;
+            };
+            // 消费字段（Key/Endpoints/AllowedIPs）之外的 patch 字段
+            //（Online/PeerSeen/DERP 区域）显式不解析
+            if let Some(k) = patch
+                .key
+                .as_deref()
+                .and_then(|k| tailcfg::parse_node_public(k).ok())
+            {
+                peer.key = k;
+                peer.id = tailcfg::hex(&k);
+            }
+            if let Some(eps) = patch.endpoints.as_ref() {
+                peer.endpoints = eps.iter().filter_map(|e| e.parse().ok()).collect();
+            }
+            if let Some(ips) = patch.allowed_ips.as_ref() {
+                peer.allowed_ips = ips.clone();
+            }
+            stats.patched += 1;
+        }
+    }
+    Some(stats)
 }
 
 async fn connect_derp(
@@ -789,6 +912,131 @@ mod tests {
     use landscape_rill_ts2021::wg::icmp_echo_request;
     use std::net::Ipv4Addr;
 
+    fn delta_frame(
+        changed: Vec<landscape_rill_ts2021::tailcfg::NetPeer>,
+        removed: Vec<i64>,
+        patch: Vec<landscape_rill_ts2021::tailcfg::PeerPatch>,
+    ) -> MapResponse {
+        let mut m = keepalive_frame();
+        if !changed.is_empty() {
+            m.peers_changed = Some(changed);
+        }
+        if !removed.is_empty() {
+            m.peers_removed = Some(removed);
+        }
+        if !patch.is_empty() {
+            m.peers_changed_patch = Some(patch);
+        }
+        m
+    }
+
+    fn keepalive_frame() -> MapResponse {
+        MapResponse {
+            node: None,
+            peers: None,
+            peers_changed: None,
+            peers_removed: None,
+            peers_changed_patch: None,
+            derp_map: None,
+        }
+    }
+
+    fn net_peer(
+        nid: i64,
+        key: &[u8; 32],
+        eps: &[&str],
+        ips: &[&str],
+    ) -> landscape_rill_ts2021::tailcfg::NetPeer {
+        landscape_rill_ts2021::tailcfg::NetPeer {
+            nid: Some(nid),
+            key: format!("nodekey:{}", tailcfg::hex(key)),
+            endpoints: eps.iter().map(|s| s.to_string()).collect(),
+            allowed_ips: ips.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// 增量帧合并语义（REQ-067）：keepalive 判 None；upsert 保留 hex 身份；
+    /// patch 按 nid 应用端点/AllowedIPs；removed 清理；key 轮换 = 同 nid 换身份
+    ///（下游 merge_sessions 走旧删新建）；未知 nid 跳过
+    #[test]
+    fn apply_delta_merges_incremental_frames() {
+        let (_, peer_pub) = ts2021::generate_keypair().unwrap();
+        let mut snap = HashMap::from([(
+            5i64,
+            Ts2021Peer {
+                id: tailcfg::hex(&peer_pub),
+                nid: 5,
+                key: peer_pub,
+                endpoints: vec![],
+                allowed_ips: vec!["10.99.0.0/24".to_owned()],
+            },
+        )]);
+
+        // keepalive（无增量字段）→ None
+        assert_eq!(apply_delta(&mut snap, &keepalive_frame()), None);
+
+        // PeersChanged 同 nid 新端点：hex 身份不变（会话保活前提）
+        let frame = delta_frame(
+            vec![net_peer(5, &peer_pub, &["192.0.2.10:41641"], &[])],
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            apply_delta(&mut snap, &frame),
+            Some(DeltaStats {
+                changed: 1,
+                removed: 0,
+                patched: 0
+            })
+        );
+        assert_eq!(snap[&5].id, tailcfg::hex(&peer_pub));
+        assert_eq!(
+            snap[&5].endpoints,
+            vec!["192.0.2.10:41641".parse::<SocketAddr>().unwrap()]
+        );
+
+        // patch：仅出现字段替换（端点 + AllowedIPs）
+        let patch = landscape_rill_ts2021::tailcfg::PeerPatch {
+            node_id: Some(5),
+            key: None,
+            endpoints: Some(vec!["192.0.2.11:41641".to_owned()]),
+            allowed_ips: Some(vec!["10.98.0.0/24".to_owned()]),
+        };
+        let frame = delta_frame(vec![], vec![], vec![patch]);
+        assert_eq!(
+            apply_delta(&mut snap, &frame),
+            Some(DeltaStats {
+                changed: 0,
+                removed: 0,
+                patched: 1
+            })
+        );
+        assert_eq!(
+            snap[&5].endpoints,
+            vec!["192.0.2.11:41641".parse::<SocketAddr>().unwrap()]
+        );
+        assert_eq!(snap[&5].allowed_ips, vec!["10.98.0.0/24".to_owned()]);
+
+        // key 轮换：同 nid 新 key → hex 身份迁移
+        let (_, new_pub) = ts2021::generate_keypair().unwrap();
+        let frame = delta_frame(vec![net_peer(5, &new_pub, &[], &[])], vec![], vec![]);
+        apply_delta(&mut snap, &frame).unwrap();
+        assert_eq!(snap[&5].id, tailcfg::hex(&new_pub));
+        assert_eq!(snap[&5].key, new_pub);
+
+        // removed：清理 + 统计；未知 nid 跳过
+        let frame = delta_frame(vec![], vec![5, 99], vec![]);
+        assert_eq!(
+            apply_delta(&mut snap, &frame),
+            Some(DeltaStats {
+                changed: 0,
+                removed: 1,
+                patched: 0
+            })
+        );
+        assert!(snap.is_empty());
+    }
+
     /// netmap 全量重放不得杀活会话（对端按旧 session index 续传，
     /// 重建隧道 = 最长 REKEY_AFTER 90s 数据面黑洞，e2e 实证）
     #[test]
@@ -827,6 +1075,7 @@ mod tests {
         // 同 peer netmap 重放（端点/AllowedIPs 更新）：隧道保留，会话存活
         let replay = Ts2021Peer {
             id: id.clone(),
+            nid: 5,
             key: peer_pub,
             endpoints: vec!["192.0.2.10:41641".parse().unwrap()],
             allowed_ips: vec!["10.99.0.0/24".to_owned()],
@@ -851,6 +1100,7 @@ mod tests {
         let (_, gone_pub) = ts2021::generate_keypair().unwrap();
         let gone = Ts2021Peer {
             id: tailcfg::hex(&gone_pub),
+            nid: 6,
             key: gone_pub,
             endpoints: vec![],
             allowed_ips: vec![],

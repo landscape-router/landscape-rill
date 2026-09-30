@@ -310,6 +310,72 @@ if [ "$ok" != "yes" ]; then
 fi
 echo "TSL-05 OK: node-c ping 10.42.0.1（mesh 资源）+ 10.43.0.1（自家 LAN）"
 
+# TSL-11（REQ-067）：① 对端重启 → 旧 WG 会话失效经 rekey 重建（ping 恢复，不重注册）
+# ② peer 增减经增量帧传播：node-d 加入 → PeersChanged（+1）、headscale 删除 →
+#    PeersRemoved（-1）。重启自身不产生增量帧——同 key 同端点 = 服务端视角
+#    无变更（e2e 实证），故增量路径以 peer 增删为触发
+docker restart tsrt-node-c >/dev/null
+for i in $(seq 1 30); do
+  docker exec tsrt-node-c tailscale --socket=/var/run/tailscale/tailscaled.sock status >/dev/null 2>&1 && break
+  sleep 2
+done
+ok=""
+for i in $(seq 1 120); do
+  if docker exec tsrt-node-c ping -c1 -W2 10.43.0.1 >/dev/null 2>&1 \
+     && docker exec tsrt-node-c ping -c1 -W2 10.42.0.1 >/dev/null 2>&1; then
+    ok=yes; break
+  fi
+  sleep 2
+done
+if [ "$ok" != "yes" ]; then
+  echo "FAIL: TSL-11 对端重启后 ping 未恢复"
+  dump
+  exit 1
+fi
+echo "TSL-11a OK: node-c 重启 → 会话经 rekey 重建（ping 恢复，不重注册）"
+
+# TSL-11b：peer 增删传播（REQ-067）。e2e 实证 headscale 0.29 语义：**无中流
+# 推送**——node 增删/断连期间流式对端零推送，长轮询 ~500s 服务端到期空响应
+# （官方 tailscaled 同周期重轮询），变更经下一轮询全量帧到达。场景以重注册
+# 强制新轮询（生产等价物 = 轮询周期）：node-d 入网 → 重启 rill-ext → 全量
+# netmap 含 2 peer；headscale 删除 node-d → 再重启 → 1 peer。增量帧
+# （PeersChanged/Removed/Patch）解析与合并由单测锁定（apply_delta_*）
+TSNET=$(docker inspect tsrt-node-c --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}}{{end}}')
+docker run -d --name tsrt-node-d --network "$TSNET" --ip 192.168.244.30 \
+  --privileged --device /dev/net/tun --cap-add NET_ADMIN \
+  -e TS_AUTHKEY -e TS_HOSTNAME=node-d \
+  tsrt-base /usr/local/bin/entry-node.sh >/dev/null
+for i in $(seq 1 30); do
+  docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -q node-d && break
+  sleep 2
+done
+sleep 3
+MARK=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
+docker restart tsrt-rill-ext >/dev/null
+joined=""
+for i in $(seq 1 60); do
+  docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK + 1)) | grep -qE "netmap (delta applied: \+[1-9]|applied: 2 peer)" && { joined=yes; break; }
+  sleep 2
+done
+NODE_D_ID=$(docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep node-d | awk -F'|' '{gsub(/ /, "", $1); print $1}' | head -1)
+[ -n "$NODE_D_ID" ] && docker exec tsrt-headscale headscale nodes delete -i "$NODE_D_ID" --force >/dev/null 2>&1
+docker rm -f tsrt-node-d >/dev/null 2>&1 || true
+sleep 3
+MARK=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
+docker restart tsrt-rill-ext >/dev/null
+left=""
+for i in $(seq 1 60); do
+  docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK + 1)) | grep -qE "netmap (delta applied: \+0 -[1-9]|applied: 1 peer)" && { left=yes; break; }
+  sleep 2
+done
+if [ "$joined" != "yes" ] || [ "$left" != "yes" ]; then
+  echo "FAIL: TSL-11 peer 增删未传播（join=$joined leave=$left）"
+  echo "--- rill-ext ts2021 日志 ---"; docker logs tsrt-rill-ext 2>&1 | grep -E "\[ts2021\]" | tail -15
+  echo "--- headscale 日志 ---"; docker logs tsrt-headscale 2>&1 | tail -15
+  exit 1
+fi
+echo "TSL-11b OK: node-d 入网/删除 → 重轮询全量 netmap 反映 peer 增删（2→1）"
+
 # TSL-07：node-c 经 rill-ext 作 exit，ping extnet 网关（独立网络，node-c 不接入）
 # 目标不在 node-c 直连网段 → 走 exit 路径；tailscale set 不重置既有 flags
 RILL_TS_IP=$(docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
@@ -331,4 +397,4 @@ if [ "$ok" != "yes" ]; then
 fi
 docker exec tsrt-node-c ping -c3 192.168.245.1 || true
 
-echo "PASS: TSL-05 subnet router（mesh routes[] 汇总 + 自家 LAN 广播进 tailnet）+ TSL-07 exit 被用作（内核转发 + MASQUERADE 回程）"
+echo "PASS: TSL-05 subnet router（mesh routes[] 汇总 + 自家 LAN 广播进 tailnet）+ TSL-11 对端重启增量帧（REQ-067）+ TSL-07 exit 被用作（内核转发 + MASQUERADE 回程）"

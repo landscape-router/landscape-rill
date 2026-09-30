@@ -437,6 +437,7 @@ async fn path_request_pending_capped() {
 fn ts_peer(seed: u8, allowed: &[&str]) -> ts2021::Ts2021Peer {
     ts2021::Ts2021Peer {
         id: format!("{seed:02x}").repeat(32),
+        nid: i64::from(seed),
         key: [seed; 32],
         endpoints: vec![],
         allowed_ips: allowed.iter().map(|s| s.to_string()).collect(),
