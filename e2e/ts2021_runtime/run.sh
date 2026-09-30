@@ -38,6 +38,9 @@ if ! docker image inspect tsrt-e2e-base >/dev/null 2>&1; then
 fi
 
 echo "==> 1/8 下载 tailscale 二进制（register 缓存优先）"
+# cp -r 的目标目录必须已存在，否则包内容被平铺进 build/ 而非子目录，
+# Dockerfile 的 tailscale_*/ 通配 COPY 会静默落空（chmod 才暴露）
+mkdir -p "$BUILD_DIR"
 if [ ! -d "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64" ]; then
   if [ -d "$REG_BUILD/tailscale_${TAILSCALE_VER}_amd64" ]; then
     cp -r "$REG_BUILD/tailscale_${TAILSCALE_VER}_amd64" "$BUILD_DIR/"
@@ -47,6 +50,12 @@ if [ ! -d "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64" ]; then
     tar xzf "$BUILD_DIR/tailscale.tgz" -C "$BUILD_DIR"
   fi
 fi
+# BuildKit 对未命中的 COPY 通配静默跳过，这里显式把关二进制落位
+[ -f "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64/tailscaled" ] && \
+[ -f "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64/tailscale" ] || {
+  echo "FAIL: tailscale 二进制未落位到 build/tailscale_${TAILSCALE_VER}_amd64/" >&2
+  exit 1
+}
 
 echo "==> 2/8 构建 lrill（release）"
 if [ "${E2E_SKIP_BUILD:-0}" != "1" ]; then
