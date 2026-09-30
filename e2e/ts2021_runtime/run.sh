@@ -114,7 +114,7 @@ for net in 192.168.242.0/24 192.168.244.0/24 192.168.245.0/24; do
 done
 
 echo "==> 5/8 启动 tsrv（自研 ts2021 服务端）"
-$COMPOSE build -q
+$COMPOSE build
 $COMPOSE up -d --force-recreate tsrv
 for i in $(seq 1 30); do
   docker logs "$TSRV" 2>&1 | grep -q "ts2021-server.*listening" && break

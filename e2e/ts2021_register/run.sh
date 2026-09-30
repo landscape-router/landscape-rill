@@ -108,7 +108,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> 5/8 构建镜像 + 启动 headscale"
-$COMPOSE build -q
+$COMPOSE build
 $COMPOSE up -d --force-recreate headscale
 for i in $(seq 1 30); do
   docker exec ts2021-headscale headscale version >/dev/null 2>&1 && \
