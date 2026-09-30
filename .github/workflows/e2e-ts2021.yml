@@ -1,6 +1,8 @@
 # ts2021 接入 e2e：lrill 自研客户端（GET /key → controlhttp 升级 → Noise IK → early payload →
 # HTTP/2 → /machine/register，auth key 预授权）+ 官方 tailscaled 经自建 headscale
-# 双节点同 tailnet 注册（TSL-04 控制面）。数据面互通为后续里程碑。
+# 双节点同 tailnet 注册（TSL-04/TSL-06/TSL-08/TSL-10）；
+# runtime 场景（TSL-05/TSL-07）：rilld 节点（mesh + ts2021 腿）作 subnet router/exit，
+# node-c（官方 tailscaled）消费——mesh routes[] 汇总广播进 tailnet + exit 被用作。
 # 场景目录约定见 docs/ci/README.md §1
 name: e2e-ts2021
 
@@ -20,3 +22,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: ts2021 register e2e
         run: ./e2e/ts2021_register/run.sh
+      # register 先跑：headscale/tailscale 二进制下载进其 build/ 缓存，runtime 场景复用
+      - name: ts2021 runtime e2e
+        run: ./e2e/ts2021_runtime/run.sh

@@ -1,0 +1,98 @@
+# ts2021 运行时集成 e2e（TSL-05/TSL-07，TS2021_LEG §3.3.2）：
+#   mesh 侧：coord + rill-ext（land0 10.43/24 + ts2021 腿）+ rill-b（land0 10.42/24）
+#   tailnet 侧：headscale（自签 TLS + 内嵌 DERP）+ node-c（官方 tailscaled）
+#   rill-ext 三网卡：rillnet(mesh) + tsnet(tailnet 控制/DERP/node-c) + extnet(exit 转发目标)
+# 验证：mesh routes[] 汇总 + 自家 LAN 广播进 tailnet → node-c ping mesh 资源（TSL-05）；
+#       node-c --exit-node=rill-ext → ping extnet 网关（TSL-07）
+# 网段：192.168.242.0/24 起预留 ts2021 集成（mesh e2e 专用段之外）
+services:
+  headscale:
+    image: tsrt-base
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    container_name: tsrt-headscale
+    command: ["headscale", "serve"]
+    volumes:
+      - ./build/headscale-config:/etc/headscale
+      - headscale-data:/var/lib/headscale
+    networks:
+      tsnet:
+        ipv4_address: 192.168.244.10
+
+  coord:
+    image: tsrt-base
+    container_name: tsrt-coord
+    command: ["lrill", "run", "/etc/landscape/overlay.json"]
+    volumes:
+      - ./build/coord.json:/etc/landscape/overlay.json
+    networks:
+      rillnet:
+        ipv4_address: 192.168.242.10
+
+  rill-ext:
+    image: tsrt-base
+    container_name: tsrt-rill-ext
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["/usr/local/bin/entry-rill.sh"]
+    volumes:
+      - ./build/rill-ext.json:/etc/landscape/overlay.json
+    networks:
+      rillnet:
+        ipv4_address: 192.168.242.11
+      tsnet:
+        ipv4_address: 192.168.244.11
+      extnet:
+        ipv4_address: 192.168.245.11
+
+  rill-b:
+    image: tsrt-base
+    container_name: tsrt-rill-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["lrill", "run", "/etc/landscape/overlay.json"]
+    volumes:
+      - ./build/rill-b.json:/etc/landscape/overlay.json
+    networks:
+      rillnet:
+        ipv4_address: 192.168.242.21
+
+  node-c:
+    image: tsrt-base
+    container_name: tsrt-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY}"
+      TS_HOSTNAME: node-c
+    command: ["/usr/local/bin/entry-node.sh"]
+    networks:
+      tsnet:
+        ipv4_address: 192.168.244.20
+
+volumes:
+  headscale-data:
+
+networks:
+  rillnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.242.0/24
+  tsnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.244.0/24
+  extnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.245.0/24
