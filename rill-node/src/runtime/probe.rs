@@ -63,12 +63,14 @@ impl Node {
     }
 
     /// 中继挂靠（CONNECTIVITY §5，CON-04）：默认路径帧端点表 = 直连端点 ++ 确认中继端点
-    /// （直连 miss 轮转自然落到中继；miss_endpoint 逐个排除）
+    /// （直连 miss 轮转自然落到中继；miss_endpoint 逐个排除）。
+    /// 自身端点必须排除：自己也是 relay 志愿者时 relay 列表含自身端点，
+    /// 追加进 peer 候选会让 relay 把帧转发回自己（自环至 TTL 耗尽）
     pub(super) fn apply_relay_endpoints(&mut self) {
         let relays: Vec<SocketAddr> = self
             .relays
             .iter()
-            .filter(|r| r.confirmed)
+            .filter(|r| r.confirmed && r.node_id != self.node_id)
             .map(|r| r.endpoint)
             .collect();
         let peers: Vec<(u32, Vec<SocketAddr>)> = self.peer_endpoints.clone().into_iter().collect();

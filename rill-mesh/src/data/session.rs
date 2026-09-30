@@ -139,7 +139,11 @@ impl MeshData {
         first_hop: Option<u32>,
         frame: &[u8],
     ) -> std::io::Result<bool> {
-        let hop = first_hop.unwrap_or(to_node_id);
+        // 首跳防自环：coordinator 签发的路径 hops 可能含发送者自身
+        //（如 2 节点互为 relay 的拓扑）——发送给自己只会白耗一跳，直连目标即可
+        let hop = first_hop
+            .filter(|h| *h != self.self_node_id)
+            .unwrap_or(to_node_id);
         match self.endpoint_table.get(&hop) {
             Some(addrs) => {
                 let mut ordered = addrs.clone();
