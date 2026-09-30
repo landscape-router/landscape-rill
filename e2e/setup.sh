@@ -403,6 +403,81 @@ EOF
   echo "$NODE_C_AUTHKEY" > "$BUILD_DIR/.reload_kx"
 fi
 
+if [ "$SCENARIO" = "acl" ]; then
+  # acl 场景（REQ-045，SEC-31，CONTROL_PLANE §3.10）：direct 拓扑 + lab 网络开启前缀级
+  # 策略。ping 是双向流（回包 dst = 发起方源前缀，同样过目标侧裁决）——放行规则须
+  # 覆盖双方源前缀（10.42/10.43 + fd00:2/fd00:3）；default-deny 断言用第三方仲裁前缀
+  # 172.21.5.0/24（node-b lo 承载 172.21.5.1，同 dn42 场景惯例），初始无规则 →
+  # 阶段 2 SIGHUP 补放行断言 netmap 原子切换收敛。组 mesh={node-a,node-b}
+  #（注册顺序无关）。广播/组播（IPv6 ND）不在前缀级裁决范围（L2 豁免，设计既定）。
+  gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" \
+    '["10.43.0.0/24", "fd00:3::/64", "172.21.5.0/24"]' "$NODE_B_AUTHKEY"
+  cat > "$BUILD_DIR/coord.json" <<EOF
+{
+  "coord": {
+    "listen_addr": "0.0.0.0:8443",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "networks": [
+      {
+        "name": "lab",
+        "master_key": "$MASTER_KEY",
+        "auth_keys": [
+          { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+          { "key": "$NODE_B_AUTHKEY", "policy": "reusable" }
+        ],
+        "announce_whitelist": ["10.0.0.0/8", "fd00::/8", "172.21.5.0/24"],
+        "acl": {
+          "enabled": true,
+          "groups": { "mesh": [1, 2] },
+          "rules": [
+            { "subjects": ["group:mesh"], "prefix": "10.42.0.0/24", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "fd00:2::/64", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "10.43.0.0/24", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "fd00:3::/64", "action": "allow" }
+          ]
+        }
+      }
+    ]
+  }
+}
+EOF
+  # 阶段 2 目标配置：补放行仲裁前缀（SIGHUP 后 172.21.5.1 可达）
+  cat > "$BUILD_DIR/.acl_open.json" <<EOF
+{
+  "coord": {
+    "listen_addr": "0.0.0.0:8443",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "networks": [
+      {
+        "name": "lab",
+        "master_key": "$MASTER_KEY",
+        "auth_keys": [
+          { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+          { "key": "$NODE_B_AUTHKEY", "policy": "reusable" }
+        ],
+        "announce_whitelist": ["10.0.0.0/8", "fd00::/8", "172.21.5.0/24"],
+        "acl": {
+          "enabled": true,
+          "groups": { "mesh": [1, 2] },
+          "rules": [
+            { "subjects": ["group:mesh"], "prefix": "10.42.0.0/24", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "fd00:2::/64", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "10.43.0.0/24", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "fd00:3::/64", "action": "allow" },
+            { "subjects": ["group:mesh"], "prefix": "172.21.5.0/24", "action": "allow" }
+          ]
+        }
+      }
+    ]
+  }
+}
+EOF
+fi
+
 if [ "$SCENARIO" = "tenancy" ]; then
   # tenancy 场景（CONTROL_PLANE §1.5，SEC-21~25/CTL-09）：单 coordinator 双网络隔离
   # lab（node-a1/a2）+ work（node-b1/b2）；node-d（late）持 ghost 网络 key → 注册被拒

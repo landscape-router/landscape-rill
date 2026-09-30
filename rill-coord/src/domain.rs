@@ -3,6 +3,7 @@
 //! auth key 空间 + 白名单 + 条目）/ 路径服务（PathService，relay 集合与 PathMap）/ relay_list。
 //! 共享：进程、存储、signer（同一 coordinator 签名）、Liveness/Directory（node_id 全局键控）。
 
+use landscape_rill_core::control::acl::AclPolicy;
 use landscape_rill_core::control::registry::Registry;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,9 @@ pub struct NetworkDomain {
     /// relay 列表（DERP map 等价物，CONNECTIVITY §5）：按 RTT 排序的本网 relay 端点，
     /// 随 netmap 下发（CONTROL_PLANE §3.2）
     pub relay_list: Vec<String>,
+    /// ACL 策略（REQ-045，CONTROL_PLANE §3.10）：coordinator 权威，随 netmap 原子下发；
+    /// 配置是唯一来源（apply_to 应用），不持久化
+    pub acl: AclPolicy,
 }
 
 impl NetworkDomain {
@@ -50,6 +54,7 @@ impl NetworkDomain {
             keys: KeyManager::new(master_key),
             paths: PathService::new(),
             relay_list: Vec::new(),
+            acl: AclPolicy::default(),
         }
     }
 

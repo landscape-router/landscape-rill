@@ -55,6 +55,10 @@ pub enum RegisterError {
     #[error("malformed route announcement")]
     #[error_id("control.register.bad_route")]
     BadRoute,
+    /// 网络开启 ACL 而节点不带 acl 能力位（REQ-045 fail-closed：防最弱环节绕过裁决）
+    #[error("acl capability required")]
+    #[error_id("control.register.acl_capability_required")]
+    AclCapabilityRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

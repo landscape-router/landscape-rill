@@ -141,6 +141,42 @@ pub fn netmap_push_message(coordinator: &Coordinator, network_id: u32) -> Netmap
             .iter()
             .map(|s| Cow::Owned(s.clone()))
             .collect(),
+        // ACL 策略随 netmap 原子下发（REQ-045，CONTROL_PLANE §3.10；None = 未启用）
+        acl: Some(acl_policy_message(&coordinator.acl_policy_of(network_id))),
+    }
+}
+
+/// rill-core 策略 → 线格式（主体字符串化：node:<id> / group:<name> / any）
+fn acl_policy_message(policy: &landscape_rill_core::control::acl::AclPolicy) -> AclPolicy<'static> {
+    use landscape_rill_core::control::acl::{AclAction, AclSubject};
+    AclPolicy {
+        enabled: policy.enabled,
+        rules: policy
+            .rules
+            .iter()
+            .map(|r| AclRule {
+                subjects: r
+                    .subjects
+                    .iter()
+                    .map(|s| match s {
+                        AclSubject::Any => Cow::Borrowed("any"),
+                        AclSubject::Node(id) => Cow::Owned(format!("node:{id}")),
+                        AclSubject::Group(name) => Cow::Owned(format!("group:{name}")),
+                    })
+                    .collect(),
+                prefix: Cow::Owned(r.prefix.to_cidr()),
+                deny: r.action == AclAction::Deny,
+            })
+            .collect(),
+        groups: policy
+            .groups
+            .iter()
+            .map(|(name, ids)| AclGroup {
+                name: Cow::Owned(name.clone()),
+                // 4B 大端序列（同 CandidatePath.hops 惯例）
+                node_ids: Cow::Owned(ids.iter().flat_map(|id| id.to_be_bytes()).collect()),
+            })
+            .collect(),
     }
 }
 

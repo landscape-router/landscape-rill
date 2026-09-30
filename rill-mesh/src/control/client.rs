@@ -4,6 +4,9 @@ use crate::control::codec::{envelope_bytes, read_envelope};
 use crate::control::tls::client_tls_stream;
 use crate::control::{BoxResult, PROTOCOL_VERSION};
 use crate::framing;
+use landscape_rill_core::control::acl::{
+    AclAction, AclPolicy as CoreAclPolicy, AclRule, AclSubject,
+};
 use landscape_rill_core::control::session::{ClientSession, SessionState};
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead};
@@ -140,6 +143,65 @@ pub struct NetmapData {
     pub version: u64,
     pub entries: Vec<NetmapNode>,
     pub relay_list: Vec<String>,
+    /// 网络级 ACL 策略（REQ-045，CONTROL_PLANE §3.10）；None = 未启用（v1 全放行）
+    pub acl: Option<CoreAclPolicy>,
+}
+
+/// 线格式策略 → rill-core 策略（REQ-045）：主体 "node:<id>"/"group:<name>"/"any"。
+/// 恶形规则逐条跳过（coordinator 是鉴权权威、配置加载已校验，恶形只可能来自
+/// 版本偏差），enabled 语义始终荣誉——解码缺憾不得静默关闭 default-deny
+fn acl_from_wire(p: &AclPolicy) -> CoreAclPolicy {
+    let subject = |s: &str| match s.strip_prefix("node:") {
+        Some(id) => id.parse().ok().map(AclSubject::Node),
+        None => match s.strip_prefix("group:") {
+            Some(name) if !name.is_empty() => Some(AclSubject::Group(name.to_string())),
+            _ if s == "any" => Some(AclSubject::Any),
+            _ => None,
+        },
+    };
+    CoreAclPolicy {
+        enabled: p.enabled,
+        rules: p
+            .rules
+            .iter()
+            .filter_map(|r| {
+                let prefix = landscape_rill_core::route::Prefix::parse(&r.prefix).ok()?;
+                let subjects = r
+                    .subjects
+                    .iter()
+                    .filter_map(|s| subject(s))
+                    .collect::<Vec<_>>();
+                // 全部主体恶形 = 规则永远不命中，跳过等价；保留部分合法主体
+                if subjects.is_empty() && !r.subjects.is_empty() {
+                    return None;
+                }
+                Some(AclRule {
+                    subjects,
+                    prefix,
+                    action: if r.deny {
+                        AclAction::Deny
+                    } else {
+                        AclAction::Allow
+                    },
+                })
+            })
+            .collect(),
+        groups: p
+            .groups
+            .iter()
+            .map(|g| {
+                // 4B 大端序列（同 CandidatePath.hops 惯例）；截尾残字节忽略
+                let ids = g
+                    .node_ids
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_be_bytes(*c))
+                    .collect();
+                (g.name.to_string(), ids)
+            })
+            .collect(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,6 +355,7 @@ impl ControlSession {
                         .iter()
                         .map(|s| s.to_string())
                         .collect(),
+                    acl: owned.proto().acl.as_ref().map(acl_from_wire),
                 }))
             }
             MsgType::KEY_DIST => {

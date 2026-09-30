@@ -232,7 +232,7 @@ fn announce_routes_enter_netmap_and_whitelist_gates() {
 #[test]
 fn capability_acl_bit_reserved_v1() {
     let (mut c, ak) = setup();
-    // 保留位 0x40（acl，v2 预留）：coordinator 不解释、不占用，netmap 原样带出
+    // 保留位 0x40（acl）：策略未启用时 coordinator 不解释、netmap 原样带出
     let id = c.register(&ak, &pubkey(7), 0x40, vec![]).unwrap().node_id;
     let snap = c.netmap_snapshot(c.network_id_of(id).unwrap());
     assert_eq!(
@@ -240,6 +240,59 @@ fn capability_acl_bit_reserved_v1() {
         0x40
     );
     // 策略检查点恒放行断言在 rill-core/src/route.rs（policy_checkpoint_allow_all_v1）
+}
+
+// ==================== ACL v2 策略层（REQ-045，前缀级先行） ====================
+
+fn lab_policy() -> landscape_rill_core::control::acl::AclPolicy {
+    use landscape_rill_core::control::acl::*;
+    let mut groups = std::collections::HashMap::new();
+    groups.insert("admins".to_string(), vec![1]);
+    AclPolicy {
+        enabled: true,
+        rules: vec![AclRule {
+            subjects: vec![AclSubject::Group("admins".into()), AclSubject::Node(2)],
+            prefix: landscape_rill_core::route::Prefix::parse("10.42.0.0/24").unwrap(),
+            action: AclAction::Allow,
+        }],
+        groups,
+    }
+}
+
+/// 网络开启 ACL 后，无 acl 能力位的节点注册被拒（fail-closed：防最弱环节绕过裁决）
+#[test]
+fn acl_enabled_register_without_bit_rejected() {
+    let (mut c, ak) = setup();
+    c.set_acl_policy("lab", lab_policy());
+    // 不带 0x40 → 拒绝
+    let err = c.register(&ak, &pubkey(8), 0x01, vec![]).unwrap_err();
+    assert_eq!(err, RegisterError::AclCapabilityRequired);
+    // 带 0x40 → 放行（线格式装配断言在 rill-mesh server_tests）
+    let id = c.register(&ak, &pubkey(8), 0x41, vec![]).unwrap().node_id;
+    // 幂等重注册同受约束（能力位是注册字段）
+    let again = c.register(&ak, &pubkey(8), 0x41, vec![]);
+    assert_eq!(again.unwrap().node_id, id);
+    let err = c.register(&ak, &pubkey(8), 0x01, vec![]).unwrap_err();
+    assert_eq!(err, RegisterError::AclCapabilityRequired);
+}
+
+/// 策略变更 bump netmap 版本（version 一版本两用，节点侧随心跳快照收敛）
+#[test]
+fn acl_policy_change_bumps_netmap_version() {
+    let (mut c, ak) = setup();
+    let id = c.register(&ak, &pubkey(9), 0x41, vec![]).unwrap().node_id;
+    let network_id = c.network_id_of(id).unwrap();
+    let v0 = c.netmap_version();
+
+    c.set_acl_policy("lab", lab_policy());
+    assert_eq!(c.netmap_version(), v0 + 1);
+    assert_eq!(c.acl_policy_of(network_id), lab_policy());
+    // 未启用网络 = default（disabled）
+    c.set_acl_policy(
+        "lab",
+        landscape_rill_core::control::acl::AclPolicy::default(),
+    );
+    assert!(!c.acl_policy_of(network_id).enabled);
 }
 
 // ==================== 多网络隔离（SEC-21~25/CTL-09，CONTROL_PLANE §1.5） ====================

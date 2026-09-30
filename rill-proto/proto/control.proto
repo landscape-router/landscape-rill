@@ -33,8 +33,9 @@ message Envelope {
 }
 
 // 能力位（位掩码，CONTROL_PLANE §3.1 能力位表）：
-//   relay=0x01  bridge=0x02  coordinator=0x04  exit=0x08  acl=0x10（v2 预留，v1 恒 false）
+//   relay=0x01  bridge=0x02  coordinator=0x04  exit=0x08
 //   broadcast=0x20（接收 L2 广播/组播泛洪，opt-in——keydist 仅向该位节点下发 broadcast_key）
+//   acl=0x40（支持 ACL 策略裁决，REQ-045：网络开启 ACL 后无该位注册被拒）
 
 // §3.1 注册
 message RegisterRequest {
@@ -77,6 +78,26 @@ message NetmapPush {
   uint64 version = 1;           // 权威版本号（CAS 语义；同时承载 ACL 策略版本）
   repeated NetmapEntry entries = 2;
   repeated string relay_list = 3;  // 候选中继（CONNECTIVITY §5）
+  AclPolicy acl = 4;            // 网络级 ACL 策略（REQ-045；缺省 = 未启用，v1 全放行）
+}
+
+// §3.10 ACL 策略（REQ-045，前缀级先行）
+message AclPolicy {
+  bool enabled = 1;             // false = v1 全放行；true = default-deny
+  repeated AclRule rules = 2;   // 有序规则，first-match-wins
+  repeated AclGroup groups = 3; // 组 = 管理面标签（node_id 打标，规则引用）
+}
+
+message AclRule {
+  repeated string subjects = 1;  // "node:<id>" | "group:<name>" | "any"
+  string prefix = 2;             // 目标前缀（CIDR）
+  bool deny = 3;                 // false = allow（proto3 无三态，缺省 allow）
+}
+
+message AclGroup {
+  string name = 1;
+  bytes node_ids = 2;           // 有序成员，每个 node_id 4B 大端（同 CandidatePath.hops 惯例；
+                                // 规避 pb 读侧 packed-fixed 对齐 UB）
 }
 
 // §3.3 转发密钥下发

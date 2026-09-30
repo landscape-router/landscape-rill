@@ -31,6 +31,12 @@ fn unique_ca_path() -> String {
 
 /// 启动共享 coordinator（每连接独立任务，注册表共享）
 async fn start_coord() -> (String, String) {
+    let (url, ca, _server) = start_coord_with_handle().await;
+    (url, ca)
+}
+
+/// 同 start_coord，保留服务端句柄（测试中改策略/白名单用）
+async fn start_coord_with_handle() -> (String, String, Arc<Mutex<CoordinatorServer>>) {
     let (ca, cert, key) = coord_ca();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -82,7 +88,11 @@ async fn start_coord() -> (String, String) {
     });
     let ca_path = unique_ca_path();
     std::fs::write(&ca_path, &ca).unwrap();
-    (format!("https://127.0.0.1:{}", addr.port()), ca_path)
+    (
+        format!("https://127.0.0.1:{}", addr.port()),
+        ca_path,
+        server,
+    )
 }
 
 fn node_config(url: &str, ca_path: &str, seed: u8, routes: Vec<String>) -> Config {
@@ -584,4 +594,120 @@ async fn tailnet_ingress_transits_to_mesh_and_reflection_dropped() {
         Ok(ev) => panic!("reflection leaked to mesh: {ev:?}"),
     }
     assert!(th.outbound.try_recv().is_err(), "反射包不得回 tailnet 出站");
+}
+
+// ==================== ACL 前缀级裁决（REQ-045，SEC-28/31） ====================
+
+/// 目标节点解密后裁决：主体命中 allow → 投递；策略收紧（组员变更）→
+/// default-deny，经 netmap 原子切换收敛后拒投递（会话不受影响）
+#[tokio::test]
+async fn acl_prefix_rules_enforced_at_target_node() {
+    use landscape_rill_core::control::acl::{AclAction, AclPolicy, AclRule, AclSubject};
+
+    let lab_policy = |members: Vec<u32>| {
+        let mut groups = std::collections::HashMap::new();
+        groups.insert("friends".to_string(), members);
+        AclPolicy {
+            enabled: true,
+            rules: vec![AclRule {
+                subjects: vec![AclSubject::Group("friends".into())],
+                prefix: landscape_rill_core::route::Prefix::parse("10.7.0.0/24").unwrap(),
+                action: AclAction::Allow,
+            }],
+            groups,
+        }
+    };
+    let (url, ca, server) = start_coord_with_handle().await;
+    // a 先注册（node_id=1 确定），随后 b 公告 10.7.0.0/24
+    server
+        .lock()
+        .await
+        .coordinator
+        .set_acl_policy("lab", lab_policy(vec![1]));
+    let mut a = Node::new(node_config(&url, &ca, 1, vec![]), fast_opts())
+        .await
+        .unwrap();
+    let mut b = Node::new(
+        node_config(&url, &ca, 2, vec!["10.7.0.0/24".into()]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    a.connect_control().await.unwrap();
+    pump_until_all(&mut [&mut a], "a registered", |n| n.registered()).await;
+    let a_id = a.node_id().unwrap();
+    assert_eq!(a_id, 1, "首注册 node_id=1（策略主体引用）");
+    b.connect_control().await.unwrap();
+    pump_until_all(&mut [&mut b], "b registered", |n| n.registered()).await;
+    let b_id = b.node_id().unwrap();
+
+    // keydist/路由收敛 + 懒握手（a → dst 10.7.0.5 经 b）
+    let dst: IpAddr = "10.7.0.5".parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "route convergence timeout");
+        for n in [&mut a, &mut b] {
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_control()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_mesh()).await;
+            n.pump_timers().await;
+        }
+        if a.mesh.has_key_dst(b_id) && b.mesh.has_key_dst(a_id) && !a.engine.lookup(&dst).is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // 策略经 netmap 到达两端（注册推送即携带）
+    assert_eq!(a.acl, lab_policy(vec![1]));
+    assert_eq!(b.acl, lab_policy(vec![1]));
+
+    let probe = v4_packet([10, 7, 0, 5]);
+    establish_session(&mut a, &mut b, &probe, b_id).await;
+
+    // ① 主体命中（a ∈ friends）+ 前缀命中 → 目标侧投递
+    let pkt = v4_packet([10, 7, 0, 5]);
+    let _ = a.pump_lan_packet(&pkt).await;
+    let got = tokio::time::timeout(Duration::from_millis(500), b.pump_mesh()).await;
+    assert_eq!(
+        got.expect("allowed frame timeout"),
+        Some(bytes::Bytes::from(pkt))
+    );
+
+    // ② 策略收紧：friends 除名 → default-deny；netmap 原子切换收敛后拒投递
+    let tightened = lab_policy(vec![]);
+    server
+        .lock()
+        .await
+        .coordinator
+        .set_acl_policy("lab", tightened.clone());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "acl convergence timeout");
+        for n in [&mut a, &mut b] {
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_control()).await;
+            // 心跳由定时器泵驱动（无心跳 = 无快照推送 = 策略不收敛）
+            n.pump_timers().await;
+        }
+        if a.acl == tightened && b.acl == tightened {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let pkt = v4_packet([10, 7, 0, 5]);
+    let _ = a.pump_lan_packet(&pkt).await;
+    // 静默窗内持续泵：非 Data 事件（心跳等）合法路过，出现载荷即拒绝失效
+    let quiet_until = Instant::now() + Duration::from_millis(400);
+    loop {
+        if Instant::now() >= quiet_until {
+            break; // 窗口静默 = 拒绝生效
+        }
+        if let Ok(Some(payload)) =
+            tokio::time::timeout(Duration::from_millis(50), b.pump_mesh()).await
+        {
+            panic!("denied frame delivered: {} bytes", payload.len());
+        }
+    }
+    // 会话仍在（拒绝只丢载荷，不拆隧道）
+    assert!(a.has_session(b_id));
+    assert!(b.has_session(a_id));
 }

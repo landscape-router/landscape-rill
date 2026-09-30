@@ -100,6 +100,58 @@ fn binding_verifies_with_ed25519() {
     assert!(verify_binding(&signer.verifier(), 7, &[0x42; 32], &sig));
 }
 
+// ==================== ACL 策略线格式（REQ-045，CONTROL_PLANE §3.10） ====================
+
+/// netmap 内嵌 ACL 策略装配：主体字符串化 + 规则/组随 push 编码往返
+#[test]
+fn netmap_push_embeds_acl_policy() {
+    use landscape_rill_core::control::acl::*;
+    let ak = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+    let mut coord = Coordinator::new([0x5a; 32]);
+    coord.add_network("lab", [0x77; 32]);
+    coord.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+    let mut groups = std::collections::HashMap::new();
+    groups.insert("admins".to_string(), vec![1, 2]);
+    coord.set_acl_policy(
+        "lab",
+        AclPolicy {
+            enabled: true,
+            rules: vec![AclRule {
+                subjects: vec![
+                    AclSubject::Group("admins".into()),
+                    AclSubject::Node(5),
+                    AclSubject::Any,
+                ],
+                prefix: landscape_rill_core::route::Prefix::parse("10.42.0.0/24").unwrap(),
+                action: AclAction::Deny,
+            }],
+            groups,
+        },
+    );
+    let network_id = landscape_rill_coord::domain::network_id_for("lab");
+    let push = netmap_push_message(&coord, network_id);
+    assert_eq!(push.version, coord.netmap_version());
+
+    // 编码 → 解码往返（envelope_body + from_reader，同客户端/服务端编解码路径）
+    let body = envelope_body(&push);
+    let mut reader = BytesReader::from_bytes(&body);
+    let decoded = NetmapPush::from_reader(&mut reader, &body).unwrap();
+    let acl = decoded.acl.expect("acl 应内嵌");
+    assert!(acl.enabled);
+    assert_eq!(acl.rules.len(), 1);
+    let rule = &acl.rules[0];
+    assert_eq!(rule.subjects.len(), 3);
+    assert_eq!(rule.subjects[0].to_string(), "group:admins");
+    assert_eq!(rule.subjects[1].to_string(), "node:5");
+    assert_eq!(rule.subjects[2].to_string(), "any");
+    assert_eq!(rule.prefix.to_string(), "10.42.0.0/24");
+    assert!(rule.deny);
+    assert_eq!(acl.groups.len(), 1);
+    assert_eq!(acl.groups[0].name.to_string(), "admins");
+    // 4B 大端序列：[1, 2]
+    assert_eq!(acl.groups[0].node_ids.as_ref(), &[0, 0, 0, 1, 0, 0, 0, 2]);
+}
+
 // ==================== 控制面限速/准入（REQ-047，SEC-19/SEC-20） ====================
 
 fn bad_leg_config(auth_key: &str, seed: u8) -> MeshLegConfig {

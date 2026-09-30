@@ -171,8 +171,8 @@ impl MeshData {
         }
     }
 
-    /// 丢帧计数（LOGGING §5）：仅已知 peer 记 per-peer，未知/畸形包记全局桶
-    pub(super) fn note_drop(&mut self, from: Option<u32>) {
+    /// 丢帧计数（LOGGING §5 / ACL 拒绝归因 REQ-045）：仅已知 peer 记 per-peer，未知/畸形包记全局桶
+    pub fn note_drop(&mut self, from: Option<u32>) {
         match from {
             Some(f) if self.is_known_peer(f) => {
                 let rc = self

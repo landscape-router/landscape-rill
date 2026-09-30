@@ -11,6 +11,7 @@ use crate::tun::{TunConfig, TunDevice};
 use crate::BoxResult;
 use ed25519_dalek::VerifyingKey;
 use futures_util::StreamExt;
+use landscape_rill_core::control::acl::{AclPolicy, CAPABILITY_ACL};
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
 use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
@@ -176,6 +177,10 @@ pub struct Node {
     dn42_peers: Vec<dn42::Dn42PeerLeg>,
     /// ts2021 leg 运行态（TS2021_LEG §3.3.2，None = 未启用）
     pub(crate) ts2021: Option<ts2021::Ts2021Leg>,
+    /// 网络级 ACL 策略（REQ-045，CONTROL_PLANE §3.10）：随 netmap 原子切换；
+    /// default = 未启用（v1 全放行）。裁决点 = 解密后（Data 臂），
+    /// AEAD 会话即源认证，直连/中继/多跳全覆盖（CN-04）
+    acl: AclPolicy,
 }
 
 impl Node {
@@ -240,6 +245,7 @@ impl Node {
             echoed_endpoints: Vec::new(),
             dn42_peers: Vec::new(),
             ts2021: None,
+            acl: AclPolicy::default(),
         };
         // dn42 接入（DN42_LEG）：配置启用即 spawn peer 会话任务
         if let Some(dn42_cfg) = node.cfg.dn42.clone() {
@@ -304,7 +310,9 @@ impl Node {
             coordinator_port: port,
             auth_key: cfg.auth_key.clone(),
             static_key: cfg.static_key_seed,
-            capabilities: cfg.capabilities,
+            // ACL 能力位恒置（REQ-045）：本节点实现解密后裁决，注册即声明；
+            // 网络开启策略后无该位的节点被 fail-closed 拒绝（§3.1）
+            capabilities: cfg.capabilities | CAPABILITY_ACL,
             announce_routes,
         };
         ControlSession::connect(&host, port, &ca, &leg, node_id).await
@@ -339,7 +347,7 @@ impl Node {
         match ev {
             IncomingEvent::Data { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
-                Some(payload)
+                self.acl_deliver(from, payload)
             }
             IncomingEvent::Broadcast { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
@@ -584,7 +592,7 @@ impl Node {
             }
             IncomingEvent::Data { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
-                Some(payload)
+                self.acl_deliver(from, payload)
             }
             IncomingEvent::Broadcast { from, payload } => {
                 self.peer_heartbeats.insert(from, 0);
@@ -615,6 +623,23 @@ impl Node {
                 debug!("[node] dropped frame: {:?}", reason);
                 None
             }
+        }
+    }
+
+    /// ACL 裁决（REQ-045，CONTROL_PLANE §3.10）：目标节点解密后入口——
+    /// from = AEAD 认证的源节点（会话即源认证，不可冒充），dst = 内层包
+    /// 目的地址；未启用全放行。拒绝只丢载荷（会话/心跳/遥测归因不受影响）
+    fn acl_deliver(&mut self, from: u32, payload: bytes::Bytes) -> Option<bytes::Bytes> {
+        if self.acl.allows_packet(from, &payload) {
+            Some(payload)
+        } else {
+            info!(
+                "[node] acl denied {} byte frame from {}",
+                payload.len(),
+                from
+            );
+            self.mesh.note_drop(Some(from));
+            None
         }
     }
 }

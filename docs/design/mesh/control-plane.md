@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-047 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
 
-**版本：v0.14（2026-09-03 修订：REQ-066——删除 v1 帧头兼容措辞，§3.11 `path_id=0` = 默认路径（42B 唯一帧头））**
+**版本：v0.15（2026-09-30 修订：REQ-045——§3.10 前缀级 ACL 策略层定稿；§3.1/§3.2 联动）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -100,7 +100,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 | `bridge` | 联邦桥节点（v2 预留） | §7.2 钩子 |
 | `coordinator` | 运行 coordinator 角色（节点兼任） | 部署形态，非协议必需 |
 | `exit` | 愿意充当 mesh 出口节点 | ROUTE_ENGINE §5 |
-| `acl`（v2 预留） | 支持 ACL 策略裁决 | 位已划归，v1 恒 false；实现时不得占用该位 |
+| `acl`（0x40） | 支持 ACL 策略裁决（REQ-045 已实现，前缀级） | rill 节点实现解密后裁决，注册**恒置位**；网络开启策略后无该位注册被拒（fail-closed，防最弱环节绕过） |
 | `broadcast` | 接收 L2 广播/组播泛洪（opt-in） | FRAME_HEADER §2.6：keydist **仅向该位节点下发** broadcast_key（未 opt-in 节点不收广播帧、不参与泛洪）；泛洪只发该位端点 |
 | 其余 | 预留 | 协议演进使用 |
 
@@ -128,6 +128,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
   - `routes[]`：**前缀公告**（节点背后 LAN/前缀，见 §3.8 前缀公告流程）——注册时携带初始公告 + 变更时更新；`routes` 汇总 = rill ext 节点 subnet router 广播进自建 tailnet 的数据源（TS2021_LEG §3.3）
   - 条目签名：本地条目由本 coordinator 签名；联邦条目经过滤后用本 coordinator 私钥**重签**（§7）
 - `relay_list`：候选中继列表（DERP map 等价物）——coordinator 兜底 + 自愿节点（可达性验证 + RTT 测量后纳入），随 netmap 下发，见 CONNECTIVITY §5
+- `acl`：**网络级 ACL 策略**（REQ-045，前缀级）——AclPolicy{enabled, rules[], groups[]}，随 netmap 原子下发；缺省/未启用 = v1 全放行
 - 下发时机：注册后全量、拓扑变更后全量、断线重连后补偿全量
 
 ### 3.3 KeyDist（转发密钥下发）
@@ -204,9 +205,22 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - tombstone 对第二身份语义不变：同 key 异 pubkey → unknown pubkey 拒绝（计入失败锁定）
 - 形态对标：Tailscale（一次性 join token + machine key 持有证明恢复）／Stripe 幂等键（重试者认证后去重）——「key 失效」不是终点判定而是恢复入口的触发信号
 
-### 3.10 Policy\*（预留，ACL v2）
+### 3.10 ACL 策略层（前缀级已实现，REQ-045）
 
-消息族组空间已划归，v1 不定义消息体。v2 语义（对照 ROUTE_ENGINE §2 裁决点）：策略随 **NetmapPush 内嵌**（§3.2 version 承载）或独立 `PolicyPush/PolicyAck` 推送（届时二选一）；策略模型 = subject（node_id/网络）→ object（前缀/端口）→ action（allow/deny）；**只做目标节点侧裁决**（源身份约束，ROUTE_ENGINE §3）；租户内生效（§1.5），规则存储与管理面一致（管理面形态见 REQ-038）。
+**策略模型**：有序规则列表 **first-match-wins**——`subject（node:<id> / group:<名> / any 列表）→ object（前缀）→ action（allow/deny）`；无匹配 = **deny**（default-deny）。
+
+- **开关 = 网络级**（`networks[].acl.enabled`，coordinator 权威，SIGHUP 重载生效）；`enabled=false` / 无 acl 段 = v1 行为不变（全放行，现有测试零改动）
+- **下发 = NetmapPush 内嵌**（§3.2 `acl` 字段；REQ-020③ 既定 **version 一版本两用**——策略变更 bump netmap 版本，节点侧下一心跳快照收敛（≤10s），无独立 PolicyPush、无一致性窗口）；否决独立策略通道的独立版本号
+- **裁决点 = 目标节点解密后**（`IncomingEvent::Data` 出口）：AEAD 会话即源认证，`from_node_id` 不可冒充，直连/中继/多跳全覆盖（CN-04 天然满足）；中继不做明文主体过滤（可伪造）；发送侧检查仅为快速失败优化，非权威（v1 不实现）
+- **fail-closed 准入**：网络开启后，能力位不带 `acl`（0x40）的节点注册拒绝（防最弱环节绕过裁决，幂等重注册同受约束）；rill 节点实现解密后裁决，注册恒置位；非 IP 载荷无法提取目标 = 拒
+- **主体粒度 = 节点**（tun0 可信边界既定，LAN 设备不区分）；**组 = 管理面标签**（config 给 node_id 打标，规则按 `group:<名>` 引用；协议/netmap 条目线格式不加组字段，组随策略载荷走）；加密强隔离留 key_path 路径授权（§3.11.6）
+- **拒绝语义**：只丢载荷（+ `acl denied` 日志 + 丢帧遥测归因），会话/心跳/握手不受影响（隧道保活与授权解耦）
+- **豁免**：广播/组播帧（Broadcast 事件）不在前缀级裁决范围——L2 无 L3 目标（IPv6 ND 依赖组播泛洪，断言于 SEC-31）；端口级阶段一并评估
+- **分阶段**：第一阶段前缀级（无状态，合 ROUTE_ENGINE §3 透传哲学）；**端口级第二阶段**（L4 解析 + 回程豁免表）——未实现前 config 出现端口字段一律加载报错（acl 段/规则 `deny_unknown_fields`，防"以为受控实际没有"）
+- **线格式**：`AclPolicy{enabled, rules[], groups[]}`；`AclRule{subjects[]（字符串）, prefix（CIDR）, deny}`；`AclGroup{name, node_ids}`（4B 大端序列，同 CandidatePath.hops 惯例——规避 pb 读侧 packed-fixed 对齐 UB）；节点侧解码恶形规则逐条跳过、enabled 语义始终荣誉（解码缺憾不得静默关闭 default-deny）
+- **e2e 实证语义（SEC-31）**：ping 是双向流——回包 dst = 发起方源前缀，同样过目标侧裁决，放行规则须覆盖**双方源前缀**；default-deny 断言用第三方仲裁前缀（发起方→目标独占资源）避免回程干扰；SIGHUP 补放行经心跳快照收敛（原子切换实证）
+
+回归单测：裁决引擎（rill-core acl.rs：disabled 全放行 / 无规则全拒 / first-match / 组与节点主体 / 非 IP 拒）、配置 fail-closed（端口字段/未知组/恶形主体/恶形前缀/恶形动作）、注册准入（无位拒/带位过/幂等同约束）、netmap 装载与版本 bump、线格式往返（server_tests）、运行时集成（允许投递→组员除名→经 netmap 收敛后拒投递、会话保活）。e2e：SEC-31（acl 场景，CI e2e-mesh matrix）
 
 **升级路径（路径 = ACL）**：v2 引入路径级授权后，策略可在 PathResponse 签发时执行——coordinator"发不发某条路径给你"本身就是策略（§3.11.6）；目标节点侧裁决原则不变（ROUTE_ENGINE §3），relay 侧执法成为可能（校验 key_path 即校验参与资格）。
 

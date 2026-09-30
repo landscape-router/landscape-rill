@@ -14,6 +14,7 @@ use crate::path_service::{PathCandidate, PathEvent, PathSet};
 use crate::signer::Ed25519Signer;
 use crate::status::TelemetryView;
 use crate::store::{CoordState, CoordStore, StoreError, STATE_SCHEMA};
+use landscape_rill_core::control::acl::AclPolicy;
 use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, RegisterOutcome,
 };
@@ -29,6 +30,7 @@ use tracing::{error, warn};
 pub const CAPABILITY_RELAY: u32 = 0x01;
 /// 能力位：broadcast（L2 广播/组播泛洪 opt-in，CONTROL_PLANE §3.1 / FRAME_HEADER §2.6）
 pub const CAPABILITY_BROADCAST: u32 = 0x20;
+pub use landscape_rill_core::control::acl::CAPABILITY_ACL;
 
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -458,6 +460,25 @@ impl Coordinator {
             .unwrap_or_default()
     }
 
+    /// ACL 策略（REQ-045，CONTROL_PLANE §3.10）：按网络分域设置；
+    /// 变更 bump netmap 版本（策略随 netmap 原子下发，version 一版本两用，
+    /// 节点侧下一心跳快照即收敛）
+    pub fn set_acl_policy(&mut self, network: &str, policy: AclPolicy) {
+        if let Some(domain) = self.domain_by_name_mut(network) {
+            domain.acl = policy;
+            self.directory.bump_netmap();
+        }
+    }
+
+    /// 按网络号取 ACL 策略（netmap 装配用）
+    pub fn acl_policy_of(&self, network_id: u32) -> AclPolicy {
+        self.domains
+            .iter()
+            .find(|d| d.network_id == network_id)
+            .map(|d| d.acl.clone())
+            .unwrap_or_default()
+    }
+
     // ==================== 注册 / 密钥下发 ====================
 
     pub fn register(
@@ -492,6 +513,13 @@ impl Coordinator {
         // 归域（CONTROL_PLANE §1.5）：注册即归域——key 内嵌网络必须存在，只可能进入该网络
         if !self.domains.iter().any(|d| d.name == parsed.0) {
             return Err(RegisterError::InvalidAuthKey);
+        }
+        // ACL fail-closed（REQ-045）：网络开启策略后，无 acl 能力位的节点拒绝注册
+        // （防最弱环节绕过目标侧裁决；幂等重注册同受约束——能力位是注册字段）
+        if let Some(domain) = self.domains.iter().find(|d| d.name == parsed.0) {
+            if domain.acl.enabled && capabilities & CAPABILITY_ACL == 0 {
+                return Err(RegisterError::AclCapabilityRequired);
+            }
         }
         // node_id 全局分配：注册失败（校验在插入前）不推进计数器，无空洞
         let tentative = self.next_node_id;

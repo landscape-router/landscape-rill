@@ -2,7 +2,7 @@
 
 > **新 session 入口文档**：先读本文档恢复设计上下文，再按 §5 文档地图选择后续阅读。
 > 本文档记录已收敛的术语、信任模型、外部参考与挂账项，不承载具体协议细节（细节在各设计文档）。
-> 版本：v0.7（2026-09-30 修订：REQ-067 合并——增量 peer 帧解析闭环）
+> 版本：v0.8（2026-09-30 修订：REQ-067/REQ-045 合并——增量 peer 帧闭环 + ACL 前缀级策略层）
 
 ## 1. 项目定位
 
@@ -156,4 +156,4 @@ docs/README.md（入口：阅读路线 + 三张图）
 | P4 | 性能与联邦：XDP 快速路径 + DNS 统一 + 联邦 v2 + 帧头 path_id 数据面（§3.11） |
 | P5 | 远期：路径服务扩展——多跳中继链 / 多路双发（REQ-061/063，NAT1 准入同批评估） |
 
-**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10/11 e2e + CI；增量 peer 帧解析/合并闭环 REQ-067——e2e 实证 headscale 0.29 无中流推送，peer 变更经轮询周期全量帧传播，增量帧合并语义由单测锁定）。**
+**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环；ACL v2 前缀级策略层闭环 REQ-045——网络级开关 + first-match/default-deny + 目标节点解密后裁决 + 组标签 + SIGHUP 随 netmap 原子切换，SEC-28/31，端口级第二阶段），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10/11 e2e + CI；增量 peer 帧解析/合并闭环 REQ-067——e2e 实证 headscale 0.29 无中流推送，peer 变更经轮询周期全量帧传播，增量帧合并语义由单测锁定）。**

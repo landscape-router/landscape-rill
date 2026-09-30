@@ -182,6 +182,8 @@ impl Node {
     pub(super) fn apply_netmap(&mut self, netmap: &NetmapData) {
         let mut fresh: HashSet<u32> = HashSet::new();
         self.engine.reset_mesh_routes();
+        // ACL 策略随 netmap 原子切换（REQ-045，CONTROL_PLANE §3.10；缺省 = 未启用）
+        self.acl = netmap.acl.clone().unwrap_or_default();
         let mut peer_endpoints: HashMap<u32, Vec<SocketAddr>> = HashMap::new();
         // mesh routes[] 汇总（TSL-05 subnet router 广播数据源：进自建 tailnet）
         let mut mesh_routes: Vec<String> = Vec::new();

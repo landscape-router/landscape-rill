@@ -6,13 +6,17 @@
 //! lrk auth key 格式见 [`authkey`](crate::authkey)。
 //! 多网络（CONTROL_PLANE §1.5，2026-09-01）：`networks` 列表定义隔离网络
 //! （每网络独立主密钥 / auth key 空间 / 前缀白名单；network_id = fnv1a(name) 确定性散列）。
+//! ACL v2 策略层（REQ-045，前缀级先行）：`networks[].acl` 网络级开关 +
+//! 有序规则（subject → prefix → action）+ 组（node_id 标签）。
 
 use crate::authkey::{parse_auth_key, validate_network};
 use crate::coordinator::Coordinator;
 use crate::domain::network_id_for;
+use landscape_rill_core::control::acl::{AclAction, AclPolicy, AclRule, AclSubject};
 use landscape_rill_core::control::registry::{AuthKeyPolicy, AuthKeySpec};
 use landscape_rill_core::route::Prefix;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 pub mod error;
@@ -65,6 +69,33 @@ pub struct NetworkConfig {
     /// 允许公告的前缀集合；空 = 拒绝一切公告（fail-closed）
     #[serde(default)]
     pub announce_whitelist: Vec<String>,
+    /// ACL 策略（REQ-045，CONTROL_PLANE §3.10）；缺省 = 未启用（v1 全放行）
+    #[serde(default)]
+    pub acl: AclConfig,
+}
+
+/// ACL 策略配置（REQ-045 前缀级）。`deny_unknown_fields` = fail-closed：
+/// 端口级等未实现阶段的字段（ports/port）一律加载报错，防"以为受控实际没有"
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub groups: HashMap<String, Vec<u32>>,
+    #[serde(default)]
+    pub rules: Vec<AclRuleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclRuleConfig {
+    /// 主体列表（任一命中即规则命中）："node:<id>" | "group:<name>" | "any"
+    pub subjects: Vec<String>,
+    /// 目标前缀（CIDR）
+    pub prefix: String,
+    /// allow | deny
+    pub action: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +111,63 @@ pub struct AuthKeyConfig {
 
 fn default_policy() -> String {
     "reusable".into()
+}
+
+impl AclRuleConfig {
+    /// 规则 → rill-core 形态（组引用须存在于同段 groups；主体/动作语法校验）
+    fn to_rule(&self, groups: &HashMap<String, Vec<u32>>) -> Result<AclRule, ConfigError> {
+        let prefix = Prefix::parse(&self.prefix)
+            .map_err(|_| ConfigError(format!("invalid acl prefix: {}", self.prefix)))?;
+        let mut subjects = Vec::new();
+        for s in &self.subjects {
+            let subject = if s == "any" {
+                AclSubject::Any
+            } else if let Some(id) = s.strip_prefix("node:") {
+                let id: u32 = id
+                    .parse()
+                    .map_err(|_| ConfigError(format!("invalid acl subject: {s}")))?;
+                AclSubject::Node(id)
+            } else if let Some(name) = s.strip_prefix("group:") {
+                if name.is_empty() || !groups.contains_key(name) {
+                    return Err(ConfigError(format!("unknown acl group: {s}")));
+                }
+                AclSubject::Group(name.to_string())
+            } else {
+                return Err(ConfigError(format!("invalid acl subject: {s}")));
+            };
+            subjects.push(subject);
+        }
+        if subjects.is_empty() {
+            return Err(ConfigError("acl rule has no subjects".into()));
+        }
+        let action = match self.action.as_str() {
+            "allow" => AclAction::Allow,
+            "deny" => AclAction::Deny,
+            other => return Err(ConfigError(format!("invalid acl action: {other}"))),
+        };
+        Ok(AclRule {
+            subjects,
+            prefix,
+            action,
+        })
+    }
+}
+
+impl AclConfig {
+    /// 整段 → rill-core 策略（规则逐条转换，任何非法即 Err——加载时调用，
+    /// apply_to 复用同一转换保证校验与生效一致）
+    pub fn to_policy(&self) -> Result<AclPolicy, ConfigError> {
+        let rules = self
+            .rules
+            .iter()
+            .map(|r| r.to_rule(&self.groups))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AclPolicy {
+            enabled: self.enabled,
+            rules,
+            groups: self.groups.clone(),
+        })
+    }
 }
 
 impl CoordConfig {
@@ -137,6 +225,7 @@ impl CoordConfig {
                 Prefix::parse(w)
                     .map_err(|_| ConfigError(format!("invalid whitelist prefix: {w}")))?;
             }
+            net.acl.to_policy()?;
         }
         if let Some(p) = &self.storage_path {
             if p.trim().is_empty() {
@@ -160,8 +249,8 @@ impl CoordConfig {
         Ok(())
     }
 
-    /// 应用到 Coordinator（库 API，函数调用生效；按网络增量收敛：auth key 增删、白名单替换）。
-    /// 前提：Coordinator 已按本配置的 networks 建域（new + add_network 或 open）。
+    /// 应用到 Coordinator（库 API，函数调用生效；按网络增量收敛：auth key 增删、白名单替换、
+    /// ACL 策略替换）。前提：Coordinator 已按本配置的 networks 建域（new + add_network 或 open）。
     pub fn apply_to(&self, coord: &mut Coordinator) {
         for net in &self.networks {
             for ak in &net.auth_keys {
@@ -188,6 +277,7 @@ impl CoordConfig {
                 .map(|w| Prefix::parse(w).expect("validated"))
                 .collect();
             coord.set_announce_whitelist(&net.name, whitelist);
+            coord.set_acl_policy(&net.name, net.acl.to_policy().expect("validated"));
         }
     }
 }
@@ -426,10 +516,140 @@ mod tests {
                 master_key: [0x11; 32],
                 auth_keys: vec![],
                 announce_whitelist: vec![],
+                acl: AclConfig::default(),
             }],
             ..cfg.clone()
         };
         empty.apply_to(&mut coord);
         assert!(coord.auth_key_list().is_empty());
+    }
+
+    // ---- acl 段（REQ-045，CONTROL_PLANE §3.10）：加载即校验，fail-closed ----
+
+    fn inject_acl(text: &str, acl: &str) -> String {
+        text.replace(
+            "\"announce_whitelist\": [\"10.0.0.0/8\", \"fd00:2::/32\"]",
+            &format!("\"announce_whitelist\": [\"10.0.0.0/8\", \"fd00:2::/32\"], \"acl\": {acl}"),
+        )
+    }
+
+    #[test]
+    fn acl_section_parses_and_applies() {
+        let text = inject_acl(
+            &valid_config(),
+            r#"{
+        "enabled": true,
+        "groups": { "admins": [1, 2] },
+        "rules": [
+          { "subjects": ["group:admins", "node:5"], "prefix": "10.42.0.0/24", "action": "allow" },
+          { "subjects": ["any"], "prefix": "10.0.0.0/8", "action": "deny" }
+        ]
+      }"#,
+        );
+        let cfg = CoordConfig::parse(&text).unwrap();
+        let policy = cfg.networks[0].acl.to_policy().unwrap();
+        assert!(policy.enabled);
+        assert_eq!(policy.rules.len(), 2);
+        assert_eq!(policy.groups["admins"], vec![1, 2]);
+
+        let mut coord = Coordinator::new([0x44; 32]);
+        coord.add_network("lab", [0x11; 32]);
+        cfg.apply_to(&mut coord);
+        assert_eq!(coord.acl_policy_of(network_id_for("lab")), policy);
+    }
+
+    #[test]
+    fn acl_port_fields_rejected() {
+        // 端口级未实现：ports/port 字段一律加载报错（fail-closed，防"以为受控实际没有"）
+        let ports_rule = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["any"], "prefix": "10.0.0.0/8", "action": "allow", "ports": [22] }
+        ] }"#,
+        );
+        let err = CoordConfig::parse(&ports_rule).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+        let port_rule = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["any"], "prefix": "10.0.0.0/8", "action": "allow", "port": 22 }
+        ] }"#,
+        );
+        assert!(CoordConfig::parse(&port_rule).is_err());
+        // 段级未知字段同样拒绝
+        let section = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "default": "allow", "rules": [] }"#,
+        );
+        assert!(CoordConfig::parse(&section).is_err());
+    }
+
+    #[test]
+    fn acl_unknown_group_or_bad_subject_rejected() {
+        let unknown_group = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["group:ghosts"], "prefix": "10.0.0.0/8", "action": "allow" }
+        ] }"#,
+        );
+        let err = CoordConfig::parse(&unknown_group).unwrap_err();
+        assert!(err.to_string().contains("unknown acl group"), "{err}");
+
+        let bad_subject = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["everyone"], "prefix": "10.0.0.0/8", "action": "allow" }
+        ] }"#,
+        );
+        let err = CoordConfig::parse(&bad_subject).unwrap_err();
+        assert!(err.to_string().contains("invalid acl subject"), "{err}");
+
+        let bad_node_id = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["node:x"], "prefix": "10.0.0.0/8", "action": "allow" }
+        ] }"#,
+        );
+        assert!(CoordConfig::parse(&bad_node_id).is_err());
+    }
+
+    #[test]
+    fn acl_bad_prefix_or_action_rejected() {
+        let bad_prefix = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["any"], "prefix": "10.0.0.0/99", "action": "allow" }
+        ] }"#,
+        );
+        let err = CoordConfig::parse(&bad_prefix).unwrap_err();
+        assert!(err.to_string().contains("invalid acl prefix"), "{err}");
+
+        let bad_action = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": ["any"], "prefix": "10.0.0.0/8", "action": "log" }
+        ] }"#,
+        );
+        let err = CoordConfig::parse(&bad_action).unwrap_err();
+        assert!(err.to_string().contains("invalid acl action"), "{err}");
+
+        let no_subjects = inject_acl(
+            &valid_config(),
+            r#"{ "enabled": true, "rules": [
+          { "subjects": [], "prefix": "10.0.0.0/8", "action": "allow" }
+        ] }"#,
+        );
+        assert!(CoordConfig::parse(&no_subjects).is_err());
+    }
+
+    #[test]
+    fn acl_disabled_by_default_and_takes_effect_via_apply() {
+        // 无 acl 段 = 未启用（v1 行为不变）
+        let cfg = CoordConfig::parse(&valid_config()).unwrap();
+        assert!(!cfg.networks[0].acl.enabled);
+        let mut coord = Coordinator::new([0x44; 32]);
+        coord.add_network("lab", [0x11; 32]);
+        cfg.apply_to(&mut coord);
+        assert!(!coord.acl_policy_of(network_id_for("lab")).enabled);
     }
 }
