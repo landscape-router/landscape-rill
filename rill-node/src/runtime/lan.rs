@@ -167,6 +167,17 @@ pub(crate) enum TransitFrom {
     Tailnet,
 }
 
+impl TransitFrom {
+    /// 日志标签（e2e 断言按 `transit mesh->dn42` 小写格式 grep）
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            TransitFrom::Mesh => "mesh",
+            TransitFrom::Dn42 => "dn42",
+            TransitFrom::Tailnet => "tailnet",
+        }
+    }
+}
+
 impl Node {
     /// 跨腿 transit 转发：mesh/dn42/ts2021 入站明文 → 对应腿。
     /// 未命中 → false，调用方写 TUN（本地投递/WAN 出口）
@@ -200,7 +211,12 @@ impl Node {
                     return false;
                 };
                 if leg.send(packet).await {
-                    info!("[node] transit {:?}->dn42: {} via {}", from, dst, leg.name);
+                    info!(
+                        "[node] transit {}->dn42: {} via {}",
+                        from.tag(),
+                        dst,
+                        leg.name
+                    );
                     true
                 } else {
                     false
@@ -209,8 +225,10 @@ impl Node {
             (RouteVia::Mesh(peer), TransitFrom::Dn42 | TransitFrom::Tailnet) => {
                 if !self.mesh.has_session(peer) {
                     debug!(
-                        "[node] transit {:?}->mesh: {} no session with {}",
-                        from, dst, peer
+                        "[node] transit {}->mesh: {} no session with {}",
+                        from.tag(),
+                        dst,
+                        peer
                     );
                     return false;
                 }
@@ -224,14 +242,21 @@ impl Node {
                             .await
                             .unwrap_or(false);
                         if ok {
-                            info!("[node] transit {:?}->mesh: {} via node {}", from, dst, peer);
+                            info!(
+                                "[node] transit {}->mesh: {} via node {}",
+                                from.tag(),
+                                dst,
+                                peer
+                            );
                         }
                         ok
                     }
                     Err(e) => {
                         debug!(
-                            "[node] transit {:?}->mesh: {} frame build failed: {:?}",
-                            from, dst, e
+                            "[node] transit {}->mesh: {} frame build failed: {:?}",
+                            from.tag(),
+                            dst,
+                            e
                         );
                         false
                     }
