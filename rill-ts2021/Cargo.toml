@@ -20,8 +20,10 @@ serde.workspace = true
 serde_json.workspace = true
 snow.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
-x25519-dalek.workspace = true
+

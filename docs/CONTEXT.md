@@ -2,7 +2,7 @@
 
 > **新 session 入口文档**：先读本文档恢复设计上下文，再按 §5 文档地图选择后续阅读。
 > 本文档记录已收敛的术语、信任模型、外部参考与挂账项，不承载具体协议细节（细节在各设计文档）。
-> 版本：v0.8（2026-09-30 修订：REQ-067/REQ-045 合并——增量 peer 帧闭环 + ACL 前缀级策略层）
+> 版本：v0.9（2026-09-30 修订：REQ-068 合并——自研 ts2021 服务端替换 headscale，官方客户端 + lrill 双形态接入 + 持有流增量推送闭环）
 
 ## 1. 项目定位
 
@@ -152,8 +152,8 @@ docs/README.md（入口：阅读路线 + 三张图）
 | P1 | mesh 骨架：crate 落地（tun + 用户态转发骨架）+ mesh 接入（单 coordinator + 42B 帧）——**大部完成（REQ-022~REQ-032）** |
 | v1.5 | 路径服务（控制面）：Path\* 消息族 + 每目标 2~4 候选路径/快速切换 + 路径生命周期 + flow hash（CONTROL_PLANE §3.11，REQ-034）；数据面帧头 path_id=0 默认路径 |
 | P2 | 接入：ts2021 客户端接入（连 headscale + subnet router 广播）+ dn42 接入（boringtun + eBGP-lite） |
-| P3 | 融合与自研：路由策略引擎完善 + exit 双向语义 + 自研 ts2021 服务端替换 headscale + Raft + relay 治理与路径可观测（REQ-062/064） |
+| P3 | 融合与自研：路由策略引擎完善 + exit 双向语义 + ~~自研 ts2021 服务端替换 headscale~~（**已完成 REQ-068**）+ Raft + relay 治理与路径可观测（REQ-062/064） |
 | P4 | 性能与联邦：XDP 快速路径 + DNS 统一 + 联邦 v2 + 帧头 path_id 数据面（§3.11） |
 | P5 | 远期：路径服务扩展——多跳中继链 / 多路双发（REQ-061/063，NAT1 准入同批评估） |
 
-**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环；ACL v2 前缀级策略层闭环 REQ-045——网络级开关 + first-match/default-deny + 目标节点解密后裁决 + 组标签 + SIGHUP 随 netmap 原子切换，SEC-28/31，端口级第二阶段），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10/11 e2e + CI；增量 peer 帧解析/合并闭环 REQ-067——e2e 实证 headscale 0.29 无中流推送，peer 变更经轮询周期全量帧传播，增量帧合并语义由单测锁定）。**
+**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环；ACL v2 前缀级策略层闭环 REQ-045——网络级开关 + first-match/default-deny + 目标节点解密后裁决 + 组标签 + SIGHUP 随 netmap 原子切换，SEC-28/31，端口级第二阶段），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10/11 e2e + CI；增量 peer 帧解析/合并闭环 REQ-067；**自研 ts2021 服务端替换 headscale 闭环 REQ-068**——rill-ts2021 server 模块（Noise 响应侧/注册准入 lrk/白名单自动审批 + allow_exit/内嵌 DERP/持有流增量推送 PeersChanged/Removed），官方 tailscaled 与 lrill 双形态客户端同 tailnet 接入（线格式兼容实证：chalpub、整型 LoginID、Compress="zstd"），e2e ts2021_runtime 切自研服务端，headscale 降级为 register/p0 场景的兼容参照）。**

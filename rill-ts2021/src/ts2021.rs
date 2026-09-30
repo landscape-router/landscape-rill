@@ -286,7 +286,8 @@ pub struct MapStream {
 }
 
 impl MapStream {
-    /// 读下一帧完整 netmap（无 Node 的 keepalive 帧内部跳过）；
+    /// 读下一帧承载 netmap 数据的 MapResponse（全量 = Node 帧；增量 = PeersChanged/
+    /// Removed/Patch 帧，自研服务端经持有流推送——REQ-068）；keepalive/轻量帧内部跳过。
     /// Err = 流断开（调用方重建长轮询）
     pub async fn next_netmap(&mut self) -> io::Result<MapResponse> {
         loop {
@@ -316,7 +317,7 @@ impl MapStream {
                         .collect::<String>()
                 );
             }
-            if map.node.is_some() {
+            if map.has_netmap_data() {
                 return Ok(map);
             }
         }

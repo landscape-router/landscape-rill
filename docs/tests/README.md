@@ -114,6 +114,7 @@
 | REQ-064 | — | 📌 proposed（无验收场景） | — |
 | REQ-065 | — | 📌 proposed（无验收场景） | — |
 | REQ-067 | TSL-11 | 已覆盖 | rill-ts2021/src/tailcfg.rs、rill-node/src/runtime/ts2021.rs、e2e/ts2021_runtime/run.sh |
+| REQ-068 | TSL-12（ts2021-leg）+ ts2021_runtime e2e 切自研服务端 | ✅ 已覆盖 | CI：e2e-ts2021 |
 | REQ-056 | CTL-18 | 已覆盖 | rill-node/src/runtime/reconnect.rs、e2e/mesh/recover/、e2e/scenarios/recover.sh |
 | REQ-057 | CTL-19 | 已覆盖 | rill-core/src/control/、rill-mesh/src/control/、rill-coord/src/coordinator/、e2e/scenarios/recover.sh |
 | REQ-058 | SEC-30 | 已覆盖 | rill-core/src/control/registry.rs、e2e/scenarios/recover.sh |

@@ -105,6 +105,9 @@ pub(crate) fn run_daemon(
                 }
             });
         }
+        if let Some(server_cfg) = file.ts2021_server.clone() {
+            crate::ts2021_run::spawn_ts2021_server(server_cfg);
+        }
         let node_fields = (
             file.coordinator_url.clone(),
             file.auth_key.clone(),
@@ -120,7 +123,7 @@ pub(crate) fn run_daemon(
             ca_cert_path,
         ) = node_fields
         else {
-            info!("[node] 无 node 角色字段，仅运行 coordinator");
+            info!("[node] 无 node 角色字段，仅运行服务端角色");
             std::future::pending::<()>().await;
             return Ok(());
         };

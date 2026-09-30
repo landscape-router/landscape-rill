@@ -73,6 +73,11 @@ pub fn parse_node_public(s: &str) -> Result<[u8; 32], String> {
     parse_key_hex("nodekey:", s)
 }
 
+/// "discokey:<hex64>" → 32B 公钥（tailcfg MapRequest.DiscoKey）
+pub fn parse_disco_public(s: &str) -> Result<[u8; 32], String> {
+    parse_key_hex("discokey:", s)
+}
+
 /// RegisterRequest JSON（NodeKey = "nodekey:<hex>"，tailscale key.MarshalText 同格式；
 /// Expiry/Followup 等缺省由服务端按零值处理）
 pub fn register_request_json(node_key: &[u8; 32], auth_key: &str, hostname: &str) -> Vec<u8> {
@@ -189,6 +194,19 @@ pub struct DerpNode {
 }
 
 impl MapResponse {
+    /// 帧是否承载 netmap 数据：全量帧（Node）或增量帧（PeersChanged/Removed/Patch
+    /// 任一非空）；keepalive/轻量帧 = false（消费侧跳过依据，REQ-068 增量推送起
+    /// 自研服务端经持有流推增量帧——无 Node 但有 peer 数据）
+    pub fn has_netmap_data(&self) -> bool {
+        self.node.is_some()
+            || self.peers_changed.as_ref().is_some_and(|v| !v.is_empty())
+            || self.peers_removed.as_ref().is_some_and(|v| !v.is_empty())
+            || self
+                .peers_changed_patch
+                .as_ref()
+                .is_some_and(|v| !v.is_empty())
+    }
+
     /// 取 DERPMap 中首个可用节点（e2e 场景 = headscale 内嵌 DERP 单 region）
     pub fn derp_node(&self) -> Option<DerpNode> {
         let regions = self.derp_map.as_ref()?.get("Regions")?.as_object()?;

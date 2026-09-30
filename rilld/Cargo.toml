@@ -13,6 +13,7 @@ landscape-rill-core = { path = "../rill-core" }
 landscape-rill-coord = { path = "../rill-coord" }
 landscape-rill-mesh = { path = "../rill-mesh" }
 landscape-rill-node = { path = "../rill-node" }
+landscape-rill-ts2021 = { path = "../rill-ts2021" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

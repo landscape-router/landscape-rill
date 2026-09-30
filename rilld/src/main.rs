@@ -12,6 +12,8 @@
 //!   coord_signing_pubkey(hex32) / ca_cert_path / tun（可选）
 //! - coord 角色（可选，同进程共存）：见 rill-coord `CoordConfig`（network / listen_addr /
 //!   master_key / signing_seed / tls / auth_keys / announce_whitelist），加载即校验（fail-closed）
+//! - ts2021_server 角色（可选，同进程共存，REQ-068）：见 rill-ts2021 `server::ServerConfig`
+//!   （network / hostname / listen_addr / tls / auth_keys / routes_whitelist / allow_exit）
 //!
 //! coordinator 配置变更生效 = SIGHUP 重载（增量应用，不中断在途连接；重载失败保持旧配置）。
 //! 配置与执行分离（REQ-038，CONTROL_PLANE §3.12）：CoordConfig 解析/校验在 rill-coord，
@@ -32,6 +34,7 @@ mod coord_run;
 mod logging;
 mod node_run;
 mod status_http;
+mod ts2021_run;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/landscape/overlay.json";
 const UNIT_NAME: &str = "lrill.service";
@@ -156,6 +159,9 @@ struct FileConfig {
     /// ts2021 接入（TS2021_LEG §3.3.2）：缺省 = 未启用
     #[serde(default)]
     ts2021: Option<Ts2021File>,
+    /// ts2021 服务端（REQ-068，TS2021_LEG §4）：headscale 替换；缺省 = 未启用
+    #[serde(default)]
+    ts2021_server: Option<landscape_rill_ts2021::server::ServerConfig>,
 }
 
 /// ts2021 接入配置（serde 形态；语义校验在 rill-node Config::validate）

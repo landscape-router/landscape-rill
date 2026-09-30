@@ -11,5 +11,6 @@ pub(crate) mod tests;
 mod wire;
 
 pub use error::ControlbaseError;
-pub use handshake::{ClientHandshake, Session};
+pub use handshake::{ClientHandshake, ServerHandshake, Session, NOISE_PATTERN};
 pub use stream::{handshake, NoiseStream};
+pub(crate) use wire::INITIATION_FRAME_LEN;

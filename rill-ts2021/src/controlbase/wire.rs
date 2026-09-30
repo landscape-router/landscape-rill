@@ -63,6 +63,15 @@ pub fn encode_record_header(ciphertext_len: usize) -> [u8; HEADER_LEN] {
     ]
 }
 
+/// response 帧：3B 头 + 48B Noise 消息体（e(32) + 空 payload tag(16)）= 51B
+pub fn encode_response(noise_body: &[u8; RESPONSE_NOISE_BODY_LEN]) -> [u8; RESPONSE_FRAME_LEN] {
+    let mut out = [0u8; RESPONSE_FRAME_LEN];
+    out[0] = MSG_TYPE_RESPONSE;
+    out[1..3].copy_from_slice(&(RESPONSE_NOISE_BODY_LEN as u16).to_be_bytes());
+    out[3..].copy_from_slice(noise_body);
+    out
+}
+
 /// record 帧头解析：类型必须为 RECORD，长度不超单帧上限（防未裁剪长度分配）
 pub fn parse_record_header(header: &[u8]) -> Result<usize, ControlbaseError> {
     let h = parse_header(header)?;

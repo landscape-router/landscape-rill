@@ -43,9 +43,9 @@ fn nacl_box_seal(box_: &SalsaBox, nonce: &[u8; NONCE_LEN], msg: &[u8]) -> io::Re
     Ok(out)
 }
 
-async fn read_frame<IO>(io: &mut IO) -> io::Result<(u8, Vec<u8>)>
+pub(crate) async fn read_frame<IO>(io: &mut IO) -> io::Result<(u8, Vec<u8>)>
 where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncRead + Unpin,
 {
     let mut hdr = [0u8; 5];
     io.read_exact(&mut hdr).await?;
@@ -61,9 +61,9 @@ where
     Ok((hdr[0], payload))
 }
 
-async fn write_frame<IO>(io: &mut IO, t: u8, payload: &[u8]) -> io::Result<()>
+pub(crate) async fn write_frame<IO>(io: &mut IO, t: u8, payload: &[u8]) -> io::Result<()>
 where
-    IO: AsyncRead + AsyncWrite + Unpin,
+    IO: AsyncWrite + Unpin,
 {
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(t);

@@ -1,21 +1,25 @@
-# ts2021 运行时集成 e2e（TSL-05/TSL-07，TS2021_LEG §3.3.2）：
+# ts2021 运行时集成 e2e（TSL-05/TSL-07/TSL-11，TS2021_LEG §3.3.2/§4）：
 #   mesh 侧：coord + rill-ext（land0 10.43/24 + ts2021 腿）+ rill-b（land0 10.42/24）
-#   tailnet 侧：headscale（自签 TLS + 内嵌 DERP）+ node-c（官方 tailscaled）
+#   tailnet 侧：tsrv（自研 ts2021 服务端，REQ-068：Noise 控制面 + 内嵌 DERP）+
+#               node-c（官方 tailscaled，协议兼容实证）
 #   rill-ext 三网卡：rillnet(mesh) + tsnet(tailnet 控制/DERP/node-c) + extnet(exit 转发目标)
 # 验证：mesh routes[] 汇总 + 自家 LAN 广播进 tailnet → node-c ping mesh 资源（TSL-05）；
-#       node-c --exit-node=rill-ext → ping extnet 网关（TSL-07）
+#       node-c --exit-node=rill-ext → ping extnet 网关（TSL-07）；
+#       持有流增量推送：node-d 入网 → PeersChanged、驱逐 → PeersRemoved（TSL-11b，REQ-068）
 # 网段：192.168.242.0/24 起预留 ts2021 集成（mesh e2e 专用段之外）
 services:
-  headscale:
+  tsrv:
     image: tsrt-base
     build:
       context: ./build
       dockerfile: Dockerfile
-    container_name: tsrt-headscale
-    command: ["headscale", "serve"]
+    container_name: tsrt-tsrv
+    command: ["sh", "-c", "mkdir -p /var/lib/rill && exec lrill run /etc/landscape/overlay.json"]
+    environment:
+      RUST_LOG: "${TSRT_RUST_LOG:-info}"
+      RILL_E2E_TS2021_EVICT_NODE: node-d
     volumes:
-      - ./build/headscale-config:/etc/headscale
-      - headscale-data:/var/lib/headscale
+      - ./build/tsrv.json:/etc/landscape/overlay.json
     networks:
       tsnet:
         ipv4_address: 192.168.244.10
@@ -79,9 +83,6 @@ services:
     networks:
       tsnet:
         ipv4_address: 192.168.244.20
-
-volumes:
-  headscale-data:
 
 networks:
   rillnet:

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# ts2021 运行时集成 e2e（TSL-05/TSL-07，TS2021_LEG §3.3.2）：
+# ts2021 运行时集成 e2e（TSL-05/TSL-07/TSL-11，TS2021_LEG §3.3.2/§4，REQ-068）：
+# 控制面换自研 ts2021 服务端（tsrv = lrill ts2021_server 段：Noise 控制面 + 白名单
+# 自动审批 + 内嵌 DERP），官方 tailscaled（node-c/node-d）作为协议兼容实证接入。
 # rill-ext（rilld：mesh + land0 + ts2021 腿）把 mesh 路由（rill-b 公告的 10.42.0.0/24）
-# 与自家 LAN（10.43.0.0/24）广播进自建 headscale（RoutableIPs 汇总 + 广播变更 poke
-# 重发 MapRequest），headscale 审批后 node-c（官方 tailscaled --accept-routes）：
-#   TSL-05：ping 10.42.0.1（mesh 资源经 subnet router：解包 → 引擎 → mesh 帧 → rill-b
-#           land0 内核应答 → 回程 mesh → tailnet /32）+ ping 10.43.0.1（自家 LAN 静态广播）
-#   TSL-07：--exit-node=rill-ext 后 ping 独立网络网关（解包 → 引擎未命中 → land0 →
-#           内核转发 + MASQUERADE → 回程 conntrack 反 NAT → 100.64/10 → land0 → tailnet）
+# 与自家 LAN（10.43.0.0/24）广播进 tsrv（RoutableIPs 汇总 + 广播变更 poke 重发
+# MapRequest），白名单自动审批后 node-c（官方 tailscaled --accept-routes）：
+#   TSL-05：ping 10.42.0.1（mesh 资源经 subnet router）+ ping 10.43.0.1（自家 LAN）
+#   TSL-07：--exit-node=rill-ext 后 ping 独立网络网关（allow_exit 放行的 0.0.0.0/0）
+#   TSL-11：node-d 入网 → rill-ext 持有流收到 PeersChanged（+1，无重轮询/重启）；
+#           驱逐 node-d（e2e 注入 marker）→ PeersRemoved（-1）——REQ-068 增量推送实证
 # 回程前提：rill-ext 把 tailnet 前缀 100.64.0.0/10 公告进 mesh（announce_routes），
 # rill-b 内核 100.64.0.0/10 → land0（回包交还用户态）。
 set -euo pipefail
@@ -16,8 +18,8 @@ ROOT_DIR="$(cd "$E2E_DIR/../.." && pwd)"
 BUILD_DIR="$E2E_DIR/build"
 REG_BUILD="$E2E_DIR/../ts2021_register/build"   # 二进制下载缓存（register 场景已跑时复用）
 COMPOSE="docker compose -f $E2E_DIR/docker-compose.yaml"
-HEADSCALE_VER="${TS2021_HEADSCALE_VER:-0.29.3}"
 TAILSCALE_VER="${TS2021_TAILSCALE_VER:-1.102.2}"
+TSRV="tsrt-tsrv"
 
 echo "==> 0/8 预置 base 镜像（mesh-e2e-base + iptables）"
 E2E_DNS="${MESH_E2E_DNS:-$(awk '$1=="nameserver" && $2 !~ /^(127\.|::1$)/{print $2; exit}' /etc/resolv.conf)}"
@@ -35,14 +37,7 @@ if ! docker image inspect tsrt-e2e-base >/dev/null 2>&1; then
   docker commit "$(docker ps -lq)" tsrt-e2e-base
 fi
 
-echo "==> 1/8 下载 headscale + tailscale 二进制（register 缓存优先）"
-mkdir -p "$BUILD_DIR/headscale-config"
-if [ -x "$REG_BUILD/headscale" ]; then
-  cp "$REG_BUILD/headscale" "$BUILD_DIR/headscale"
-fi
-[ -f "$BUILD_DIR/headscale" ] || \
-  curl -sL -o "$BUILD_DIR/headscale" \
-  "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VER}/headscale_${HEADSCALE_VER}_linux_amd64"
+echo "==> 1/8 下载 tailscale 二进制（register 缓存优先）"
 if [ ! -d "$BUILD_DIR/tailscale_${TAILSCALE_VER}_amd64" ]; then
   if [ -d "$REG_BUILD/tailscale_${TAILSCALE_VER}_amd64" ]; then
     cp -r "$REG_BUILD/tailscale_${TAILSCALE_VER}_amd64" "$BUILD_DIR/"
@@ -77,57 +72,37 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -days 30 -nodes -subj "/CN=tsrt-e2e-ca" 2>/dev/null
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout "$BUILD_DIR/server.key" -out "$BUILD_DIR/server.csr" \
-    -nodes -subj "/CN=headscale" 2>/dev/null
-printf 'subjectAltName = DNS:headscale, IP:127.0.0.1\n' > "$BUILD_DIR/server.ext"
+    -nodes -subj "/CN=tsrv" 2>/dev/null
+printf 'subjectAltName = DNS:tsrv, IP:127.0.0.1\n' > "$BUILD_DIR/server.ext"
 openssl x509 -req -in "$BUILD_DIR/server.csr" -CA "$BUILD_DIR/ts2021-ca.pem" \
     -CAkey "$BUILD_DIR/ts2021-ca.key" -CAcreateserial -out "$BUILD_DIR/server.crt" -days 30 \
     -extfile "$BUILD_DIR/server.ext" 2>/dev/null
 
-echo "==> 4/8 headscale 配置（自签 TLS + 内嵌 DERP）"
-cp "$BUILD_DIR/ts2021-ca.pem" "$BUILD_DIR/headscale-config/ca.pem"
-cp "$BUILD_DIR/server.crt" "$BUILD_DIR/headscale-config/server.crt"
-cp "$BUILD_DIR/server.key" "$BUILD_DIR/headscale-config/server.key"
-cat > "$BUILD_DIR/headscale-config/config.yaml" <<EOF
-server_url: https://headscale:8080
-listen_addr: 0.0.0.0:8080
-metrics_listen_addr: 127.0.0.1:9090
-noise:
-  private_key_path: /var/lib/headscale/noise_private.key
-prefixes:
-  v4: 100.64.0.0/10
-  v6: fd7a:115c:a1e0::/48
-  allocation: sequential
-derp:
-  server:
-    enabled: true
-    region_id: 999
-    region_code: "tsrt"
-    region_name: "TSRT E2E DERP"
-    verify_clients: false
-    stun_listen_addr: "0.0.0.0:3478"
-    private_key_path: /var/lib/headscale/derp_server_private.key
-    automatically_add_embedded_derp_region: true
-  urls: []
-  paths: []
-  auto_update_enabled: false
-database:
-  type: sqlite
-  sqlite:
-    path: /var/lib/headscale/db.sqlite
-tls_cert_path: /etc/headscale/server.crt
-tls_key_path: /etc/headscale/server.key
-dns:
-  magic_dns: false
-  base_domain: tsrt.ts
-  override_local_dns: false
-unix_socket: /var/run/headscale/headscale.sock
-logtail:
-  enabled: false
+echo "==> 4/8 tsrv 配置（自研 ts2021 服务端：lrk 准入 + 白名单自动审批 + allow_exit）"
+LRILL="$BUILD_DIR/lrill"
+TS_AUTHKEY=$("$LRILL" authkey --network tsrt --ttl 0)
+export TS_AUTHKEY
+cat > "$BUILD_DIR/tsrv.json" <<EOF
+{
+  "ts2021_server": {
+    "network": "tsrt",
+    "hostname": "tsrv",
+    "listen_addr": "0.0.0.0:8080",
+    "tls_cert_path": "/etc/landscape/server.crt",
+    "tls_key_path": "/etc/landscape/server.key",
+    "noise_key_path": "/var/lib/rill/ts2021-noise.key",
+    "derp_key_path": "/var/lib/rill/ts2021-derp.key",
+    "auth_keys": ["$TS_AUTHKEY"],
+    "routes_whitelist": ["10.42.0.0/24", "10.43.0.0/24"],
+    "allow_exit": true
+  }
+}
 EOF
 
 # 幂等清理（上次异常退出可能残留容器/网络）+ 宿主网段冲突检查（compose up 前止损）
 cleanup() {
   $COMPOSE down -v >/dev/null 2>&1 || true
+  docker rm -f tsrt-node-d >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 cleanup
@@ -138,23 +113,20 @@ for net in 192.168.242.0/24 192.168.244.0/24 192.168.245.0/24; do
   fi
 done
 
-echo "==> 5/8 启动 headscale + 创建用户/preauth key"
+echo "==> 5/8 启动 tsrv（自研 ts2021 服务端）"
 $COMPOSE build -q
-$COMPOSE up -d --force-recreate headscale
+$COMPOSE up -d --force-recreate tsrv
 for i in $(seq 1 30); do
-  docker exec tsrt-headscale headscale version >/dev/null 2>&1 && \
-    docker exec tsrt-headscale headscale nodes list >/dev/null 2>&1 && break
+  docker logs "$TSRV" 2>&1 | grep -q "ts2021-server.*listening" && break
   sleep 1
 done
-sleep 3
-docker exec tsrt-headscale headscale users create tsrt >/dev/null 2>&1 || true
-USER_ID=$(docker exec tsrt-headscale headscale users list | sed 's/\x1b\[[0-9;]*m//g' | grep "tsrt" | cut -d'|' -f1 | tr -d ' ' | head -1)
-TS_AUTHKEY=$(docker exec tsrt-headscale headscale preauthkeys create --user "$USER_ID" --reusable)
-echo "authkey=$TS_AUTHKEY (user id=$USER_ID)"
-export TS_AUTHKEY
+docker logs "$TSRV" 2>&1 | grep -q "ts2021-server.*listening" || {
+  echo "FAIL: tsrv 未监听"
+  docker logs "$TSRV" 2>&1 | tail -20
+  exit 1
+}
 
 echo "==> 6/8 生成 mesh 配置（coord / rill-ext / rill-b）"
-LRILL="$BUILD_DIR/lrill"
 hex() { openssl rand -hex 32; }
 MASTER_KEY=$(hex)
 SIGNING_SEED=$(hex)
@@ -200,7 +172,7 @@ cat > "$BUILD_DIR/rill-ext.json" <<EOF
   "data_transport": "udp",
   "tun": { "name": "land0", "mtu": 1420, "address4": "10.43.0.1/24" },
   "ts2021": {
-    "control_url": "https://headscale:8080",
+    "control_url": "https://tsrv:8080",
     "auth_key": "$TS_AUTHKEY",
     "ca_cert_path": "/etc/landscape/ts2021-ca.pem",
     "hostname": "rill-ext",
@@ -225,30 +197,30 @@ cat > "$BUILD_DIR/rill-b.json" <<EOF
 }
 EOF
 
-echo "==> 7/8 启动全部节点 + 等待注册"
+echo "==> 7/8 启动全部节点 + 等待注册（tsrv 日志为注册观测面）"
 $COMPOSE up -d --force-recreate
 
 for i in $(seq 1 60); do
-  NODES=$(docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
-  if [ -n "$(echo "$NODES" | grep rill-ext)" ] && [ -n "$(echo "$NODES" | grep node-c)" ]; then
+  NODES=$(docker logs "$TSRV" 2>&1 || true)
+  if [ -n "$(echo "$NODES" | grep "host=rill-ext")" ] && [ -n "$(echo "$NODES" | grep "host=node-c")" ]; then
     break
   fi
   sleep 2
 done
-if [ -z "$(echo "$NODES" | grep rill-ext)" ] || [ -z "$(echo "$NODES" | grep node-c)" ]; then
-  echo "FAIL: 双节点未全部注册 headscale"
-  echo "--- headscale 日志 ---"; docker logs tsrt-headscale 2>&1 | tail -15
+if [ -z "$(echo "$NODES" | grep "host=rill-ext")" ] || [ -z "$(echo "$NODES" | grep "host=node-c")" ]; then
+  echo "FAIL: 双节点未全部注册 tsrv（官方 tailscaled 与自研服务端互通断言前置）"
+  echo "--- tsrv 日志 ---"; docker logs "$TSRV" 2>&1 | tail -30
   echo "--- rill-ext 日志 ---"; docker logs tsrt-rill-ext 2>&1 | tail -30
-  echo "--- node-c 日志 ---";   docker logs tsrt-node-c 2>&1 | tail -10
+  echo "--- node-c 日志 ---";   docker logs tsrt-node-c 2>&1 | tail -15
   exit 1
 fi
 
-echo "==> 7.5/8 等待 mesh 路由汇总广播（10.42.0.0/24 出现在 headscale 路由表）+ 审批"
+echo "==> 7.5/8 等待路由白名单自动审批（10.42.0.0/24 mesh 汇总 + 0.0.0.0/0 exit）"
 # 链路：rill-b 注册公告 → coord netmap → rill-ext apply_netmap 汇总 → set_mesh_routes
-# → poke 重发 MapRequest（RoutableIPs 只在新请求生效）→ headscale 路由表
+# → poke 重发 MapRequest（RoutableIPs 只在新请求生效）→ tsrv 白名单过滤即批准
 ROUTES=""
 for i in $(seq 1 60); do
-  ROUTES=$(docker exec tsrt-headscale headscale nodes list-routes 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
+  ROUTES=$(docker logs "$TSRV" 2>&1 | grep "routes approved" | tail -1 || true)
   if echo "$ROUTES" | grep -q "10\.42\.0\.0/24" && echo "$ROUTES" | grep -q "0\.0\.0\.0/0"; then
     break
   fi
@@ -256,14 +228,11 @@ for i in $(seq 1 60); do
 done
 echo "$ROUTES"
 if ! echo "$ROUTES" | grep -q "10\.42\.0\.0/24"; then
-  echo "FAIL: mesh 路由汇总未广播进 headscale（TSL-05 前置链路断裂）"
+  echo "FAIL: mesh 路由汇总未广播进 tsrv（TSL-05 前置链路断裂）"
   echo "--- rill-ext 日志 ---"; docker logs tsrt-rill-ext 2>&1 | tail -40
   echo "--- coord 日志 ---"; docker logs tsrt-coord 2>&1 | tail -20
   exit 1
 fi
-EXT_ID=$(echo "$NODES" | grep rill-ext | awk -F'|' '{gsub(/ /, "", $1); print $1}' | head -1)
-docker exec tsrt-headscale headscale nodes approve-routes -i "$EXT_ID" \
-  -r "10.42.0.0/24,10.43.0.0/24,0.0.0.0/0,::/0" >/dev/null 2>&1 || true
 
 echo "==> 7.7/8 注入内核路由（tailnet 回程 → land0；mesh 前缀 → land0 触发握手）"
 for i in $(seq 1 30); do
@@ -278,10 +247,8 @@ docker exec tsrt-rill-ext ping -c3 -W1 10.42.0.1 >/dev/null 2>&1 || true
 
 echo "==> 8/8 断言"
 dump() {
-  echo "--- headscale 路由 ---"
-  docker exec tsrt-headscale headscale nodes list-routes 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true
-  echo "--- headscale/derper 日志 ---"
-  docker logs tsrt-headscale 2>&1 | tail -40
+  echo "--- tsrv（自研 ts2021 服务端）日志 ---"
+  docker logs "$TSRV" 2>&1 | tail -40
   echo "--- rill-ext 日志/路由 ---"
   docker logs tsrt-rill-ext 2>&1 | tail -40
   docker exec tsrt-rill-ext ip route 2>/dev/null || true
@@ -294,7 +261,7 @@ dump() {
 }
 
 # TSL-05：node-c ping mesh 资源（10.42.0.1 经 subnet router）+ 自家 LAN（10.43.0.1）
-# 窗口取 75 次（≈5min）：mesh 互探冷启动 + tailnet 握手 + 审批传播串联，慢机上 >3min
+# 窗口取 75 次（≈5min）：mesh 互探冷启动 + tailnet 握手串联，慢机上 >3min
 ok=""
 for i in $(seq 1 75); do
   if docker exec tsrt-node-c ping -c1 -W2 10.42.0.1 >/dev/null 2>&1 \
@@ -310,10 +277,7 @@ if [ "$ok" != "yes" ]; then
 fi
 echo "TSL-05 OK: node-c ping 10.42.0.1（mesh 资源）+ 10.43.0.1（自家 LAN）"
 
-# TSL-11（REQ-067）：① 对端重启 → 旧 WG 会话失效经 rekey 重建（ping 恢复，不重注册）
-# ② peer 增减经增量帧传播：node-d 加入 → PeersChanged（+1）、headscale 删除 →
-#    PeersRemoved（-1）。重启自身不产生增量帧——同 key 同端点 = 服务端视角
-#    无变更（e2e 实证），故增量路径以 peer 增删为触发
+# TSL-11a（REQ-067）：对端重启 → 旧 WG 会话失效经 rekey 重建（ping 恢复，不重注册）
 docker restart tsrt-node-c >/dev/null
 for i in $(seq 1 30); do
   docker exec tsrt-node-c tailscale --socket=/var/run/tailscale/tailscaled.sock status >/dev/null 2>&1 && break
@@ -334,52 +298,43 @@ if [ "$ok" != "yes" ]; then
 fi
 echo "TSL-11a OK: node-c 重启 → 会话经 rekey 重建（ping 恢复，不重注册）"
 
-# TSL-11b：peer 增删传播（REQ-067）。e2e 实证 headscale 0.29 语义：**无中流
-# 推送**——node 增删/断连期间流式对端零推送，长轮询 ~500s 服务端到期空响应
-# （官方 tailscaled 同周期重轮询），变更经下一轮询全量帧到达。场景以重注册
-# 强制新轮询（生产等价物 = 轮询周期）：node-d 入网 → 重启 rill-ext → 全量
-# netmap 含 2 peer；headscale 删除 node-d → 再重启 → 1 peer。增量帧
-# （PeersChanged/Removed/Patch）解析与合并由单测锁定（apply_delta_*）
+# TSL-11b（REQ-068 增量推送）：持有流上 peer 增删 = 增量帧实时到达，
+# 不强制重轮询/重启（headscale 0.29 无中流推送，自研服务端补齐）。
+# node-d（官方 tailscaled）入网 → tsrv 广播 PeersChanged → rill-ext 持有流
+# 收到增量帧（"netmap delta applied: +1"）；marker 文件驱逐 node-d →
+# PeersRemoved（"+0 -1"）。e2e 注入：env RILL_E2E_TS2021_EVICT_NODE + marker
 TSNET=$(docker inspect tsrt-node-c --format '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}}{{end}}')
+MARK=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
 docker run -d --name tsrt-node-d --network "$TSNET" --ip 192.168.244.30 \
   --privileged --device /dev/net/tun --cap-add NET_ADMIN \
   -e TS_AUTHKEY -e TS_HOSTNAME=node-d \
   tsrt-base /usr/local/bin/entry-node.sh >/dev/null
-for i in $(seq 1 30); do
-  docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -q node-d && break
-  sleep 2
-done
-sleep 3
-MARK=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
-docker restart tsrt-rill-ext >/dev/null
 joined=""
 for i in $(seq 1 60); do
-  docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK + 1)) | grep -qE "netmap (delta applied: \+[1-9]|applied: 2 peer)" && { joined=yes; break; }
+  docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK + 1)) | grep -qE "netmap delta applied: \+[1-9]" && { joined=yes; break; }
   sleep 2
 done
-NODE_D_ID=$(docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep node-d | awk -F'|' '{gsub(/ /, "", $1); print $1}' | head -1)
-[ -n "$NODE_D_ID" ] && docker exec tsrt-headscale headscale nodes delete -i "$NODE_D_ID" --force >/dev/null 2>&1
+evicted=""
+if [ "$joined" = "yes" ]; then
+  MARK2=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
+  docker exec "$TSRV" touch /tmp/rill-e2e-evict
+  for i in $(seq 1 30); do
+    docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK2 + 1)) | grep -qE "netmap delta applied: \+0 -[1-9]" && { evicted=yes; break; }
+    sleep 2
+  done
+fi
 docker rm -f tsrt-node-d >/dev/null 2>&1 || true
-sleep 3
-MARK=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
-docker restart tsrt-rill-ext >/dev/null
-left=""
-for i in $(seq 1 60); do
-  docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK + 1)) | grep -qE "netmap (delta applied: \+0 -[1-9]|applied: 1 peer)" && { left=yes; break; }
-  sleep 2
-done
-if [ "$joined" != "yes" ] || [ "$left" != "yes" ]; then
-  echo "FAIL: TSL-11 peer 增删未传播（join=$joined leave=$left）"
+if [ "$joined" != "yes" ] || [ "$evicted" != "yes" ]; then
+  echo "FAIL: TSL-11b 持有流增量推送未生效（join=$joined evict=$evicted）"
   echo "--- rill-ext ts2021 日志 ---"; docker logs tsrt-rill-ext 2>&1 | grep -E "\[ts2021\]" | tail -15
-  echo "--- headscale 日志 ---"; docker logs tsrt-headscale 2>&1 | tail -15
+  echo "--- tsrv 日志 ---"; docker logs "$TSRV" 2>&1 | tail -20
   exit 1
 fi
-echo "TSL-11b OK: node-d 入网/删除 → 重轮询全量 netmap 反映 peer 增删（2→1）"
+echo "TSL-11b OK: node-d 入网/驱逐 → rill-ext 持有流增量帧（+1 / -1，无重轮询）"
 
 # TSL-07：node-c 经 rill-ext 作 exit，ping extnet 网关（独立网络，node-c 不接入）
 # 目标不在 node-c 直连网段 → 走 exit 路径；tailscale set 不重置既有 flags
-RILL_TS_IP=$(docker exec tsrt-headscale headscale nodes list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
-  | grep rill-ext | grep -oE "100\.64\.[0-9]+\.[0-9]+" | head -1)
+RILL_TS_IP=$(docker logs "$TSRV" 2>&1 | grep "host=rill-ext" | grep -oE "100\.64\.[0-9]+\.[0-9]+" | head -1)
 echo "rill-ext tailnet ip: $RILL_TS_IP"
 docker exec tsrt-node-c tailscale --socket=/var/run/tailscale/tailscaled.sock \
   set --accept-routes=true --exit-node="$RILL_TS_IP"
@@ -397,4 +352,4 @@ if [ "$ok" != "yes" ]; then
 fi
 docker exec tsrt-node-c ping -c3 192.168.245.1 || true
 
-echo "PASS: TSL-05 subnet router（mesh routes[] 汇总 + 自家 LAN 广播进 tailnet）+ TSL-11 对端重启增量帧（REQ-067）+ TSL-07 exit 被用作（内核转发 + MASQUERADE 回程）"
+echo "PASS: TSL-05 subnet router（自研 ts2021 服务端：mesh routes[] 汇总 + 自家 LAN 广播）+ TSL-11 持有流增量推送（+1/-1，REQ-068）+ TSL-07 exit 被用作（allow_exit 审批 + 内核转发回程）"

@@ -216,8 +216,7 @@ impl Session {
         &self.handshake_hash
     }
 
-    /// 测试用：按方向直接从 raw 密钥构造会话（服务端侧：tx = k2，rx = k1）
-    #[cfg(test)]
+    /// 按方向直接从 raw 密钥构造会话（服务端侧：tx = k2，rx = k1）
     pub(crate) fn from_raw_keys(tx_key: [u8; 32], rx_key: [u8; 32], version: u16) -> Self {
         Self {
             tx_cipher: record_cipher(&tx_key),
@@ -235,8 +234,72 @@ impl Session {
         self.version
     }
 
-    /// 对端长身份公钥（control key）
+    /// 对端长身份公钥（client 侧 = control key；服务端 Session 为机器公钥）
     pub fn peer(&self) -> &[u8; 32] {
         &self.peer
+    }
+
+    /// 服务端侧写入机器公钥（Session::from_raw_keys 置零后的补齐）
+    pub(crate) fn set_peer(&mut self, peer: [u8; 32]) {
+        self.peer = peer;
+    }
+}
+
+/// 响应方握手状态机（REQ-068 服务端）：收 msg1 帧出 msg2 帧 + 会话 + 客户端机器公钥。
+/// prologue 版本取 initiation 帧头明文（tailscale Server 同源），故状态在 respond 时才建。
+pub struct ServerHandshake {
+    control_key_priv: [u8; 32],
+}
+
+impl ServerHandshake {
+    pub fn new(control_key_priv: &[u8; 32]) -> Self {
+        Self {
+            control_key_priv: *control_key_priv,
+        }
+    }
+
+    /// 处理 initiation 帧（101B）→ (response 帧 51B, 会话, 客户端机器公钥)
+    pub fn respond(
+        self,
+        init_frame: &[u8],
+    ) -> Result<(Vec<u8>, Session, [u8; 32]), ControlbaseError> {
+        if init_frame.len() != wire::INITIATION_FRAME_LEN {
+            return Err(ControlbaseError::MalformedFrame);
+        }
+        let version = u16::from_be_bytes([init_frame[0], init_frame[1]]);
+        let header = wire::parse_header(&init_frame[2..])?;
+        if header.msg_type != wire::MSG_TYPE_INITIATION
+            || header.length != wire::INITIATION_NOISE_BODY_LEN
+        {
+            return Err(ControlbaseError::MalformedFrame);
+        }
+        let mut state = Builder::new(NOISE_PATTERN.parse().map_err(ControlbaseError::Noise)?)
+            .prologue(&protocol_version_prologue(version))
+            .map_err(ControlbaseError::Noise)?
+            .local_private_key(&self.control_key_priv)
+            .map_err(ControlbaseError::Noise)?
+            .build_responder()
+            .map_err(ControlbaseError::Noise)?;
+        // initiation 帧头 5B（2B 版本 + 1B 类型 + 2B 长度），Noise 体从偏移 5 起
+        state
+            .read_message(&init_frame[wire::INITIATION_HEADER_LEN..], &mut [])
+            .map_err(ControlbaseError::Noise)?;
+        let machine = state
+            .get_remote_static()
+            .and_then(|s| <[u8; 32]>::try_from(s).ok())
+            .ok_or(ControlbaseError::MalformedFrame)?;
+        let mut body = [0u8; wire::RESPONSE_NOISE_BODY_LEN];
+        let n = state
+            .write_message(&[], &mut body)
+            .map_err(ControlbaseError::Noise)?;
+        if n != body.len() {
+            return Err(ControlbaseError::MalformedFrame);
+        }
+        // 服务端朝向：tx = k2，rx = k1（k1 = 发起方→响应方）
+        let (k1, k2) = state.dangerously_get_raw_split();
+        let mut session = Session::from_raw_keys(k2, k1, version);
+        session.set_peer(machine);
+        let resp = wire::encode_response(&body);
+        Ok((resp.to_vec(), session, machine))
     }
 }
