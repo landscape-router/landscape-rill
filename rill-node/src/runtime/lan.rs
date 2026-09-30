@@ -44,7 +44,8 @@ impl Node {
             return LanOutcome::Flooded { peers };
         }
         let (via, _prefix) = {
-            // 可达性谓词：mesh 会话存在即可达；dn42 peer 以 BGP 会话建立为准（DN42_LEG §5）
+            // 可达性谓词：mesh 会话存在即可达；dn42 peer 以 BGP 会话建立为准（DN42_LEG §5）；
+            // tailnet peer 在表即可达（WG 封装懒握手，无需预建会话）
             let dn42_up = &self.dn42_peers;
             let reachable = |e: &RouteEntry| match &e.via {
                 RouteVia::Mesh(_) => true,
@@ -52,7 +53,8 @@ impl Node {
                     .iter()
                     .find(|l| l.name == *name)
                     .is_some_and(|l| l.established()),
-                RouteVia::Tailnet(_) | RouteVia::Direct(_) => false,
+                RouteVia::Tailnet(id) => self.ts2021.as_ref().is_some_and(|l| l.has_peer(id)),
+                RouteVia::Direct(_) => false,
             };
             let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
                 warn!("[node] no route for {}", info.dst);
@@ -137,18 +139,42 @@ impl Node {
                     LanOutcome::Dropped
                 }
             }
-            RouteVia::Tailnet(_) | RouteVia::Direct(_) => LanOutcome::Local,
+            RouteVia::Tailnet(id) => {
+                // 包进 ts2021 出站通道（peer 匹配/封装在数据面任务内，TS2021_LEG §3.3.2）
+                let sent = match self.ts2021.as_ref() {
+                    Some(leg) => leg.send(packet).await,
+                    None => false,
+                };
+                if sent {
+                    LanOutcome::SentTailnet { peer: id }
+                } else {
+                    LanOutcome::Dropped
+                }
+            }
+            RouteVia::Direct(_) => LanOutcome::Local,
         }
     }
+}
 
-    /// 跨腿 transit 转发（M2，DN42_LEG §7 ⑤）：mesh 入站 → dn42 leg；
-    /// dn42 入站 → mesh。严格单向配对（不做 mesh→mesh / dn42→dn42 IP 转发，
-    /// 转发图无环，不依赖 TTL 衰减；v1 不减 TTL）。未命中 → false，调用方写 TUN
-    pub(super) async fn forward_transit(&mut self, packet: &[u8], from_mesh: bool) -> bool {
+/// 跨腿 transit 来源（转发图边集，TS2021_LEG §3.3.2 / DN42_LEG §7 ⑤）：
+/// mesh ↔ dn42、mesh → tailnet（回程）、tailnet → mesh/dn42（subnet router 转发）。
+/// 严格单向配对，同腿进出禁止（tailnet 入站命中 Tailnet 路由 = 反射，丢弃），
+/// 转发图无环，不依赖 TTL 衰减；v1 不减 TTL
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransitFrom {
+    Mesh,
+    Dn42,
+    Tailnet,
+}
+
+impl Node {
+    /// 跨腿 transit 转发：mesh/dn42/ts2021 入站明文 → 对应腿。
+    /// 未命中 → false，调用方写 TUN（本地投递/WAN 出口）
+    pub(super) async fn forward_transit(&mut self, packet: &[u8], from: TransitFrom) -> bool {
         let Ok(info) = parse_packet(packet) else {
             return false;
         };
-        // 组播/广播维持既有语义（mesh 广播帧写 TUN 由内核泛洪；dn42 侧不 transit 组播）
+        // 组播/广播维持既有语义（mesh 广播帧写 TUN 由内核泛洪；dn42/ts2021 侧不 transit 组播）
         if info.dst.is_multicast() {
             return false;
         }
@@ -160,56 +186,76 @@ impl Node {
                     .iter()
                     .find(|l| l.name == *name)
                     .is_some_and(|l| l.established()),
-                RouteVia::Tailnet(_) | RouteVia::Direct(_) => false,
+                RouteVia::Tailnet(id) => self.ts2021.as_ref().is_some_and(|l| l.has_peer(id)),
+                RouteVia::Direct(_) => false,
             };
             let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
                 return false;
             };
             (entry.via.clone(), info.dst)
         };
-        match via {
-            RouteVia::Dn42(name) if from_mesh => {
+        match (via, from) {
+            (RouteVia::Dn42(name), TransitFrom::Mesh | TransitFrom::Tailnet) => {
                 let Some(leg) = self.dn42_peers.iter().find(|l| l.name == name) else {
                     return false;
                 };
                 if leg.send(packet).await {
-                    info!("[node] transit mesh->dn42: {} via {}", dst, leg.name);
+                    info!("[node] transit {:?}->dn42: {} via {}", from, dst, leg.name);
                     true
                 } else {
                     false
                 }
             }
-            RouteVia::Mesh(peer) if !from_mesh => {
+            (RouteVia::Mesh(peer), TransitFrom::Dn42 | TransitFrom::Tailnet) => {
                 if !self.mesh.has_session(peer) {
                     debug!(
-                        "[node] transit dn42->mesh: {} no session with {}",
-                        dst, peer
+                        "[node] transit {:?}->mesh: {} no session with {}",
+                        from, dst, peer
                     );
                     return false;
                 }
                 let flow = flow_hash(&info);
                 match self.mesh.build_data_frame(peer, packet, flow) {
                     Ok((frame, first_hop)) => {
-                        // EMSGSIZE 同样按 drop：PTB 回注 dn42 腿不在 v1 范围（§6.2 仅 tun0 侧）
+                        // EMSGSIZE 同样按 drop：PTB 回注 dn42/ts2021 腿不在 v1 范围（§6.2 仅 tun0 侧）
                         let ok = self
                             .mesh
                             .send_to_node_hop(peer, first_hop, &frame)
                             .await
                             .unwrap_or(false);
                         if ok {
-                            info!("[node] transit dn42->mesh: {} via node {}", dst, peer);
+                            info!("[node] transit {:?}->mesh: {} via node {}", from, dst, peer);
                         }
                         ok
                     }
                     Err(e) => {
                         debug!(
-                            "[node] transit dn42->mesh: {} frame build failed: {:?}",
-                            dst, e
+                            "[node] transit {:?}->mesh: {} frame build failed: {:?}",
+                            from, dst, e
                         );
                         false
                     }
                 }
             }
+            // 回程（ROUTE_ENGINE §3）：mesh 入站 dst 命中 tailnet 路由 → ts2021 出站
+            (RouteVia::Tailnet(id), TransitFrom::Mesh) => {
+                let sent = match self.ts2021.as_ref() {
+                    Some(leg) => leg.send(packet).await,
+                    None => false,
+                };
+                if sent {
+                    info!("[node] transit mesh->tailnet: {} via {}", dst, id);
+                }
+                sent
+            }
+            // 反射防护：tailnet 入站不得再出 tailnet（同腿进出 = 环）
+            (RouteVia::Tailnet(_), TransitFrom::Tailnet) => {
+                debug!("[node] transit tailnet reflection dropped: {}", dst);
+                true
+            }
+            // dn42 → tailnet 不在 v1 边集（dn42 侧可达 tailnet 经 mesh 中转）
+            (RouteVia::Tailnet(_), TransitFrom::Dn42) => false,
+            // 同腿进出（mesh→mesh / dn42→dn42）不存在于边集；Local 出口走 TUN
             _ => false,
         }
     }

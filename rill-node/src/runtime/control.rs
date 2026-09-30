@@ -183,6 +183,8 @@ impl Node {
         let mut fresh: HashSet<u32> = HashSet::new();
         self.engine.reset_mesh_routes();
         let mut peer_endpoints: HashMap<u32, Vec<SocketAddr>> = HashMap::new();
+        // mesh routes[] 汇总（TSL-05 subnet router 广播数据源：进自建 tailnet）
+        let mut mesh_routes: Vec<String> = Vec::new();
         for entry in &netmap.entries {
             if Some(entry.node_id) == self.node_id {
                 continue;
@@ -206,6 +208,9 @@ impl Node {
             if !entry.offline {
                 for route in &entry.routes {
                     if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(route) {
+                        if !mesh_routes.contains(route) {
+                            mesh_routes.push(route.clone());
+                        }
                         self.engine.insert(RouteEntry {
                             prefix,
                             source: RouteSource::Mesh,
@@ -230,6 +235,9 @@ impl Node {
         }
         self.netmap_peers = fresh;
         self.peer_endpoints = peer_endpoints;
+        // mesh routes[] 汇总注入 ts2021 广播（变更 poke 重发 MapRequest，
+        // Hostinfo.RoutableIPs 只在新请求生效，TS2021_LEG §3.3.2）
+        self.ts2021_set_mesh_routes(mesh_routes);
         // relay 列表：netmap 权威全量替换；归属节点按 netmap 端点匹配解析
         // （relay_list 为端点串，须定位节点才能定向互探）
         let netmap_endpoints: HashMap<SocketAddr, u32> = netmap

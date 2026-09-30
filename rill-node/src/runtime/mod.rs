@@ -32,6 +32,8 @@ pub mod dn42;
 pub mod lan;
 pub mod probe;
 pub mod reconnect;
+pub mod ts2021;
+pub(crate) use lan::TransitFrom;
 pub const DATA_HEARTBEAT_MISSES: u32 = 3;
 /// 握手重试间隔：上次尝试无响应视为该路径 miss（UDP 黑洞探活）
 pub const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -105,12 +107,14 @@ impl Default for NodeOptions {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LanOutcome {
     /// 已加密帧发往 rill 节点
     Sent { peer: u32 },
     /// 包已进 dn42 隧道（DN42_LEG）
     SentDn42 { peer: String },
+    /// 包已进 ts2021 出站通道（TS2021_LEG §3.3.2）
+    SentTailnet { peer: String },
     /// 无会话，已发起懒握手（包丢弃，TCP 重传语义兜底）
     Handshaking { peer: u32 },
     /// 组播包已泛洪（广播帧，FRAME_HEADER §2.6）
@@ -170,6 +174,8 @@ pub struct Node {
     echoed_endpoints: Vec<SocketAddr>,
     /// dn42 leg 运行态（DN42_LEG，None = 未启用）
     dn42_peers: Vec<dn42::Dn42PeerLeg>,
+    /// ts2021 leg 运行态（TS2021_LEG §3.3.2，None = 未启用）
+    pub(crate) ts2021: Option<ts2021::Ts2021Leg>,
 }
 
 impl Node {
@@ -233,10 +239,16 @@ impl Node {
             peer_endpoints: HashMap::new(),
             echoed_endpoints: Vec::new(),
             dn42_peers: Vec::new(),
+            ts2021: None,
         };
         // dn42 接入（DN42_LEG）：配置启用即 spawn peer 会话任务
         if let Some(dn42_cfg) = node.cfg.dn42.clone() {
             node.spawn_dn42_legs(&dn42_cfg).await?;
+        }
+        // ts2021 接入（TS2021_LEG §3.3.2）：配置启用即 spawn 腿任务
+        // （控制面不可达不阻塞启动——任务内自退避重连）
+        if let Some(ts_cfg) = node.cfg.ts2021.clone() {
+            node.ts2021 = Some(ts2021::spawn_ts2021_leg(&ts_cfg).await?);
         }
         Ok(node)
     }
@@ -375,6 +387,7 @@ impl Node {
     /// 也持续调用，dn42-only 形态（无 coordinator）路由事件不饿死（DN42_LEG §5）
     pub async fn pump_timers(&mut self) {
         self.pump_dn42().await;
+        self.pump_ts2021().await;
         let now = Instant::now();
         if now.duration_since(self.last_control_heartbeat) >= self.opts.heartbeat_interval {
             self.last_control_heartbeat = now;
@@ -507,7 +520,7 @@ impl Node {
                         if let Some(payload) = self.handle_mesh_event(ev).await {
                             // 跨腿 transit（M2）：dst 命中 dn42 路由且 leg 建立即出隧道，
                             // 否则写 TUN（本地投递，含组播/广播泛洪语义不变）
-                            if !self.forward_transit(&payload, true).await {
+                            if !self.forward_transit(&payload, TransitFrom::Mesh).await {
                                 self.write_lan(&payload).await;
                             }
                         }

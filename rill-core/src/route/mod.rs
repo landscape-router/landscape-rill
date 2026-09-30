@@ -251,6 +251,13 @@ impl RouteEngine {
             .remove_where(|e| e.source == RouteSource::Dn42 && e.via == via);
     }
 
+    /// 移除 tailnet peer 的全部路由（netmap 全量替换语义，TS2021_LEG §3.3.2）
+    pub fn remove_tailnet_peer(&mut self, peer: &str) {
+        let via = RouteVia::Tailnet(peer.to_string());
+        self.table
+            .remove_where(|e| e.source == RouteSource::Tailnet && e.via == via);
+    }
+
     /// 重建 mesh 来源路由（netmap 全量替换语义）
     pub fn reset_mesh_routes(&mut self) {
         self.table.remove_where(|e| e.source == RouteSource::Mesh);

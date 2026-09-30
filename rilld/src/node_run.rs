@@ -4,11 +4,27 @@ use crate::coord_run::run_coord;
 use crate::{unix_now, BoxResult, FileConfig};
 use landscape_rill_coord::authkey::{is_expired, parse_auth_key};
 use landscape_rill_core::error::format_chain;
-use landscape_rill_node::config::{Config, DataTransport, Dn42Config, Dn42PeerConfig};
+use landscape_rill_node::config::{
+    Config, DataTransport, Dn42Config, Dn42PeerConfig, Ts2021Config,
+};
 use landscape_rill_node::runtime::{Node, NodeOptions};
 use landscape_rill_node::tun::TunConfig;
 use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
+
+/// FileConfig.ts2021 → 节点 ts2021 配置（字符串字段原样透传；语义校验在
+/// Config::validate，fail-closed）
+fn ts2021_config_from_file(t: &crate::Ts2021File) -> Ts2021Config {
+    Ts2021Config {
+        control_url: t.control_url.clone(),
+        auth_key: t.auth_key.clone(),
+        ca_cert_path: t.ca_cert_path.clone(),
+        hostname: t.hostname.clone(),
+        state_path: t.state_path.clone(),
+        advertise_routes: t.advertise_routes.clone(),
+        advertise_exit: t.advertise_exit,
+    }
+}
 
 /// FileConfig.dn42 → 节点 dn42 配置（字符串字段解析；语义校验在 Config::validate，fail-closed）
 pub(crate) fn dn42_config_from_file(d: &crate::Dn42File) -> std::io::Result<Dn42Config> {
@@ -136,6 +152,7 @@ pub(crate) fn run_daemon(
             },
             coord: None,
             dn42: file.dn42.as_ref().map(dn42_config_from_file).transpose()?,
+            ts2021: file.ts2021.as_ref().map(ts2021_config_from_file),
         };
         config.validate().map_err(|e| {
             std::io::Error::new(

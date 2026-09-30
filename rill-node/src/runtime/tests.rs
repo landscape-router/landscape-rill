@@ -103,6 +103,7 @@ fn node_config_caps(url: &str, ca_path: &str, seed: u8, routes: Vec<String>, cap
         data_transport: DataTransport::default(),
         coord: None,
         dn42: None,
+        ts2021: None,
     }
 }
 
@@ -428,4 +429,158 @@ async fn path_request_pending_capped() {
     // 重复 dest 不增长
     a.request_paths_for(0);
     assert_eq!(a.pending_path_requests.len(), PATH_REQUEST_PENDING_MAX);
+}
+
+// ==================== ts2021 腿接线（TS2021_LEG §3.3.2） ====================
+
+/// ts2021 测试 peer（node key = seed 填充；id = hex 形态）
+fn ts_peer(seed: u8, allowed: &[&str]) -> ts2021::Ts2021Peer {
+    ts2021::Ts2021Peer {
+        id: format!("{seed:02x}").repeat(32),
+        key: [seed; 32],
+        endpoints: vec![],
+        allowed_ips: allowed.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn ts_lookup(node: &Node, dst: &str) -> Vec<(RouteSource, String)> {
+    node.engine
+        .lookup(&dst.parse().unwrap())
+        .into_iter()
+        .map(|(e, _)| {
+            (
+                e.source,
+                match &e.via {
+                    RouteVia::Tailnet(id) => id.clone(),
+                    other => format!("{:?}", other),
+                },
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ts2021_netmap_routes_injected_and_replaced() {
+    let (url, ca) = start_coord().await;
+    let mut node = Node::new(node_config(&url, &ca, 3, vec![]), fast_opts())
+        .await
+        .unwrap();
+    let (leg, th) = ts2021::Ts2021Leg::test_leg();
+    node.ts2021 = Some(leg);
+    let p1 = ts_peer(1, &["100.64.0.2/32", "10.99.0.0/24", "0.0.0.0/0"]);
+    let id1 = p1.id.clone();
+    th.events
+        .send(ts2021::Ts2021Event::Netmap { peers: vec![p1] })
+        .await
+        .unwrap();
+    node.pump_ts2021().await;
+    // /32 与子网路由进 LPM（Tailnet via）；默认路由（exit 方向）排除
+    assert_eq!(
+        ts_lookup(&node, "100.64.0.2"),
+        vec![(RouteSource::Tailnet, id1.clone())]
+    );
+    assert_eq!(
+        ts_lookup(&node, "10.99.0.9"),
+        vec![(RouteSource::Tailnet, id1.clone())]
+    );
+    assert!(ts_lookup(&node, "8.8.8.8").is_empty());
+    // 全量替换：peer 消失 → 路由与镜像清空
+    th.events
+        .send(ts2021::Ts2021Event::Netmap { peers: vec![] })
+        .await
+        .unwrap();
+    node.pump_ts2021().await;
+    assert!(ts_lookup(&node, "100.64.0.2").is_empty());
+    assert!(ts_lookup(&node, "10.99.0.9").is_empty());
+    assert!(!node.ts2021.as_ref().unwrap().has_peer(&id1));
+}
+
+#[tokio::test]
+async fn lan_packet_to_tailnet_goes_outbound() {
+    let (url, ca) = start_coord().await;
+    let mut node = Node::new(node_config(&url, &ca, 3, vec![]), fast_opts())
+        .await
+        .unwrap();
+    let (leg, mut th) = ts2021::Ts2021Leg::test_leg();
+    node.ts2021 = Some(leg);
+    let id = ts_peer(7, &["100.64.0.7/32"]).id;
+    th.events
+        .send(ts2021::Ts2021Event::Netmap {
+            peers: vec![ts_peer(7, &["100.64.0.7/32"])],
+        })
+        .await
+        .unwrap();
+    node.pump_ts2021().await;
+    let pkt = v4_packet([100, 64, 0, 7]);
+    let outcome = node.pump_lan_packet(&pkt).await;
+    assert_eq!(outcome, LanOutcome::SentTailnet { peer: id });
+    // 出站通道收到原包（peer 匹配/封装在数据面任务内）
+    assert_eq!(th.outbound.recv().await.unwrap(), pkt);
+}
+
+#[tokio::test]
+async fn tailnet_ingress_transits_to_mesh_and_reflection_dropped() {
+    let (url, ca) = start_coord().await;
+    let mut a = Node::new(node_config(&url, &ca, 1, vec![]), fast_opts())
+        .await
+        .unwrap();
+    let mut b = Node::new(
+        node_config(&url, &ca, 2, vec!["10.7.0.0/24".into()]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    let (leg, mut th) = ts2021::Ts2021Leg::test_leg();
+    a.ts2021 = Some(leg);
+    th.events
+        .send(ts2021::Ts2021Event::Netmap {
+            peers: vec![ts_peer(9, &["100.64.0.9/32"])],
+        })
+        .await
+        .unwrap();
+    a.pump_ts2021().await;
+    // a↔b mesh 会话（b 公告 10.7.0.0/24 → a 引擎 Mesh 路由）
+    a.connect_control().await.unwrap();
+    b.connect_control().await.unwrap();
+    pump_until_all(&mut [&mut a, &mut b], "registered", |n| n.registered()).await;
+    let b_id = b.node_id().unwrap();
+    let a_id = a.node_id().unwrap();
+    // keydist + 路由公告 + 端点收敛（定时器节奏），随后懒握手
+    let dst: IpAddr = "10.7.0.5".parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "route convergence timeout");
+        for n in [&mut a, &mut b] {
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_control()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_mesh()).await;
+            n.pump_timers().await;
+        }
+        if a.mesh.has_key_dst(b_id) && b.mesh.has_key_dst(a_id) && !a.engine.lookup(&dst).is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let probe = v4_packet([10, 7, 0, 5]);
+    establish_session(&mut a, &mut b, &probe, b_id).await;
+    // tailnet 入站 dst 命中 mesh 路由 → subnet router 转发（mesh 帧）
+    let pkt = v4_packet([10, 7, 0, 5]);
+    // tailnet 入站明文 → 泵裁决 → mesh 转发（subnet router 语义）
+    th.plaintext.send(pkt.clone()).await.unwrap();
+    a.pump_ts2021().await;
+    let got = tokio::time::timeout(Duration::from_millis(500), b.pump_mesh()).await;
+    assert_eq!(
+        got.expect("mesh frame timeout"),
+        Some(bytes::Bytes::from(pkt.clone()))
+    );
+    // 反射防护：tailnet 入站 dst = tailnet peer 地址 → 丢弃（不回 tailnet、不进 mesh）
+    let refl = v4_packet([100, 64, 0, 9]);
+    th.plaintext.send(refl).await.unwrap();
+    a.pump_ts2021().await;
+    match tokio::time::timeout(Duration::from_millis(200), b.pump_mesh()).await {
+        // 无后续帧 = 反射包未进 mesh（超时 = 空队列，通过）
+        Err(_) => {}
+        Ok(ev) => panic!("reflection leaked to mesh: {ev:?}"),
+    }
+    assert!(th.outbound.try_recv().is_err(), "反射包不得回 tailnet 出站");
 }

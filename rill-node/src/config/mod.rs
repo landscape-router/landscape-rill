@@ -44,6 +44,24 @@ pub struct Config {
     pub coord: Option<CoordConfig>,
     /// dn42 接入（DN42_LEG）：None = 未启用
     pub dn42: Option<Dn42Config>,
+    /// ts2021 接入（TS2021_LEG §3.3.2，runtime 内建会话模块）：None = 未启用
+    pub ts2021: Option<Ts2021Config>,
+}
+
+/// ts2021 接入配置（自建 headscale 形态；auth key 预授权路径）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ts2021Config {
+    /// 控制面地址（https://host:port，自签 CA 信任锚）
+    pub control_url: String,
+    pub auth_key: String,
+    pub ca_cert_path: String,
+    pub hostname: String,
+    /// machine key 持久化路径（重启身份稳定，TSL-10）
+    pub state_path: String,
+    /// 静态广播前缀（自家 LAN 等；mesh routes[] 汇总运行时并入，TSL-05）
+    pub advertise_routes: Vec<String>,
+    /// 广播 exit（0.0.0.0/0 + ::/0，TSL-07）
+    pub advertise_exit: bool,
 }
 
 impl Config {
@@ -102,6 +120,29 @@ impl Config {
         }
         if let Some(dn42) = &self.dn42 {
             dn42.validate().map_err(ConfigError::InvalidDn42)?;
+        }
+        if let Some(ts) = &self.ts2021 {
+            if !ts.control_url.starts_with("https://") {
+                return Err(ConfigError::InvalidTs2021(
+                    "control_url must be https".into(),
+                ));
+            }
+            if ts.auth_key.is_empty() {
+                return Err(ConfigError::InvalidTs2021("auth_key is empty".into()));
+            }
+            if ts.ca_cert_path.is_empty() {
+                return Err(ConfigError::InvalidTs2021("ca_cert_path is empty".into()));
+            }
+            if ts.hostname.is_empty() || ts.state_path.is_empty() {
+                return Err(ConfigError::InvalidTs2021(
+                    "hostname/state_path is empty".into(),
+                ));
+            }
+            for route in &ts.advertise_routes {
+                if landscape_rill_core::route::Prefix::parse(route).is_err() {
+                    return Err(ConfigError::InvalidRoute(route.clone()));
+                }
+            }
         }
         Ok(())
     }
@@ -198,6 +239,7 @@ mod tests {
             data_transport: DataTransport::Udp,
             coord: None,
             dn42: None,
+            ts2021: None,
         }
     }
 

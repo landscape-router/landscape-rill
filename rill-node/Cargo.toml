@@ -9,12 +9,16 @@ landscape-rill-core = { path = "../rill-core" }
 landscape-rill-coord = { path = "../rill-coord" }
 landscape-rill-mesh = { path = "../rill-mesh" }
 landscape-rill-dn42 = { path = "../rill-dn42" }
+landscape-rill-ts2021 = { path = "../rill-ts2021" }
 tokio.workspace = true
 bytes.workspace = true
 tun.workspace = true
 rtnetlink.workspace = true
 netlink-packet-route.workspace = true
 futures-util.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
 ed25519-dalek.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
@@ -22,4 +26,3 @@ landscape-rill-macro = { path = "../rill-macro" }
 
 [dev-dependencies]
 rcgen.workspace = true
-rustls.workspace = true

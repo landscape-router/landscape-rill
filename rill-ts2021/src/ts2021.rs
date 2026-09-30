@@ -131,7 +131,35 @@ impl ControlClient {
         host: &str,
         preferred_derp: Option<u16>,
     ) -> io::Result<MapResponse> {
-        let body = map_request_json(node_key, disco_key, hostname, &[], true, preferred_derp);
+        let mut stream = self
+            .map_stream(node_key, disco_key, hostname, host, &[], preferred_derp)
+            .await?;
+        // 首个含 Node 的全量 netmap（keepalive 帧跳过）
+        stream.next_netmap().await
+    }
+
+    /// POST /machine/map（Stream=true 长轮询）为持续流：服务端经同一响应体推送
+    /// 后续 netmap 变更帧（每帧 = 4B LE 长度头 + JSON；keepalive 帧无 Node）。
+    /// 调用方持流轮询 `next_netmap`；RoutableIPs 变更时丢弃流重发请求
+    /// （Hostinfo 只在新 MapRequest 生效，TS2021_LEG §3.3.2）
+    pub async fn map_stream(
+        &mut self,
+        node_key: &[u8; 32],
+        disco_key: &[u8; 32],
+        hostname: &str,
+        host: &str,
+        routable_ips: &[String],
+        preferred_derp: Option<u16>,
+    ) -> io::Result<MapStream> {
+        let body = map_request_json(
+            node_key,
+            disco_key,
+            hostname,
+            &[],
+            true,
+            preferred_derp,
+            routable_ips,
+        );
         let request = http::Request::builder()
             .method(http::Method::POST)
             .uri(format!("https://{host}/machine/map"))
@@ -154,42 +182,12 @@ impl ControlClient {
         if !status.is_success() {
             return Err(io::Error::other(format!("map rejected: {status}")));
         }
-        let mut reader = BodyReader {
-            body: response.into_body(),
-            cur: Bytes::new(),
-        };
-        loop {
-            let mut len_buf = [0u8; 4];
-            reader.read_exact(&mut len_buf).await?;
-            let len = u32::from_le_bytes(len_buf) as usize;
-            if len > MAX_MAP_FRAME {
-                return Err(io::Error::other("map frame too large"));
-            }
-            let mut json = vec![0u8; len];
-            reader.read_exact(&mut json).await?;
-            let map: MapResponse = serde_json::from_slice(&json)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            if std::env::var("LRILL_DEBUG").is_ok() {
-                let v: serde_json::Value = serde_json::from_slice(&json).unwrap_or_default();
-                eprintln!(
-                    "[dbg] map frame keys: {:?}",
-                    v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
-                );
-                eprintln!(
-                    "[dbg] DERPMap: {}",
-                    v.get("DERPMap")
-                        .map(|d| d.to_string())
-                        .unwrap_or_default()
-                        .chars()
-                        .take(400)
-                        .collect::<String>()
-                );
-            }
-            if map.node.is_some() {
-                return Ok(map);
-            }
-            // keepalive 帧：继续等首个全量 netmap
-        }
+        Ok(MapStream {
+            reader: BodyReader {
+                body: response.into_body(),
+                cur: Bytes::new(),
+            },
+        })
     }
 
     /// POST /machine/register（auth key 预授权路径，REQ-021/TS2021_LEG §3.2）。
@@ -273,6 +271,49 @@ impl BodyReader {
 }
 
 const MAX_MAP_FRAME: usize = 1024 * 1024;
+
+/// 长轮询响应流（`map_stream` 产物）：逐帧读取，keepalive 帧跳过
+pub struct MapStream {
+    reader: BodyReader,
+}
+
+impl MapStream {
+    /// 读下一帧完整 netmap（无 Node 的 keepalive 帧内部跳过）；
+    /// Err = 流断开（调用方重建长轮询）
+    pub async fn next_netmap(&mut self) -> io::Result<MapResponse> {
+        loop {
+            let mut len_buf = [0u8; 4];
+            self.reader.read_exact(&mut len_buf).await?;
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len > MAX_MAP_FRAME {
+                return Err(io::Error::other("map frame too large"));
+            }
+            let mut json = vec![0u8; len];
+            self.reader.read_exact(&mut json).await?;
+            let map: MapResponse = serde_json::from_slice(&json)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if std::env::var("LRILL_DEBUG").is_ok() {
+                let v: serde_json::Value = serde_json::from_slice(&json).unwrap_or_default();
+                eprintln!(
+                    "[dbg] map frame keys: {:?}",
+                    v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+                );
+                eprintln!(
+                    "[dbg] DERPMap: {}",
+                    v.get("DERPMap")
+                        .map(|d| d.to_string())
+                        .unwrap_or_default()
+                        .chars()
+                        .take(400)
+                        .collect::<String>()
+                );
+            }
+            if map.node.is_some() {
+                return Ok(map);
+            }
+        }
+    }
+}
 
 async fn collect_body(mut body: h2::RecvStream) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();

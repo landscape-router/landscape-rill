@@ -197,7 +197,7 @@ impl Node {
         for pkt in inbound {
             // 回程 transit（M2）：dst 命中 mesh 路由且有会话即回 mesh（dn42 主机 → mesh 节点），
             // 否则写 TUN（本节点自身会话的回程，行为不变）
-            if !self.forward_transit(&pkt, false).await {
+            if !self.forward_transit(&pkt, TransitFrom::Dn42).await {
                 self.write_lan(&pkt).await;
             }
         }
@@ -233,6 +233,7 @@ mod tests {
             data_transport: Default::default(),
             coord: None,
             dn42: None,
+            ts2021: None,
         };
         let mut node = Node::new(cfg, NodeOptions::default()).await.unwrap();
         let (out_tx, _out_rx) = mpsc::channel(64);
@@ -359,10 +360,10 @@ mod tests {
         node.pump_dn42().await;
         let pkt = v4_packet([10, 0, 0, 1], [172, 20, 100, 9]);
         // mesh 入站 + dn42 路由命中 → 出隧道，出站通道收到原包
-        assert!(node.forward_transit(&pkt, true).await);
+        assert!(node.forward_transit(&pkt, TransitFrom::Mesh).await);
         assert_eq!(out_rx.recv().await.unwrap(), pkt);
         // dn42 入站带 dn42 路由命中 → 不 transit（防环：dn42→dn42 禁止）
-        assert!(!node.forward_transit(&pkt, false).await);
+        assert!(!node.forward_transit(&pkt, TransitFrom::Dn42).await);
     }
 
     #[tokio::test]
@@ -376,11 +377,11 @@ mod tests {
             metric: None,
         });
         let pkt = v4_packet([10, 0, 0, 1], [172, 20, 100, 9]);
-        assert!(!node.forward_transit(&pkt, true).await);
+        assert!(!node.forward_transit(&pkt, TransitFrom::Mesh).await);
         // 组播永不 transit（广播帧维持写 TUN 泛洪语义）
         let mut mcast = v4_packet([10, 0, 0, 1], [224, 0, 0, 1]);
         mcast[15] = 224;
-        assert!(!node.forward_transit(&mcast, true).await);
+        assert!(!node.forward_transit(&mcast, TransitFrom::Mesh).await);
     }
 
     #[tokio::test]
@@ -394,6 +395,6 @@ mod tests {
             metric: None,
         });
         let pkt = v4_packet([172, 20, 100, 9], [10, 42, 0, 5]);
-        assert!(!node.forward_transit(&pkt, false).await);
+        assert!(!node.forward_transit(&pkt, TransitFrom::Dn42).await);
     }
 }

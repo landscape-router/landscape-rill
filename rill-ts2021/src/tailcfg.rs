@@ -90,7 +90,9 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// MapRequest JSON：Stream=true 长轮询（headscale 0.29 对 Stream=false+OmitPeers=false
-/// 不回 body，完整 netmap 仅经长轮询首个 MapResponse 下发——poll.go serve/serveLongPoll 对照）
+/// 不回 body，完整 netmap 仅经长轮询首个 MapResponse 下发——poll.go serve/serveLongPoll 对照）。
+/// `routable_ips` = Hostinfo.RoutableIPs（subnet route / exit 广播，`--advertise-routes`
+/// 同源；headscale 收集待审批后并入对端 AllowedIPs，TS2021_LEG §3.3.2）
 pub fn map_request_json(
     node_key: &[u8; 32],
     disco_key: &[u8; 32],
@@ -98,11 +100,15 @@ pub fn map_request_json(
     endpoints: &[String],
     stream: bool,
     preferred_derp: Option<u16>,
+    routable_ips: &[String],
 ) -> Vec<u8> {
-    let hostinfo = match preferred_derp {
+    let mut hostinfo = match preferred_derp {
         Some(rid) => serde_json::json!({"Hostname": hostname, "NetInfo": {"PreferredDERP": rid}}),
         None => serde_json::json!({"Hostname": hostname}),
     };
+    if !routable_ips.is_empty() {
+        hostinfo["RoutableIPs"] = serde_json::json!(routable_ips);
+    }
     let body = serde_json::json!({
         "Version": CURRENT_CAP_VERSION,
         "NodeKey": format!("nodekey:{}", hex(node_key)),

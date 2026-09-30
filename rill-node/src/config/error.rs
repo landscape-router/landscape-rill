@@ -32,4 +32,7 @@ pub enum ConfigError {
     #[error("invalid dn42 config: {0}")]
     #[error_id("node.config.invalid_dn42")]
     InvalidDn42(String),
+    #[error("invalid ts2021 config: {0}")]
+    #[error_id("node.config.invalid_ts2021")]
+    InvalidTs2021(String),
 }

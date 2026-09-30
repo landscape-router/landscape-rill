@@ -153,6 +153,28 @@ struct FileConfig {
     /// dn42 接入（DN42_LEG）：缺省 = 未启用
     #[serde(default)]
     dn42: Option<Dn42File>,
+    /// ts2021 接入（TS2021_LEG §3.3.2）：缺省 = 未启用
+    #[serde(default)]
+    ts2021: Option<Ts2021File>,
+}
+
+/// ts2021 接入配置（serde 形态；语义校验在 rill-node Config::validate）
+#[derive(Debug, Deserialize)]
+struct Ts2021File {
+    control_url: String,
+    auth_key: String,
+    ca_cert_path: String,
+    #[serde(default = "default_ts2021_hostname")]
+    hostname: String,
+    state_path: String,
+    #[serde(default)]
+    advertise_routes: Vec<String>,
+    #[serde(default)]
+    advertise_exit: bool,
+}
+
+fn default_ts2021_hostname() -> String {
+    "rill-ext".into()
 }
 
 /// dn42 接入配置（serde 形态；校验在 rill-node config::dn42，加载即校验）
