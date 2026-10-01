@@ -9,6 +9,9 @@
   # ⑤ SIGHUP 密码轮换：旧密码即刻 401、新密码 200、reload_log 记录 ok（内容组 5）
   # ⑥ 重载失败：坏配置 → SIGHUP → reload_log 记录 failed + 保持旧配置（密码仍可用）
   # ⑦ 红线：明文密码/master_key/signing_seed 不出现在响应；轮换/失败重载后数据面不受影响
+  # ⑧ 写操作（REQ-069，ADM-08）：POST /admin/revoke 同认证面（401）+ 吊销生效
+  #    （/status 即刻不含该节点 + 未知/重复 node_id 404 + 审计日志）+ 数据面
+  #    一个心跳周期内剪除（b→a ping 断，apply_netmap stale 剪除链路）
   STATUS_URL="https://coord:9444/status"
   STATUS_IP="192.168.240.10"
   CA="$E2E_DIR/build/ca.pem"
@@ -42,7 +45,7 @@
     "${CURL_BASE[@]}" -H "Authorization: Bearer e2e-status-pass-1" "$STATUS_URL"
   }
 
-  echo "==> status 阶段 1/7：注册收敛 + 数据面 ping（遥测流量源）"
+  echo "==> status 阶段 1/8：注册收敛 + 数据面 ping（遥测流量源）"
   wait_registered || { echo "FAIL: 节点未注册"; logs mesh-node-a | tail -10; exit 1; }
   for i in $(seq 1 20); do
     if docker exec mesh-node-b ping -c1 -W1 10.42.0.1 >/dev/null 2>&1; then
@@ -53,7 +56,7 @@
     sleep 2
   done
 
-  echo "==> status 阶段 2/7：认证面（401 / 429 / 明文拒绝）"
+  echo "==> status 阶段 2/8：认证面（401 / 429 / 明文拒绝）"
   wait_coord_status || { echo "FAIL: status 端点不可达"; logs mesh-coord | tail -10; exit 1; }
   [ "$(code_with "")" = "401" ] || { echo "FAIL: 无密码应 401，got $(code_with "")"; exit 1; }
   [ "$(code_with "wrong-pass")" = "401" ] || { echo "FAIL: 错密码应 401"; exit 1; }
@@ -78,7 +81,7 @@ PYEOF
   fi
   echo "PASS: 明文 HTTP 在 TLS 握手层被拒"
 
-  echo "==> status 阶段 3/7：正确密码 200 + 内容组齐全"
+  echo "==> status 阶段 3/8：正确密码 200 + 内容组齐全"
   # 限速桶排空（容量 10 + 5/s 补充；洪泛后须等窗口恢复）
   sleep 5
   BODY=$(fetch_status)
@@ -109,7 +112,7 @@ PYEOF
   fi
   echo "PASS: 红线——明文密码/master_key/signing_seed 零输出"
 
-  echo "==> status 阶段 4/7：遥测聚合（per-peer 计数 + 直连确认对）"
+  echo "==> status 阶段 4/8：遥测聚合（per-peer 计数 + 直连确认对）"
   python3 - "$STATUS_IP" <<'PYEOF'
 import http.client, ssl, sys, time
 ctx = ssl._create_unverified_context()
@@ -138,7 +141,7 @@ rtts = [p["rtt_ms"] for t in tele for p in t["direct"]]
 print(f"PASS: 遥测聚合 latest-wins（per-peer 计数 > 0，直连对 RTT={rtts}ms）")
 PYEOF
 
-  echo "==> status 阶段 5/7：SIGHUP 密码轮换（旧密码即刻 401）"
+  echo "==> status 阶段 5/8：SIGHUP 密码轮换（旧密码即刻 401）"
   cp "$E2E_DIR/build/coord.json.rotated" "$E2E_DIR/build/coord.json"
   docker kill -s HUP mesh-coord >/dev/null
   for i in $(seq 1 20); do
@@ -159,7 +162,7 @@ assert any("ok" in r for r in d["coord"]["reload_log"]), d["coord"]["reload_log"
 print("PASS: 新密码 200 + reload_log 记录 ok（重载历史）")
 PYEOF
 
-  echo "==> status 阶段 6/7：重载失败 → reload_log 记录 failed + 保持旧配置"
+  echo "==> status 阶段 6/8：重载失败 → reload_log 记录 failed + 保持旧配置"
   printf 'this is not json\n' > "$E2E_DIR/build/coord.json"
   docker kill -s HUP mesh-coord >/dev/null
   for i in $(seq 1 20); do
@@ -185,7 +188,72 @@ PYEOF
     || { echo "FAIL: 失败重载后旧配置应保持服务（pass-2 仍 200）"; exit 1; }
   echo "PASS: 失败重载保持旧配置（认证不中断）"
 
-  echo "==> status 阶段 7/7：轮换/失败重载后数据面不受影响"
+  echo "==> status 阶段 7/8：轮换/失败重载后数据面不受影响"
   docker exec mesh-node-b ping -c2 10.42.0.1 >/dev/null 2>&1 \
     || { echo "FAIL: 轮换后 ping 不通（SIGHUP 不应中断数据面）"; exit 1; }
   echo "PASS: SIGHUP 轮换不中断数据面（a↔b 仍通）"
+
+  echo "==> status 阶段 8/8：写操作（REQ-069）——吊销 node-b"
+  ADMIN_URL="https://coord:9444/admin/revoke"
+  revoke_code() {  # $1=密码（空 = 不带）$2=JSON 体
+    if [ -n "$1" ]; then
+      "${CURL_BASE[@]}" -o /dev/null -w '%{http_code}' -X POST \
+        -H "Authorization: Bearer $1" -H "Content-Type: application/json" \
+        -d "$2" "$ADMIN_URL"
+    else
+      "${CURL_BASE[@]}" -o /dev/null -w '%{http_code}' -X POST \
+        -H "Content-Type: application/json" -d "$2" "$ADMIN_URL"
+    fi
+  }
+  # 同认证面：无/错密码 401（CP-06 破坏性端点同等鉴权）
+  [ "$(revoke_code "" '{"node_id":2}')" = "401" ] \
+    || { echo "FAIL: 无密码吊销应 401"; exit 1; }
+  [ "$(revoke_code "wrong" '{"node_id":2}')" = "401" ] \
+    || { echo "FAIL: 错密码吊销应 401"; exit 1; }
+  echo "PASS: 写端点同认证面（401）"
+  # node-b = 公告 10.43.0.0/24 的节点（拓扑：a 10.42 / b 10.43）；
+  # 阶段 5 已轮换密码，读快照须用 pass-2（fetch_status 固定 pass-1）
+  status2() {
+    "${CURL_BASE[@]}" -H "Authorization: Bearer e2e-status-pass-2" "$STATUS_URL"
+  }
+  B_ID=$(status2 | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+b = [n for n in d["nodes"] if "10.43.0.0/24" in n["routes"]]
+assert len(b) == 1, f"node-b 定位失败: {[(n["node_id"], n["routes"]) for n in d["nodes"]]}"
+print(b[0]["node_id"])')
+  BODY=$(curl -s --cacert "$CA" --resolve "coord:9444:$STATUS_IP" -X POST \
+    -H "Authorization: Bearer e2e-status-pass-2" -H "Content-Type: application/json" \
+    -d "{\"node_id\":$B_ID}" "$ADMIN_URL")
+  echo "$BODY" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d == {"revoked": True, "node_id": int(sys.argv[1])}, d
+print("PASS: 吊销 200 + revoked=true")' "$B_ID"
+  # /status 即刻反映 + 未知/重复 404 + 审计日志
+  status2 | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ids = [n["node_id"] for n in d["nodes"]]
+assert int(sys.argv[1]) not in ids, f"已吊销节点仍在 /status: {ids}"
+print("PASS: /status 即刻不含已吊销节点")' "$B_ID"
+  [ "$(revoke_code "e2e-status-pass-2" "{\"node_id\":$B_ID}")" = "404" ] \
+    || { echo "FAIL: 重复吊销应 404（幂等：已不在注册表）"; exit 1; }
+  [ "$(revoke_code "e2e-status-pass-2" '{"node_id":9999}')" = "404" ] \
+    || { echo "FAIL: 未知 node_id 应 404"; exit 1; }
+  echo "PASS: 重复/未知 node_id 404"
+  logs mesh-coord | grep -q "\[admin\] revoke: node_id=$B_ID" \
+    || { echo "FAIL: 审计日志缺失"; logs mesh-coord | tail -5; exit 1; }
+  echo "PASS: 审计日志记录吊销动作"
+  # 数据面：node-a 下一心跳收到不含 b 的 netmap → 剪除 stale peer（ping 断）
+  CUT=0
+  for i in $(seq 1 15); do
+    if ! docker exec mesh-node-b ping -c2 -W2 10.42.0.1 >/dev/null 2>&1; then
+      CUT=1
+      break
+    fi
+    sleep 3
+  done
+  [ "$CUT" = "1" ] \
+    || { echo "FAIL: 吊销后 b→a 仍通（stale peer 未在一个心跳周期内剪除）"; exit 1; }
+  echo "PASS: 吊销后数据面一个心跳周期内剪除（b→a ping 断）"

@@ -104,6 +104,8 @@
 | REQ-049 | — | 📌 proposed（无验收场景） | — |
 | REQ-050 | — | 📌 proposed（无验收场景） | — |
 | REQ-051 | ADM-07 | 已覆盖 | rill-coord/src/status.rs、rilld/src/coord_run.rs、e2e/mesh/status/、e2e/scenarios/status.sh |
+| REQ-069 | ADM-08 | 已覆盖 | rilld/src/status_http.rs、e2e/scenarios/status.sh |
+| REQ-070 | — | 📌 proposed（无验收场景，分阶段立项） | — |
 | REQ-052 | CTL-21 | 已覆盖 | rill-mesh/src/data/、rill-coord/src/coordinator/、rill-coord/src/status.rs、e2e/scenarios/status.sh |
 | REQ-053 | FRM-12 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/tests.rs |
 | REQ-054 | CON-11 | 已覆盖 | rill-mesh/src/data/、rill-node/src/runtime/、e2e/run_e2e.sh（MESH_E2E_TRANSPORT=tcp） |

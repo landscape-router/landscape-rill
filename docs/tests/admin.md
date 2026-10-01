@@ -80,6 +80,14 @@
 - 证据：rill-coord/src/status.rs、rill-coord/src/coordinator/tests.rs、rill-coord/src/config/mod.rs、e2e/scenarios/status.sh
 - 说明：无密码/错密码 → 401；同源高频错密码 → 429（按源限速）；SIGHUP 轮换密码旧拒新通；https 可达、明文 HTTP 被拒；快照方法与 coord 内存态一致（多网络/离线节点/一次性 key 已消费分支）；`status` 启用而密码哈希缺失/非法 → 拒绝启动；红线：密钥材料只出"已配置 + 指纹"。CI：e2e-mesh status（run 33697089991）
 
+## ADM-08 管理端点写操作（吊销）
+
+- 关联 REQ：REQ-069
+- 测试层：docker e2e
+- 状态：`已覆盖`
+- 证据：rilld/src/status_http.rs、e2e/scenarios/status.sh
+- 说明：`POST /admin/revoke` 同认证面（无/错密码 401，CP-06 同等鉴权）；成功 200 `{"revoked":true}` + `/status` 即刻不含该节点 + `info!` 审计日志；未知/重复 node_id → 404（幂等）；吊销后其余节点一个心跳周期内剪除 stale peer（ping 断，apply_netmap 剪除链路）；轮换走 REQ-048 合并窗口。CI：e2e-mesh status
+
 #### 验收断言（文件尾部汇总）
 
 - [x] ADM-01：缺失必填/格式非法配置 → 拒绝启动（fail-closed，无默认凭据）
@@ -89,6 +97,7 @@
 - [x] ADM-05：reusable 带 expires_at 过期即 InvalidAuthKey；onetime 注册即弃；配置移除 + 重载 = 吊销闭环
 - [ ] ADM-06：`lrill --help` 展示 pubkey/run/authkey/up/down/status；up/down/status 走 systemctl；无 systemd 明确报错提示 `lrill run`；Dockerfile ENTRYPOINT = `lrill run`（部分未自动化）
 - [x] ADM-07：状态端点认证/限速/轮换/快照一致性 + fail-closed（REQ-051，状态：`已覆盖`）
+- [x] ADM-08：写操作同认证面 + 吊销即时生效 + 幂等 404 + 审计日志 + 数据面心跳周期内剪除（REQ-069，状态：`已覆盖`）
 - [x] LOG-01：RUST_LOG 级别生效性（debug 明细出现 / 默认 info 不出现）；CLI > env > 默认优先级
 - [x] LOG-02：RateCounter 周期语义（tick 计数 / poll 周期返回并清零 / 0 不输出）；丢帧 per-peer 归因 + 伪造 node_id 落全局桶；摘要 ≤1 条/s
 - [x] LOG-03：--log-file 按天轮转 + 保留上限 + stderr 双写

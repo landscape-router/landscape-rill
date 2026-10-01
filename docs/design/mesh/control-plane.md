@@ -354,9 +354,9 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 2. **资源分配后置**：逐连接状态 = 固定小状态（读缓冲 + 限速桶 + 挑战槽 + 心跳时间戳），容量与连接数同阶有界；**持久状态**（注册表/binding/一次性 key 消费 tombstone/netmap 版本）全部后置到注册或挑战通过之后（REQ-060：消费后置于 PoP）；认证失败路径零持久分配
 3. **fuzz 验收**：长度前缀 / Envelope 定头 / 预认证闸门序列纳入鲁棒性 fuzz 语料——畸形与随机输入不 panic、错误只能经 `Result` 返回（SEC-08 闭环）
 
-### 3.14 coord 只读状态端点（REQ-051）
+### 3.14 coord 管理 HTTP 端点（REQ-051 只读 + REQ-069 写操作）
 
-coordinator 的**观察面**（§3.12 管理面写路径不变，WebUI 写边界不变 REQ-040）：进程内只读 HTTPS JSON 端点，仅 `GET /status`，无写路由。
+coordinator 的**观察面 + 操作面**（§3.12 配置写路径不变，WebUI 不持有持久配置 REQ-040）：进程内 HTTPS JSON 端点，`GET /status`（只读）+ `POST /admin/revoke`（写操作）。
 
 - **传输**：独立 `status.listen_addr`（默认 `127.0.0.1:8444`，loopback 缺省 = 本机运维查询）；复用 coord TLS 证书（rustls），明文 HTTP 连接在 TLS 握手层被拒；HTTP 层用 axum（依赖取向：观察面属运维基线，接受 axum/hyper 依赖——REQ-044 依赖最小化张力明示豁免；手写解析反引入 REQ-059 式攻击面）
 - **认证（day one，教训 CP-01/KC-02）**：
@@ -374,6 +374,7 @@ coordinator 的**观察面**（§3.12 管理面写路径不变，WebUI 写边界
   6. 节点遥测快照（REQ-052 聚合，§3.15）
   - **红线**：密钥材料（master_key/signing_seed/TLS 私钥）一律不输出，只显示"已配置 + 指纹"
 - **实现取向**：查询逻辑 = rill-coord 内 I/O-free 快照方法（`StatusView`，单测覆盖多网络/离线/已消费分支），HTTP 层薄（路由 + 认证中间件）
+- **写操作（REQ-069，2026-10-01）**：`POST /admin/revoke {"node_id": N}`——v1 唯一写端点，承载**操作型动作**（吊销，无配置文件形态）；一切配置态（白名单/ACL/auth key/主密钥）仍以配置文件为唯一权威（REQ-038），主密钥轮换不进 HTTP 面（材料来自配置，防权威旁路）。同监听器同认证面（CP-06 破坏性端点同等鉴权：Bearer + 常数时间比较 + 按源限速 429）；请求体在认证后手工解析（未认证请求不进解析路径）；未知/重复 node_id → 404（幂等：已不在注册表），成功 → 200 `{"revoked": true}` + `info!` 审计日志（AO-05 方向）；吊销即时生效、轮换走 REQ-048 合并窗口。独立 WebUI 与更多写端点按运维需求增量评估（每项过"是否配置态"边界判定）。对抗验证：ADM-08
 
 ### 3.15 节点遥测上报（REQ-052）
 

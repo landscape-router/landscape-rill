@@ -2,7 +2,7 @@
 
 > **新 session 入口文档**：先读本文档恢复设计上下文，再按 §5 文档地图选择后续阅读。
 > 本文档记录已收敛的术语、信任模型、外部参考与挂账项，不承载具体协议细节（细节在各设计文档）。
-> 版本：v0.10（2026-10-01 修订：REQ-048 合并——批量吊销合并轮换窗口，CONTROL_PLANE §5.5）
+> 版本：v0.11（2026-10-01 修订：REQ-069 合并——管理端点写操作（吊销）；REQ-070 Raft 高可用立项）
 
 ## 1. 项目定位
 
@@ -124,7 +124,7 @@ docs/README.md（入口：阅读路线 + 三张图）
 2. auth key 格式与生成规范（格式待定，**REQ-036**）——**已定稿（2026-08-31，REQ-036 merged，CONTROL_PLANE §3.12/§6；2026-09-01 REQ-043 修订：格式 `lrk-<network>-<expiry>-<secret>`，过期时间内嵌 key、默认 24h、`lrill authkey --ttl`，`expires_at` 配置字段移除）**：`lrk-<network>-<secret>` + `lrill authkey` 生成子命令；控制面端口号——**默认 8443 已落地**（config.rs DEFAULT_COORD_PORT，TLS 长连接非特权端口）
 3. protobuf schema 文件与代码生成（文档为语义级）——**已落地（2026-08-15，2026-08-30 重构为独立 rill-proto crate）**：`rill-proto/proto/control.proto`（CONTROL_PLANE §3 消息字段级）+ build.rs 用 **pb-rs** 生成 → OUT_DIR 的 wire 模块（不入库，`landscape-rill-proto` crate 对外暴露；quick-protobuf 运行时）
 4. v1 存储后端（redb / sqlite 候选，**REQ-037**）——**已定稿（2026-08-31，REQ-037 merged，CONTROL_PLANE §4.1）**：redb（Rust 原生、单文件、无 C 依赖；sqlite 否决——数据形态全为主键点查）；持久状态整快照原子写 + 写穿透（register/set_endpoints/request_paths/revoke/rotate_master_key）；一次性 auth key 消费 tombstone 落盘（重启/重载不复活）；损坏/不一致 → 拒绝启动（fail-closed）；`storage_path` 仅启动读取（None = 纯内存）
-5. **管理面形态**（前缀公告白名单配置方式，**REQ-038**）——**已定稿（2026-08-31，REQ-038 merged，CONTROL_PLANE §3.12）**：配置文件为唯一权威 + `CoordConfig`（加载即校验，fail-closed）+ 库 API 执行面分离（from_config/apply_config，函数调用生效）+ SIGHUP 重载增量应用；Web API 挂 P3（自研 ts2021 服务端/landscape-webserver 同批，REQ-040 边界自然满足）
+5. **管理面形态**（前缀公告白名单配置方式，**REQ-038**）——**已定稿（2026-08-31，REQ-038 merged，CONTROL_PLANE §3.12）**：配置文件为唯一权威 + `CoordConfig`（加载即校验，fail-closed）+ 库 API 执行面分离（from_config/apply_config，函数调用生效）+ SIGHUP 重载增量应用；Web 管理端点已落 v1（2026-10-01，REQ-069 merged，CONTROL_PLANE §3.14：GET /status 观察面 + POST /admin/revoke 写面，配置权威边界不变，REQ-040 边界自然满足；独立 WebUI 推迟，按运维需求增量）
 6. **运维基线**（P2，**REQ-039 已合并（日志治理）+ REQ-044/REQ-050 挂账**）：日志治理已落地（2026-09-01，LOGGING 设计文档：daemon 走 tracing + RUST_LOG 级别 + stderr 委托 supervisor + 可选 --log-file 按天轮转 + 高频失败周期计数器摘要，教训 AO-04）；供应链审计（cargo audit 进 check.yml）已落地（2026-09-01）；依赖最小化推迟至 release 阶段（REQ-044 挂账）；可复现构建与发布产物一致性拆出（REQ-050 挂账，教训 AO-06）
 7. **配置解析要求**：配置中域名解析**缓存 + 指数退避**，禁止无背压循环解析——**已落地**（config.rs DnsCache，教训见 lessons/keys-config/KC-03）
 8. **WebUI 配置边界**（**REQ-040**）：关键配置只存服务端（coordinator 配置文件/DB），WebUI 不持有持久配置（教训见 lessons/admin-ops/AO-02）
@@ -156,4 +156,4 @@ docs/README.md（入口：阅读路线 + 三张图）
 | P4 | 性能与联邦：XDP 快速路径 + DNS 统一 + 联邦 v2 + 帧头 path_id 数据面（§3.11） |
 | P5 | 远期：路径服务扩展——多跳中继链 / 多路双发（REQ-061/063，NAT1 准入同批评估） |
 
-**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环；ACL v2 前缀级策略层闭环 REQ-045——网络级开关 + first-match/default-deny + 目标节点解密后裁决 + 组标签 + SIGHUP 随 netmap 原子切换，SEC-28/31，端口级第二阶段），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10/11 e2e + CI；增量 peer 帧解析/合并闭环 REQ-067；**自研 ts2021 服务端替换 headscale 闭环 REQ-068**——rill-ts2021 server 模块（Noise 响应侧/注册准入 lrk/白名单自动审批 + allow_exit/内嵌 DERP/持有流增量推送 PeersChanged/Removed），官方 tailscaled 与 lrill 双形态客户端同 tailnet 接入（线格式兼容实证：chalpub、整型 LoginID、Compress="zstd"），e2e ts2021_runtime 切自研服务端，headscale 降级为 register/p0 场景的兼容参照）；批量吊销合并轮换闭环 REQ-048（60s 窗口内 N 次吊销共享一次全网轮换，即时语义不变，SEC-32）。**
+**当前进度：P0 完成（REQ-033 官方客户端入网实证），P1 mesh 骨架大部落地（REQ-022~REQ-032 实现闭环；ACL v2 前缀级策略层闭环 REQ-045——网络级开关 + first-match/default-deny + 目标节点解密后裁决 + 组标签 + SIGHUP 随 netmap 原子切换，SEC-28/31，端口级第二阶段），P2 接入推进中——dn42 M1/M2 落地；ts2021 接入闭环（lrill 经自建 headscale 注册 + boringtun WG 数据面双向互通、subnet router 广播 mesh 路由汇总与自家 LAN、exit 双向、DERP 中继承载，TSL-04~08/10/11 e2e + CI；增量 peer 帧解析/合并闭环 REQ-067；**自研 ts2021 服务端替换 headscale 闭环 REQ-068**——rill-ts2021 server 模块（Noise 响应侧/注册准入 lrk/白名单自动审批 + allow_exit/内嵌 DERP/持有流增量推送 PeersChanged/Removed），官方 tailscaled 与 lrill 双形态客户端同 tailnet 接入（线格式兼容实证：chalpub、整型 LoginID、Compress="zstd"），e2e ts2021_runtime 切自研服务端，headscale 降级为 register/p0 场景的兼容参照）；批量吊销合并轮换闭环 REQ-048（60s 窗口内 N 次吊销共享一次全网轮换，即时语义不变，SEC-32）；管理端点写面闭环 REQ-069（POST /admin/revoke 同认证面 + 审计日志，ADM-08）；Raft 高可用立项 REQ-070（openraft 分阶段：单机过日志 → 3 副本集群 + LeaderRedirect → REQ-049② 签发溯源）。**

@@ -1,12 +1,13 @@
-//! 只读状态端点 HTTP 层（REQ-051/CONTROL_PLANE §3.14）：
+//! 管理 HTTP 端点层（REQ-051 只读 + REQ-069 写操作，CONTROL_PLANE §3.14）：
 //! axum 薄路由 + Bearer 认证中间件 + TLS accept 循环。
-//! 查询逻辑在 rill-coord::status::StatusView（I/O-free 快照，单测覆盖）。
+//! 查询逻辑在 rill-coord::status::StatusView（I/O-free 快照，单测覆盖）；
+//! 写操作（吊销）走 Coordinator 单一写路径，同认证面（CP-06 同等鉴权）。
 
 use crate::BoxResult;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use landscape_rill_coord::status::{CoordRuntimeMeta, PasswordHash, StatusView};
 use landscape_rill_core::rate::SourceRateLimiter;
@@ -96,6 +97,7 @@ pub async fn run_status_server(
     let acceptor = server_tls_acceptor(&cert_pem, &key_pem)?;
     let router = Router::new()
         .route("/status", get(status_handler))
+        .route("/admin/revoke", post(admin_revoke_handler))
         .with_state(state);
     info!("[status] endpoint listening on {}", listener.local_addr()?);
     loop {
@@ -120,18 +122,8 @@ async fn status_handler(
     Extension(peer): Extension<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    // Bearer 提取（常数时间比较在 PasswordHash::verify 内）
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let supplied = match bearer {
-        Some(p) => p.to_string(),
-        None => return unauthorized(&state, peer).await,
-    };
-    let hash = state.auth.read().await.clone();
-    if !hash.verify(&supplied) {
-        return unauthorized(&state, peer).await;
+    if let Some(resp) = authenticate(&state, &headers, peer).await {
+        return resp;
     }
     // 成功不限速；快照在 coord 锁内构建（I/O-free，微秒级）
     let guard = state.server.lock().await;
@@ -145,6 +137,58 @@ async fn status_handler(
     };
     let snap = StatusView::snapshot(&guard.coordinator, &meta);
     Json(snap).into_response()
+}
+
+/// Bearer 认证（REQ-069 写端点同面复用，CP-06 同等鉴权）：
+/// 失败返回已计费（按源限速）的错误响应，成功返回 None
+async fn authenticate(
+    state: &StatusState,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Option<Response> {
+    // Bearer 提取（常数时间比较在 PasswordHash::verify 内）
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let supplied = match bearer {
+        Some(p) => p.to_string(),
+        None => return Some(unauthorized(state, peer).await),
+    };
+    let hash = state.auth.read().await.clone();
+    if !hash.verify(&supplied) {
+        return Some(unauthorized(state, peer).await);
+    }
+    None
+}
+
+/// POST /admin/revoke（REQ-069，CONTROL_PLANE §3.14 写操作）：
+/// 吊销走单一写路径（REQ-048 窗口语义随行）；请求体认证后手工解析，
+/// 未认证请求不进解析路径（无未限速错误面）
+async fn admin_revoke_handler(
+    State(state): State<Arc<StatusState>>,
+    Extension(peer): Extension<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(resp) = authenticate(&state, &headers, peer).await {
+        return resp;
+    }
+    #[derive(serde::Deserialize)]
+    struct RevokeRequest {
+        node_id: u32,
+    }
+    let Ok(req) = serde_json::from_slice::<RevokeRequest>(&body) else {
+        return (StatusCode::BAD_REQUEST, "malformed body").into_response();
+    };
+    let mut guard = state.server.lock().await;
+    if guard.coordinator.static_pubkey_of(req.node_id).is_none() {
+        return (StatusCode::NOT_FOUND, "unknown node").into_response();
+    }
+    guard.coordinator.revoke(req.node_id, now_unix());
+    // 审计日志（AO-05 方向）：动作 + 对象 + 发起方
+    info!("[admin] revoke: node_id={} from {}", req.node_id, peer);
+    Json(serde_json::json!({"revoked": true, "node_id": req.node_id})).into_response()
 }
 
 /// 认证失败路径：同源高频 → 429，否则 401（§3.14）
