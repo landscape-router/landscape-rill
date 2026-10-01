@@ -176,8 +176,8 @@
 - 关联 REQ：REQ-064
 - 测试层：单测 + docker e2e
 - 状态：`已覆盖`
-- 证据：rill-mesh/src/data/path_stats.rs、rill-mesh/src/data/tests.rs、e2e/scenarios/probe.sh、e2e/scenarios/status.sh、CI run 36925931629/36925931564（check + e2e-mesh 全场景）
-- 说明：接收侧 `(peer, path_id)` 分桶被动统计 + 空闲候选路径 PATH_PROBE（0x05 免会话帧，响应沿同路径反向）。单测：seq gap/乱序/回绕分类（含重复帧不计）；区间取走即清零 + EWMA 折入（1/4 权重/无帧冷却）+ 静默桶不占遥测字节 + seq 轨迹保留；idle 目标筛选（在用/过期/无 key_path 排除）；advisory 择优（低损稳定升序 + 全 miss 池仍按 miss 升序，loss 排序不接管故障切换）；PATH_PROBE 请求→响应同路径往返（RTT 落桶 + miss 清零）、重放 nonce → Replay、篡改 route_mac → BadRouteMac、响应按源限速（PONG_CAPACITY 21 号包 RateLimited）、在途上限饱和拒绝、超时判死 → path miss；遥测 paths 快照携带（取走即清零）。e2e：probe 场景阶段 5（node-c 空闲中继路径 `path probe rtt:` 日志）+ status 场景阶段 4（状态端点 paths 桶 frames > 0）
+- 证据：rill-mesh/src/data/path_stats.rs、rill-mesh/src/data/tests.rs、e2e/scenarios/probe.sh、e2e/scenarios/status.sh
+- 说明：接收侧 `(peer, path_id)` 分桶被动统计 + 空闲候选路径 PATH_PROBE（0x05 免会话帧，响应沿同路径反向）。单测：seq gap/乱序/回绕分类（含重复帧不计）；区间取走即清零 + EWMA 折入（1/4 权重/无帧冷却）+ 静默桶不占遥测字节 + seq 轨迹保留；idle 目标筛选（在用/过期/无 key_path 排除）；advisory 择优（低损稳定升序 + 全 miss 池仍按 miss 升序，loss 排序不接管故障切换）；PATH_PROBE 请求→响应同路径往返（RTT 落桶 + miss 清零）、重放 nonce → Replay、篡改 route_mac → BadRouteMac、响应按源限速（PONG_CAPACITY 21 号包 RateLimited）、在途上限饱和拒绝、超时判死 → path miss；遥测 paths 快照携带（取走即清零）。e2e：probe 场景阶段 5（node-c 空闲中继路径 `path probe rtt:` 日志）+ status 场景阶段 4（状态端点 paths 桶 frames > 0）；CI run 36925931629/36925931564（check + e2e-mesh 全场景）全绿
 
 ## 验收断言
 
