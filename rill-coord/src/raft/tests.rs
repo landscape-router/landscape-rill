@@ -878,7 +878,10 @@ async fn leader_failover_then_old_leader_rejoins_as_follower() {
     let state = await_converged(&remaining).await;
     assert_eq!(state.nodes.len(), 2);
 
-    // 旧 leader 回归：复用原路径重启 → 追日志 → 以 follower 身份收敛
+    // 旧 leader 回归：复用原路径重启 → 追日志 → 以 follower 身份收敛。
+    // 不对重启瞬间的 metrics 断言：openraft 恢复持久化的已提交自投票
+    // （term T, voted_for=self）时会短暂报 Leader（须重新仲裁 quorum 后才有效，
+    // 存活副本更高 term 会令其卸任）——瞬时态与调度时序相关，权威断言在收敛后
     let rejoined = spawn_cluster_node(
         &net,
         leader1,
@@ -887,13 +890,6 @@ async fn leader_failover_then_old_leader_rejoins_as_follower() {
         auth_config(&ak),
     )
     .await;
-    assert!(
-        !matches!(
-            rejoined.raft.metrics().borrow().state,
-            openraft::ServerState::Leader
-        ),
-        "回归节点不得立刻自认 leader"
-    );
     nodes.push(rejoined);
     let refs: Vec<_> = nodes.iter().collect();
     let state = await_converged(&refs).await;
