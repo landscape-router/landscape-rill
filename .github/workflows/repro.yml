@@ -17,9 +17,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: double build + hash compare
         run: ./scripts/verify-repro.sh
+      - name: mismatch diagnostics
+        if: failure()
+        run: |
+          A=target/repro-a/release/lrill
+          B=target/repro-b/release/lrill
+          ls -la "$A" "$B"
+          echo "--- first differing bytes:"
+          cmp -l "$A" "$B" | head -10 || true
+          echo "--- differing byte count:"
+          cmp -l "$A" "$B" | wc -l || true
+          echo "--- target-dir path leaks:"
+          strings -a "$A" | grep -c "repro-a" || true
+          strings -a "$B" | grep -c "repro-b" || true
+          echo "--- section hashes:"
+          for s in .text .rodata .symtab; do
+            ha=$(objdump -s -j "$s" "$A" 2>/dev/null | sha256sum | cut -c1-10)
+            hb=$(objdump -s -j "$s" "$B" 2>/dev/null | sha256sum | cut -c1-10)
+            echo "$s A=$ha B=$hb"
+          done
       - name: binary hardcoded-domain audit (AO-06)
         run: ./scripts/audit-binary.sh target/repro-a/release/lrill
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: repro-mismatch
+          path: |
+            target/repro-a/release/lrill
+            target/repro-b/release/lrill
