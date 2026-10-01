@@ -152,8 +152,8 @@
 - 测试层：docker e2e
 - 状态：`已覆盖`
 - 证据：e2e/scenarios/ha.sh、e2e/mesh/ha/、e2e/setup.sh
-- 说明：coord 3 副本 raft 集群（node-a→coord1、node-b→coord2，至少一节点初始必连 follower，重定向证据前置；setup.sh 生成 cluster 配置段与多域名证书）。断言：选主收敛（唯一 Leader，raft state 日志尾行）；follower 重定向注册（节点日志 `leader redirect:` ≥1 + 双节点注册完成）；**停 leader 容器窗口 5×双栈 ping 无一丢失**（数据面不经 coord，§4.3/§5.6——节点重连退避分片持续服务 mesh 输入）；存活副本选出新 Leader（term 严格递增）；节点经重定向链幂等重注册（node_id 全程唯一）；旧 leader 重启以 Follower 回归（`state=Follower leader=Some(新主 id)`）；终态 a↔b 双栈通；CI e2e-mesh run 36865122523（含 ha job）
-- 缺口：节点侧死 coordinator 看门狗（lease 到期主动重连探测）与多 coordinator_url 配置为 docs-silent 待确认项（REQ-070 开放问题 6/7），当前靠既有退避重连 + 重定向链收敛
+- 说明：coord 3 副本 raft 集群（node-a→coord1、node-b→coord2，至少一节点初始必连 follower，重定向证据前置；setup.sh 生成 cluster 配置段与多域名证书）。断言：选主收敛（唯一 Leader，raft state 日志尾行）；follower 重定向注册（节点日志 `leader redirect:` ≥1 + 双节点注册完成）；**停 leader 容器窗口 5×双栈 ping 无一丢失**（数据面不经 coord，§4.3/§5.6——重连退避分片 + 连接建立后台化持续服务 mesh 输入；连接前台 await 停摆缺陷由单测 data_plane_alive_while_control_connect_stalls 回归：慢协调者连接悬挂窗口内对端懒握手仍完成，区分性已验证——旧代码 5s 超时失败）；停 leader 优雅退出（docker stop 退出码 0——SIGTERM close_notify + 500ms 宽限兜底，REQ-070 开放问题 8）；存活副本选出新 Leader（term 严格递增）；节点经重定向链幂等重注册（node_id 全程唯一）；旧 leader 重启以 Follower 回归（`state=Follower leader=Some(新主 id)`）；终态 a↔b 双栈通；CI e2e-mesh run 36865122523（含 ha job）
+- 缺口：无——节点侧租约看门狗与 SIGTERM 收尾已有单测（rill-node/src/runtime/tests.rs：lease_watchdog_drops_expired_session 真实 LEASE 记账/逾期断开/拒租不触发、sigterm_shutdown_closes_control_session close_notify 后写失败 + 停机收尾、data_plane_alive_while_control_connect_stalls 连接悬挂窗口数据面存活）；多 coordinator_url 维持单 URL（REQ-070 开放问题 6/7/8 均已定）
 
 ## 验收断言
 
@@ -184,4 +184,4 @@
   - 证据：rill-proto/src/lib.rs（heartbeat_telemetry_roundtrip_and_backward_compat）、rill-mesh/src/data/tests.rs（telemetry_* 三测）、rill-mesh/src/control/server_tests.rs、rill-coord/src/coordinator/tests.rs（telemetry_latest_wins_aggregation 等）、e2e/scenarios/status.sh、CI e2e-mesh status（run 33697089991）
   - 证据：rill-mesh/src/control/server.rs（resume_with_valid_key_still_requires_pop / one_time_key_consumed_only_after_pop / resume_caps_mismatch_rejected_after_pop 三单测）、CI e2e-mesh run 33679179273
 - [x] CTL-22：Raft 单机过日志——等价/重启/崩溃重放（恰好一次）/REQ-048 窗口语义/日志边界/手动快照，全部现有测试语义等价通过（458 → 464，rill-coord/src/raft/tests.rs 六测）
-- [x] CTL-23：Raft 3 副本 failover e2e——选主收敛/follower 重定向/停 leader 窗口 5×双栈 ping 无丢失（数据面不中断）/term 递增选新主/重定向链幂等重注册（node_id 唯一）/旧 leader Follower 回归/终态双栈通（e2e/scenarios/ha.sh，全五阶段断言）
+- [x] CTL-23：Raft 3 副本 failover e2e——选主收敛/follower 重定向/停 leader 窗口 5×双栈 ping 无丢失（数据面不中断）/停 leader 优雅退出（exit 0）/term 递增选新主/重定向链幂等重注册（node_id 唯一）/旧 leader Follower 回归/终态双栈通（e2e/scenarios/ha.sh，全五阶段断言）

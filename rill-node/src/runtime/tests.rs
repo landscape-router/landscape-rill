@@ -713,3 +713,159 @@ async fn acl_prefix_rules_enforced_at_target_node() {
     assert!(a.has_session(b_id));
     assert!(b.has_session(a_id));
 }
+
+/// 节点侧租约看门狗（REQ-070 开放问题 6，CONTROL_PLANE §5.2）：
+/// 真实租约流记账（心跳 → LEASE 应答）；逾期 → pump_timers 断开控制会话；
+/// 未到期 / granted=false 不动作
+#[tokio::test]
+async fn lease_watchdog_drops_expired_session() {
+    let (url, ca) = start_coord().await;
+    let mut node = Node::new(
+        node_config(&url, &ca, 7, vec!["10.0.0.0/24".into()]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    node.connect_control().await.unwrap();
+
+    // 真实租约：心跳应答 LEASE(granted, +60s) → 记账
+    pump_until_all(&mut [&mut node], "lease granted", |n| {
+        n.lease_expires_at.is_some()
+    })
+    .await;
+    assert!(node.lease_expires_at.unwrap() > unix_now());
+
+    // 未到期：看门狗不动作（新会话重置语义见 connect_control 内 None 复位）
+    node.pump_timers().await;
+    assert!(node.control.is_some());
+
+    // 逾期：静默僵死兜底 → 断开（后续走既有重连退避）
+    node.lease_expires_at = Some(unix_now() - 1);
+    node.pump_timers().await;
+    assert!(node.control.is_none(), "逾期租约应断开控制会话");
+    assert!(node.lease_expires_at.is_none());
+
+    // granted=false 不记账：拒租由 coordinator 主动断开，看门狗只兜底静默僵死
+    node.connect_control().await.unwrap();
+    node.handle_control_event(ControlEvent::Lease {
+        granted: false,
+        expires_at: unix_now() - 1,
+    })
+    .await
+    .unwrap();
+    node.pump_timers().await;
+    assert!(node.control.is_some(), "拒租不触发看门狗");
+}
+
+/// SIGTERM 优雅收尾（REQ-070 开放问题 8）：停机信号 → close_notify 后
+/// 会话关闭且不可再写；graceful_shutdown 清空控制会话
+#[tokio::test]
+async fn sigterm_shutdown_closes_control_session() {
+    let (url, ca) = start_coord().await;
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let mut opts = fast_opts();
+    opts.shutdown = Some(rx);
+    let mut node = Node::new(node_config(&url, &ca, 8, vec!["10.0.0.0/24".into()]), opts)
+        .await
+        .unwrap();
+    node.connect_control().await.unwrap();
+
+    // close_notify 语义：关闭后写失败（对端可立即感知，非半开残留）
+    node.control
+        .as_mut()
+        .unwrap()
+        .close()
+        .await
+        .expect("close_notify send");
+    let mut stale = node.control.take().unwrap();
+    assert!(
+        stale.send_envelope(&[0u8; 8]).await.is_err(),
+        "close_notify 后写应失败"
+    );
+
+    // 停机信号 → graceful_shutdown 收尾（控制会话置空）
+    node.connect_control().await.unwrap();
+    assert!(!node.is_shutting_down());
+    tx.send(true).unwrap();
+    assert!(node.is_shutting_down());
+    node.graceful_shutdown().await;
+    assert!(node.control.is_none());
+}
+
+/// 控制面连接不阻塞数据面（§4.3，ha e2e 实证缺陷回归）：failover 重连对端
+/// 可达性悬置（死 IP 的 SYN/ARP 超时、慢 TLS）可达秒级——连接在后台任务执行、
+/// run loop 分片持续服务 mesh。慢协调者（接受 TCP 但 TLS 握手永不开始）连接
+/// 悬挂窗口内，对端发起懒握手仍须能得到应答
+#[tokio::test]
+async fn data_plane_alive_while_control_connect_stalls() {
+    let (url, ca) = start_coord().await;
+    let mut a = Node::new(
+        node_config(&url, &ca, 9, vec!["10.0.0.0/24".into()]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    let mut b = Node::new(
+        node_config(&url, &ca, 10, vec!["10.0.0.0/24".into()]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    a.connect_control().await.unwrap();
+    b.connect_control().await.unwrap();
+    pump_until_all(&mut [&mut a, &mut b], "registered", |n| n.registered()).await;
+    let a_id = a.node_id().unwrap();
+    // 端点收敛（B 须已知 A 的 mesh 地址才能直发握手）
+    pump_until_all(&mut [&mut a, &mut b], "endpoints", |n| {
+        let peer = if n.node_id() == Some(a_id) {
+            n.node_id().unwrap() + 1
+        } else {
+            a_id
+        };
+        n.mesh.endpoint(peer).is_some()
+    })
+    .await;
+
+    // 慢协调者：接受 TCP 并持有连接，TLS 握手永不开始（客户端 connect 悬挂）
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_port = listener.local_addr().unwrap().port();
+    let slow_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hit = slow_hit.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        let listener = listener;
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                break;
+            };
+            hit.store(true, std::sync::atomic::Ordering::Relaxed);
+            held.push(sock); // 持有不关闭：不完成 TLS 也不发 EOF
+        }
+    });
+
+    // A 断线重连指向慢协调者 → 连接悬挂；B 同时发起懒握手
+    a.cfg.coordinator_url = format!("https://127.0.0.1:{}", slow_port);
+    a.control = None;
+    tokio::spawn(a.run());
+
+    let packet = v4_packet([10, 0, 0, 2]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "慢连接窗口内 B→A 懒握手未完成（控制面连接阻塞了数据面）"
+        );
+        let _ = b.pump_lan_packet(&packet).await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), b.pump_mesh()).await;
+        if b.has_session(a_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // 让慢协调者任务有机会标记（current_thread 运行时需让出）
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        slow_hit.load(std::sync::atomic::Ordering::Relaxed),
+        "前置失效：连接未真正悬挂在慢协调者上"
+    );
+}

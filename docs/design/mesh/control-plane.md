@@ -5,7 +5,7 @@
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
 > 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
 
-**版本：v0.17（2026-10-01 修订：REQ-070 阶段二——§1.2 静态成员集群落地；§3.6 LeaderRedirect 具体化；§5.6 接管软状态重置 + 数据面不中断约束；§6 mTLS 落地）**
+**版本：v0.19（2026-10-01 修订：REQ-070——§5.2 节点侧租约看门狗 + SIGTERM 优雅退出 + §5.6 重连全程分片（连接建立后台化，数据面零停摆）；v0.17 为 REQ-070 阶段二：§1.2 静态成员集群/§3.6 LeaderRedirect/§5.6 接管软状态重置 + 数据面不中断/§6 mTLS）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -310,6 +310,12 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - systemd 形态 `ExecReload=kill -HUP $MAINPID`；进程收到 SIGHUP → 重新解析配置文件 → `apply_config` **增量应用**（auth key 增删、白名单更新），**不中断在途 TLS 连接与已注册节点**
 - 重载失败（新配置非法）→ **保持旧配置继续运行** + 日志报错（fail-closed 于启动，容错于重载）
 
+**SIGTERM 优雅退出（REQ-070 开放问题 8，2026-10-01）**
+
+- `lrill run`（daemon）统一安装 SIGTERM 处理（容器 PID 1：`docker stop` = SIGTERM → 宽限后 SIGKILL）：控制会话发送 TLS close_notify（coordinator 立即感知而非等 TCP 超时）后退出，**500ms 宽限后 exit(0) 兜底**
+- coord/ts2021/dn42 侧任务无汇聚点，由进程退出统一收割；raft 持久化 kill-safety 已由测试保证（CTL-22 崩溃重放恰好一次），不做前置停机
+- e2e 断言：docker stop 后退出码 0（CTL-23 阶段 2）
+
 **auth key 生命周期管理（§6 落地，REQ-036 + REQ-043）**
 
 - 生成：`lrill authkey --network <slug> [--ttl <dur>]` 子命令（§1.3 lrill CLI），输出仅 stdout、不落日志（教训 AO-01/AO-02）；**默认有效期 24h**（auth key 仅入场令牌，短命是特性），`--ttl 0` 永不过期
@@ -445,12 +451,14 @@ auth_key 预生成
 ### 5.2 心跳与离线
 
 ```
-周期 Heartbeat → coordinator 更新 last_seen（软状态）
+周期 Heartbeat → coordinator 更新 last_seen（软状态）→ 应答 Lease(expires_at)
 last_seen 超租约 → 标记离线（netmap 可达性变化，条目保留）
 节点复活 → 下一次心跳恢复在线标记
 ```
 
 超频心跳（< §3.13 最小间隔）直接忽略——不更新 last_seen、不推快照、不回 LEASE（零成本），租约/离线判定语义不变。
+
+**节点侧租约看门狗（REQ-070 开放问题 6）**：节点对每条 granted `Lease.expires_at` 记账；会话存续期间 `expires_at` 逾期 = coordinator 静默僵死（TCP 可写但不应答——进程挂起/网络半开等，心跳写不出错、LEASE 收不到）→ 主动断开控制会话走既有重连退避（§3.6 重定向链自然衔接新主）。正常路径每次心跳应答持续续期，不会触发。边界：仅 `granted=true` 记账（拒租由 coordinator 主动断开，不走看门狗）；新会话建立时清零（首个 LEASE 到达前不判定，防旧值残留误触发）。
 
 ### 5.3 netmap 同步（含重连）
 
@@ -500,7 +508,7 @@ coordinator Revoke(node_id)
 ```
 
 - **接管软状态重置（REQ-070 阶段二）**：last_seen/offline 等活性软状态只在处理心跳的副本本地维护（不进 raft 日志）；新主接管时对全体已知节点重置一份新租约——防陈旧 last_seen 把在线节点扫成离线（netmap 撤路由误伤数据面，§4.3）；接管后静默超过一个租约窗口的节点由 sweep 重新判离线（§5.2）
-- **数据面不中断约束（REQ-070 阶段二，§4.3）**：coordinator 故障/切换期间节点既有 mesh 会话照常收发（心跳/数据帧不经 coordinator）；节点 run loop 的控制面重连退避分片持续服务数据面输入，控制面读采用持久缓冲（select! 取消安全），重定向帧不因多路分派竞态丢字节（流错位表现为 `message too long` 断连循环）
+- **数据面不中断约束（REQ-070 阶段二，§4.3）**：coordinator 故障/切换期间节点既有 mesh 会话照常收发（心跳/数据帧不经 coordinator）；节点 run loop 的控制面重连**全程**分片服务数据面输入——退避等待（100ms 分片轮转）与**连接建立本身**（后台任务执行 TLS/注册，结果分片轮询）：重连对端可达性悬置（死 IP 的 SYN/ARP 超时、慢 TLS、failover 后 raft 写路径注册）均可达秒级，前台 await 会停摆 mesh/tun（ha e2e 实证：failover 窗口 ping 丢失）；控制面读采用持久缓冲（select! 取消安全），重定向帧不因多路分派竞态丢字节（流错位表现为 `message too long` 断连循环）
 
 ### 5.7 节点密钥丢失恢复
 

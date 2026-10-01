@@ -81,8 +81,15 @@ impl Node {
                     self.mesh.set_broadcast_key(b);
                 }
             }
-            ControlEvent::Lease { granted, .. } => {
-                let _ = granted;
+            ControlEvent::Lease {
+                granted,
+                expires_at,
+            } => {
+                // 租约记账（§5.2 节点侧看门狗）：仅 granted 记账；拒绝租约由
+                // coordinator 侧主动断开，看门狗只兜底"静默僵死"场景
+                if granted {
+                    self.lease_expires_at = Some(expires_at);
+                }
             }
             ControlEvent::Challenge { ack } => {
                 if let Some(control) = self.control.as_mut() {

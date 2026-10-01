@@ -22,9 +22,9 @@ coordinator 是单点：进程重启丢软状态（v1 自愈：节点重连/心�
 3. 拓扑探测/echo（RTT 排序 relay_list）在副本间是否复制（软状态倾向：各副本本地跑）
 4. ~~follower 端点语义~~ **已定（2026-10-01）**：v1 本地读 + 响应头/字段带 leader 提示（不做代理转发；写端点 follower 直接拒绝并提示 leader）
 5. （阶段二遗留）register/request_paths 内部取墙钟（auth key 过期判定 / PathSet TTL expires_at）——跨副本确定性需线程化 now 参数（单机重放按同秒粒度收敛，测试已按归一化比较）
-6. **（阶段二遗留，docs-silent 待用户拍板）节点侧死 coordinator 看门狗**：CONTROL_PLANE §5.2/§5.6 只定义 coordinator 侧租约；节点侧对"连接established 但长期无入站"无独立检测（`ControlEvent::Lease` 到期分支目前空置）——当前靠 TCP 断连感知 + 退避重连收敛。是否补节点侧主动探测（lease 到期/无入站超时即重连）待定
-7. **（阶段二遗留，docs-silent 待用户拍板）多 coordinator_url 配置**：v1 节点单 `coordinator_url`——配置地址的容器停止（DNS 不可解析）时节点无 fallback 端点，需等该副本重启或 leader 间接重定向；是否引入多端点列表（轮询/并发尝试）待定
-8. **（阶段二遗留，运维）lrill 容器内 PID 1 SIGTERM**：当前仅 SIGHUP 处理，`docker stop` 10s 后 SIGKILL（exit 137，无 TLS close_notify）——节点靠 TCP 断连感知恢复，功能不受损但停机不优雅；是否补 SIGTERM 优雅退出待定
+6. ~~节点侧死 coordinator 看门狗~~ **已定（2026-10-01，用户批准）**：补节点侧租约看门狗——granted LEASE.expires_at 记账，会话内存活逾期（coordinator 静默僵死：TCP 可写但不应答）→ 主动断开走既有重连退避；仅 granted 记账、新会话清零。行为入档 CONTROL_PLANE §5.2（节点侧租约看门狗）
+7. ~~多 coordinator_url 配置~~ **已定（2026-10-01，用户批准）**：维持单 `coordinator_url`——重定向链（§3.6）已提供 failover 端点学习，多端点列表引入配置/一致性复杂度收益不抵；配置地址副本停止且长期不回归属运维事件（按序重启，决策 2 口径）
+8. ~~lrill 容器内 PID 1 SIGTERM~~ **已定（2026-10-01，用户批准）**：补 SIGTERM 优雅退出——run_daemon 统一安装（watch 通道注入 node.run()）：控制会话 TLS close_notify 后返回，500ms 宽限 exit(0) 兜底（coord/ts2021/dn42 任务由进程退出统一收割；raft 持久化 kill-safety 已有测试，无前置停机需求）。e2e 断言 docker stop 退出码 0（CTL-23 阶段 2）
 
 ## 验收标准（草案）
 
@@ -39,6 +39,7 @@ coordinator 是单点：进程重启丢软状态（v1 自愈：节点重连/心�
 - **接管软状态重置**：活性（last_seen/offline）只在处理心跳的副本本地、不进日志；新主接管对全体已知节点重置新租约（防陈旧 last_seen 扫掉在线节点 → netmap 撤路由误伤数据面）；单测 takeover_reset_liveness_avoids_stale_offline_sweep
 - **控制面读取消安全**：节点 run loop select! 会取消在途读 future，read_exact 部分进度随 future 丢弃 → 流错位（`message too long` 断连循环，重定向帧被吞节点永不收敛）；修复 = 持久缓冲收帧（framing::read_frame_buf），回归测试 buffered_read_survives_cancellation_mid_frame
 - **退避分片服务数据面**：控制面重连退避期间 mesh 收帧照常（sleep_with_timers 分片并入 mesh 输入）——否则 coordinator 故障级联数据面会话心跳中断
+- **连接建立后台化（2026-10-01 补，ha e2e 实证缺陷）**：退避等待分片化后，connect 本身（DNS/SYN 超时、慢 TLS、failover 后 raft 写路径注册）仍可达秒级——前台 await 停摆 mesh/tun，failover 窗口 ping 丢失（flaky ~25%）；修复 = 连接在后台任务执行、run loop 按分片轮询结果，回归测试 data_plane_alive_while_control_connect_stalls（旧代码必失败，已验证区分性）
 - lessons 对照：CP-03（级联故障，规避强化）、CP-05（重连循环，退避 + 重定向链收敛）
 
 ## 关联

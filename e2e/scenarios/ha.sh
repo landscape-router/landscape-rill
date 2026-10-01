@@ -88,9 +88,19 @@ for i in $(seq 1 5); do
 done
 if [ "$ok" != 1 ]; then
   echo "FAIL: leader 停机窗口内 ping 丢失（数据面被控制面故障波及）"
+  for n in mesh-node-a mesh-node-b; do echo "--- $n tail ---"; logs "$n" | tail -25; done
   exit 1
 fi
 echo "PASS: 停机窗口 5×双栈 ping 无一丢失"
+# PID 1 SIGTERM 优雅退出（docker stop = SIGTERM→SIGKILL）：500ms 宽限内
+# close_notify + exit(0)（宽限超限则 137，收尾有缺陷）
+LEADER_EXIT=$(docker inspect -f '{{.State.ExitCode}}' "$LEADER")
+if [ "$LEADER_EXIT" != 0 ]; then
+  echo "FAIL: docker stop 后 leader 退出码 $LEADER_EXIT（期望 0 = 优雅退出）"
+  docker logs "$LEADER" 2>&1 | tail -10
+  exit 1
+fi
+echo "PASS: leader 优雅退出（exit code 0）"
 SURVIVORS=()
 for c in "${COORDS[@]}"; do
   if [ "$c" != "$LEADER" ]; then SURVIVORS+=("$c"); fi

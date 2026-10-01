@@ -11,6 +11,7 @@ use landscape_rill_core::control::session::{ClientSession, SessionState};
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead};
 use std::borrow::Cow;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tracing::error;
@@ -303,6 +304,11 @@ impl ControlSession {
 
     pub async fn send_envelope(&mut self, envelope: &[u8]) -> std::io::Result<()> {
         framing::write_frame(&mut self.stream, envelope).await
+    }
+
+    /// 优雅关闭（SIGTERM 收尾）：发 TLS close_notify，对端立即感知而非等 TCP 超时
+    pub async fn close(&mut self) -> std::io::Result<()> {
+        self.stream.shutdown().await
     }
 
     pub fn heartbeat_envelope(&self, telemetry: Option<TelemetryPayload>) -> Vec<u8> {

@@ -97,6 +97,24 @@ pub(crate) fn run_daemon(
         .build()?;
     let config_path = path.to_path_buf();
     runtime.block_on(async move {
+        // PID 1 SIGTERM 优雅退出（REQ-070 开放问题 8，docker stop 用）：通知
+        // node.run() 收尾（控制会话 close_notify）→ 500ms 宽限后 exit(0) 兜底
+        //（coord/ts2021/dn42 任务无汇聚点，由进程退出统一收割；raft 持久化
+        // kill-safety 已由测试覆盖，无需前置停机）
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            let mut sig =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+            if sig.recv().await.is_some() {
+                info!("[node] SIGTERM received, shutting down");
+                let _ = shutdown_tx.send(true);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                std::process::exit(0);
+            }
+        });
         if file.coord.is_some() {
             let path = config_path.clone();
             tokio::spawn(async move {
@@ -184,6 +202,7 @@ pub(crate) fn run_daemon(
                     Some((ip.parse().ok()?, prefix.parse().ok()?))
                 }),
             }),
+            shutdown: Some(shutdown_rx),
             ..NodeOptions::default()
         };
         info!(

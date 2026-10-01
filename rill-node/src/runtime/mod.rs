@@ -82,6 +82,14 @@ async fn collect_local_ips() -> Vec<IpAddr> {
     out
 }
 
+/// 当前 unix 秒（租约看门狗 §5.2 用；时钟回拨只会延迟触发，无正确性风险）
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeOptions {
     /// 可选 tun0（容器/主机环境）；None = 无 LAN 侧（测试/纯转发形态）
@@ -94,6 +102,9 @@ pub struct NodeOptions {
     pub data_heartbeat_misses: u32,
     /// rekey 间隔（Noise rekey 双窗口，FRAME_HEADER §2.4）
     pub rekey_interval: Duration,
+    /// 进程级停机信号（SIGTERM，rilld 注入）：true = run loop 收尾退出
+    /// （控制会话 TLS close_notify 后返回）；None = 无停机语义（测试/默认）
+    pub shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl Default for NodeOptions {
@@ -104,6 +115,7 @@ impl Default for NodeOptions {
             data_heartbeat_interval: Duration::from_secs(5),
             data_heartbeat_misses: DATA_HEARTBEAT_MISSES,
             rekey_interval: Duration::from_secs(DEFAULT_SESSION_REKEY_HOURS * 3600),
+            shutdown: None,
         }
     }
 }
@@ -161,6 +173,12 @@ pub struct Node {
     rejected_stats: HashMap<u32, RateCounter>,
     /// 控制面连接失败计数（LOGGING §5：周期摘要替代逐条输出，退避逻辑不变）
     connect_failed: RateCounter,
+    /// 最近一次 LEASE.expires_at（unix 秒，None = 未收到/会话已重置——看门狗不生效）。
+    /// 节点侧租约看门狗（CONTROL_PLANE §5.2，REQ-070）：逾期仍在会话 =
+    /// coordinator 静默僵死（TCP 可写但不应答）→ 主动断开走重连
+    lease_expires_at: Option<u64>,
+    /// 进程级停机信号（NodeOptions.shutdown 注入）
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     /// coordinator UDP 回显目标（CONNECTIVITY §2）：(host, port)；host 为容器名/主机名
     /// 时每周期经 DNS 解析（30s 节奏，缓存无必要）；None = 未配置（跳过 echo）
     echo_target: Option<(String, u16)>,
@@ -187,9 +205,10 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(cfg: Config, opts: NodeOptions) -> BoxResult<Self> {
+    pub async fn new(cfg: Config, mut opts: NodeOptions) -> BoxResult<Self> {
         cfg.validate()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let shutdown = opts.shutdown.take();
         // underlay 选择（REQ-054）：UDP 默认 / TCP 兜底（v1 全网统一）
         let underlay = match cfg.data_transport {
             crate::config::DataTransport::Udp => {
@@ -237,6 +256,8 @@ impl Node {
             recent_multicast_writes: HashMap::new(),
             rejected_stats: HashMap::new(),
             connect_failed: RateCounter::new(RATE_SUMMARY_PERIOD),
+            lease_expires_at: None,
+            shutdown,
             echo_target,
             last_probe: Instant::now(),
             probe_send_bucket: TokenBucket::new(
@@ -299,6 +320,8 @@ impl Node {
         match Self::establish_control(&self.cfg, &url, self.node_id).await {
             Ok(session) => {
                 self.control = Some(session);
+                // 新会话租约未卜：旧值残留会在首跳心跳前误触发看门狗（§5.2）
+                self.lease_expires_at = None;
                 info!("[node] control connected");
                 Ok(())
             }
@@ -348,6 +371,21 @@ impl Node {
                 .or_insert_with(|| RateCounter::new(RATE_SUMMARY_PERIOD));
             rc.tick();
         }
+    }
+
+    /// 停机信号已触发（SIGTERM，rilld 注入）
+    fn is_shutting_down(&self) -> bool {
+        self.shutdown.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+
+    /// 优雅收尾：控制会话发 TLS close_notify（对端立即感知而非等 TCP 超时），
+    /// mesh/dn42 随 run loop 返回自然释放（进程退出兜底在 rilld）
+    async fn graceful_shutdown(&mut self) {
+        if let Some(control) = self.control.as_mut() {
+            let _ = control.close().await;
+        }
+        self.control = None;
+        info!("[node] shutdown complete");
     }
 
     /// 处理一个控制面事件（阻塞读；Err = 断线，调用方清 control 并重连）
@@ -418,6 +456,17 @@ impl Node {
         self.pump_dn42().await;
         self.pump_ts2021().await;
         let now = Instant::now();
+        // 租约看门狗（CONTROL_PLANE §5.2 节点侧，REQ-070）：LEASE.expires_at 逾期
+        // 且会话仍在 = coordinator 静默僵死（TCP 可写但不应答）→ 断开走既有
+        // 重连退避；正常路径心跳响应在租约窗口内持续续期，不会触发
+        if self.control.is_some() && self.lease_expires_at.is_some_and(|t| unix_now() > t) {
+            info!(
+                "[node] lease expired (expires_at={}), dropping control session",
+                self.lease_expires_at.unwrap_or(0)
+            );
+            self.lease_expires_at = None;
+            self.control = None;
+        }
         if now.duration_since(self.last_control_heartbeat) >= self.opts.heartbeat_interval {
             self.last_control_heartbeat = now;
             if let Some(control) = self.control.as_mut() {
@@ -516,27 +565,62 @@ impl Node {
         }
     }
 
-    /// 主循环：控制面事件 / 数据面事件 / tun 入包 / 定时器（v1 单线程）
     /// 主循环：控制面事件 / 数据面事件 / tun 入包 / 定时器（v1 单线程）。
     /// dn42 leg 事件泵挂在 100ms 定时器与退避分片上，控制面不可用不停数据面。
     pub async fn run(mut self) {
         loop {
+            if self.is_shutting_down() {
+                self.graceful_shutdown().await;
+                return;
+            }
             if self.control.is_none() {
-                let wait = match self.connect_control().await {
-                    Ok(()) => {
+                // 连接在后台任务执行（§4.3）：注册经 raft 写路径（failover 后
+                // 新主挑战重注册）可达秒级，前台 await 会停摆数据面输入——
+                // 退避等待已分片服务 mesh/tun，但 connect 本身同样不得阻塞；
+                // 结果按 100ms 分片轮询，等待期数据面照常收发（ha e2e 实证）
+                let url = self
+                    .coord_override
+                    .clone()
+                    .unwrap_or_else(|| self.cfg.coordinator_url.clone());
+                let cfg = self.cfg.clone();
+                let node_id = self.node_id;
+                let (tx, mut rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let _ = tx.send(Self::establish_control(&cfg, &url, node_id).await);
+                });
+                let res = loop {
+                    if self.is_shutting_down() {
+                        self.graceful_shutdown().await;
+                        return;
+                    }
+                    match rx.try_recv() {
+                        Ok(r) => break r,
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                        // establish_control panic 崩任务：按连接失败走退避
+                        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                            break Err(std::io::Error::other("connect task aborted").into())
+                        }
+                    }
+                    self.sleep_with_timers(Duration::from_millis(100)).await;
+                };
+                match res {
+                    Ok(session) => {
+                        self.control = Some(session);
+                        // 新会话租约未卜：旧值残留会在首跳心跳前误触发看门狗（§5.2）
+                        self.lease_expires_at = None;
                         self.reconnect.on_connect();
-                        None
+                        info!("[node] control connected");
                     }
                     Err(e) => {
                         debug!("[node] connect_control error: {}", e);
-                        // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持
+                        // 逐条输出 → 周期摘要（LOGGING §5）；退避 1s→300s 保持；
+                        // 重定向目标失效 → 回落配置地址（connect_control 同语义）
                         self.connect_failed.tick();
-                        Some(self.reconnect.on_disconnect())
+                        self.coord_override = None;
+                        let wait = self.reconnect.on_disconnect();
+                        self.sleep_with_timers(wait).await;
+                        continue;
                     }
-                };
-                if let Some(wait) = wait {
-                    self.sleep_with_timers(wait).await;
-                    continue;
                 }
             }
             let control_ready = self.control.is_some();
@@ -586,6 +670,9 @@ impl Node {
     /// 会话心跳/握手在重连窗口内照常收发，否则 coordinator 故障波及 mesh 会话
     async fn sleep_with_timers(&mut self, mut remaining: Duration) {
         while remaining > Duration::ZERO {
+            if self.is_shutting_down() {
+                return;
+            }
             let slice = remaining.min(Duration::from_millis(100));
             remaining = remaining.saturating_sub(slice);
             let deadline = tokio::time::Instant::now() + slice;
