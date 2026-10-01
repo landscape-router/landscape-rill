@@ -35,12 +35,24 @@ pub struct DropView {
     pub count: u64,
 }
 
+/// 逐路径质量桶（REQ-064）：节点心跳上报的区间计数 + 最近探活 RTT
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PathStatView {
+    pub node_id: u32,
+    pub path_id: u64,
+    pub frames: u64,
+    pub gap_missing: u64,
+    pub reorder: u64,
+    pub rtt_ms: u32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TelemetryView {
     pub peers: Vec<PeerTrafficView>,
     pub drop_global: u64,
     pub drops: Vec<DropView>,
     pub direct: Vec<DirectPairView>,
+    pub paths: Vec<PathStatView>,
     /// coordinator 侧接收打点（不信任节点时钟）
     pub updated_at: u64,
 }
@@ -233,6 +245,7 @@ pub struct NodeTelemetryStatus {
     pub drop_global: u64,
     pub drops: Vec<DropView>,
     pub direct: Vec<DirectPairView>,
+    pub paths: Vec<PathStatView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -365,6 +378,7 @@ impl StatusView {
                 drop_global: t.drop_global,
                 drops: t.drops.clone(),
                 direct: t.direct.clone(),
+                paths: t.paths.clone(),
             })
             .collect();
 

@@ -12,7 +12,7 @@ use landscape_rill_core::handshake::{
 use landscape_rill_core::rate::RateCounter;
 use landscape_rill_core::rate::{SourceRateLimiter, TokenBucket};
 use landscape_rill_proto::wire::control::{
-    DirectPair, TelemetryDrop, TelemetryPayload, TelemetryPeer,
+    DirectPair, PathStatEntry, TelemetryDrop, TelemetryPayload, TelemetryPeer,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -133,7 +133,12 @@ pub struct MeshData {
     /// 中继转发查表用，与发送选择表分离——按 path_id 全局查，不按 dest）
     forward_paths: HashMap<u64, PathEntry>,
     /// 主路径健康 miss 计数（快速切换，CONTROL_PLANE §3.11）
+    /// 路径活性（miss 计数）：path_id → 连续 miss（收帧/probe 响应清零）
     path_health: HashMap<u64, u32>,
+    /// 逐路径质量桶（REQ-064）：(peer, path_id) → 区间计数 + EWMA
+    path_stats: HashMap<(u32, u64), PathStat>,
+    /// 在途 PATH_PROBE（REQ-064）：nonce → (dest, path_id, sent)
+    path_probe_pending: HashMap<u32, (u32, u64, Instant)>,
     /// 入站路径记录：from_node_id → 帧实际到达的上一跳（UDP 发送者归属节点；
     /// 直连 = from 自身，经中继 = relay 节点）。逐路径活性更新的依据。
     ingress_hop: HashMap<u32, u32>,
@@ -243,6 +248,16 @@ pub enum IncomingEvent {
         endpoint: SocketAddr,
         payload: Vec<u8>,
     },
+    /// PATH_PROBE 响应匹配（REQ-064）：RTT 实测 + 该路径活性恢复
+    PathProbeRtt {
+        dest: u32,
+        path_id: u64,
+        rtt_ms: u32,
+    },
+    /// PATH_PROBE 请求已回响应（沿同路径反向，REQ-064）
+    PathProbeServed {
+        from: u32,
+    },
     Dropped {
         reason: DropReason,
     },
@@ -253,9 +268,12 @@ pub use error::{DropReason, SendError};
 
 pub mod broadcast;
 pub mod dispatch;
+pub mod path_stats;
 pub mod paths;
 pub mod relay;
 pub mod session;
+
+pub use path_stats::{PathStat, PathStatInterval, PATH_PROBE_FLAG_RESPONSE};
 
 impl MeshData {
     pub async fn bind(bind: SocketAddr, self_node_id: u32) -> std::io::Result<Self> {
@@ -287,6 +305,8 @@ impl MeshData {
             path_table: HashMap::new(),
             forward_paths: HashMap::new(),
             path_health: HashMap::new(),
+            path_stats: HashMap::new(),
+            path_probe_pending: HashMap::new(),
             ingress_hop: HashMap::new(),
             endpoint_health: HashMap::new(),
             last_sent_endpoint: HashMap::new(),

@@ -38,6 +38,9 @@ pub mod packet_type {
     pub const UNICAST: u8 = 0x01;
     pub const HANDSHAKE: u8 = 0x02;
     pub const HEARTBEAT: u8 = 0x03;
+    /// 路径探活（REQ-064）：免会话、route_mac 即认证（握手帧同模型），
+    /// 沿路径首跳发出、响应沿同路径返回
+    pub const PATH_PROBE: u8 = 0x05;
     pub const CONTROL: u8 = 0x04;
     pub const BROADCAST: u8 = 0xFF;
 }
@@ -124,13 +127,53 @@ pub fn build_handshake_frame(header: &MeshFrameHeader, key_dst: &[u8], payload: 
     let mut h = header.clone();
     h.path_id = PATH_ID_DEFAULT;
     h.packet_type = packet_type::HANDSHAKE;
+    build_unsealed_frame(&h, key_dst, payload)
+}
+
+/// 免会话帧构建（握手/PATH_PROBE 共用，REQ-064）：route_mac 即认证——
+/// 持 route_key（key_dst/key_path）才能产出合法帧头；载荷明文（不 AEAD），
+/// packet_type/path_id 由调用方给定（不重置）
+pub fn build_unsealed_frame(header: &MeshFrameHeader, route_key: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut h = header.clone();
     h.len = payload.len() as u16;
     let ai = h.auth_input();
-    h.route_mac = crypto::route_mac(key_dst, &ai);
+    h.route_mac = crypto::route_mac(route_key, &ai);
     let mut out = vec![0u8; HEADER_LEN + payload.len()];
     h.encode(&mut out);
     out[HEADER_LEN..].copy_from_slice(payload);
     out
+}
+
+/// PATH_PROBE 载荷（REQ-064）：nonce(4B BE) || sent_ms(8B BE) || flags(1B)；
+/// flags bit0 = 响应。sent_ms 仅供观测（RTT 以发送方本地时钟计）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathProbePayload {
+    pub nonce: u32,
+    pub sent_ms: u64,
+    pub response: bool,
+}
+
+impl PathProbePayload {
+    pub const LEN: usize = 13;
+
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[..4].copy_from_slice(&self.nonce.to_be_bytes());
+        out[4..12].copy_from_slice(&self.sent_ms.to_be_bytes());
+        out[12] = u8::from(self.response);
+        out
+    }
+
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() != Self::LEN {
+            return None;
+        }
+        Some(Self {
+            nonce: u32::from_be_bytes(buf[..4].try_into().ok()?),
+            sent_ms: u64::from_be_bytes(buf[4..12].try_into().ok()?),
+            response: buf[12] & 1 == 1,
+        })
+    }
 }
 
 /// 提取帧载荷（按帧头 len 截取，含长度校验；数据帧 len 含 TAG）

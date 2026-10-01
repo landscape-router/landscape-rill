@@ -8,7 +8,9 @@ pub mod wire {
 
 #[cfg(test)]
 mod tests {
-    use super::wire::control::{Heartbeat, RegisterRequest, TelemetryPayload, TelemetryPeer};
+    use super::wire::control::{
+        Heartbeat, PathStatEntry, RegisterRequest, TelemetryPayload, TelemetryPeer,
+    };
     use quick_protobuf::{BytesReader, MessageRead, MessageWrite, Writer};
     use std::borrow::Cow;
 
@@ -54,6 +56,14 @@ mod tests {
                 drop_global: 5,
                 drops: vec![],
                 direct: vec![],
+                paths: vec![PathStatEntry {
+                    node_id: 7,
+                    path_id: 9,
+                    frames: 10,
+                    gap_missing: 1,
+                    reorder: 2,
+                    rtt_ms: 42,
+                }],
             }),
         };
         let mut out = Vec::new();
@@ -65,6 +75,10 @@ mod tests {
         assert_eq!(t.peers[0].node_id, 7);
         assert_eq!((t.peers[0].tx_frames, t.peers[0].rx_bytes), (1, 4));
         assert_eq!(t.drop_global, 5);
+        assert_eq!(
+            (t.paths[0].path_id, t.paths[0].rtt_ms, t.paths[0].frames),
+            (9, 42, 10)
+        );
 
         let empty: Vec<u8> = Vec::new();
         let mut reader = BytesReader::from_bytes(&empty);

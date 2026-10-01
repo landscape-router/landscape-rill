@@ -9,7 +9,8 @@ use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
 use landscape_rill_coord::raft::backend::{AuditVerdict, CoordBackend, Leadership, WriteError};
 use landscape_rill_coord::status::{
-    DirectPairView as DirectPairDst, DropView, PeerTrafficView as PeerTrafficDst, TelemetryView,
+    DirectPairView as DirectPairDst, DropView, PathStatView as PathStatDst,
+    PeerTrafficView as PeerTrafficDst, TelemetryView,
 };
 use landscape_rill_core::rate::{RateCounter, SourceRateLimiter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_proto::wire::control::*;
@@ -84,6 +85,18 @@ fn telemetry_view(t: TelemetryPayload) -> TelemetryView {
                 node_id: d.node_id,
                 endpoint: d.endpoint.into_owned(),
                 rtt_ms: d.rtt_ms,
+            })
+            .collect(),
+        paths: t
+            .paths
+            .into_iter()
+            .map(|p| PathStatDst {
+                node_id: p.node_id,
+                path_id: p.path_id,
+                frames: p.frames,
+                gap_missing: p.gap_missing,
+                reorder: p.reorder,
+                rtt_ms: p.rtt_ms,
             })
             .collect(),
         updated_at: 0,

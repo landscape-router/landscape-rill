@@ -110,7 +110,9 @@ impl MeshData {
 
     /// 路径转发下一跳节点：本节点在路径 hops 中的后继。
     /// 先查发送选择表（source = 自己），未命中查转发表（非自源路径中
-    /// 自己是 hops 参与者的条目——中继转发的正常形态）
+    /// 自己是 hops 参与者的条目——中继转发的正常形态）。
+    /// PATH_PROBE 响应（flags bit0）反向行走：取本节点位置的**前驱**
+    /// （首跳位置 = 直回源），与响应构建端 send_along_path 同构（REQ-064）
     pub(super) fn path_next_node(&self, header: &MeshFrameHeader) -> Option<u32> {
         let path = self
             .path_table
@@ -126,6 +128,17 @@ impl MeshData {
                 (!p.expired(unix_seconds())).then_some(p.clone())
             })?;
         let idx = path.hops.iter().position(|h| *h == self.self_node_id)?;
-        path.hops.get(idx + 1).copied()
+        if header.packet_type == packet_type::PATH_PROBE
+            && header.flags & PATH_PROBE_FLAG_RESPONSE != 0
+        {
+            // 前驱；首跳位置 = 本节点直连源（直回，无前驱可走）
+            Some(if idx > 0 {
+                path.hops[idx - 1]
+            } else {
+                header.to_node_id
+            })
+        } else {
+            path.hops.get(idx + 1).copied()
+        }
     }
 }

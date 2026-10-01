@@ -1107,6 +1107,7 @@ fn view(node_id: u32, tx: u64) -> TelemetryView {
         drop_global: 1,
         drops: vec![DropView { node_id, count: 1 }],
         direct: vec![],
+        paths: vec![],
         updated_at: 0,
     }
 }

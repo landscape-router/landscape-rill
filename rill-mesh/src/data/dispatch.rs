@@ -140,7 +140,7 @@ impl MeshData {
                     }
                 }
                 self.apply_ingress_health(from);
-                let ev = self.dispatch_delivered(from, frame).await;
+                let ev = self.dispatch_delivered(from, from_addr, frame).await;
                 // dispatch 路径丢帧同样收口计数（from 已过 route_mac 校验，归因可信）
                 if matches!(ev, IncomingEvent::Dropped { .. }) {
                     self.note_drop(Some(from));
@@ -155,7 +155,7 @@ impl MeshData {
                     debug!("[mesh] frame from {} ingress {}", from, ingress);
                 }
                 self.apply_ingress_health(from);
-                let ev = self.dispatch_delivered(from, frame).await;
+                let ev = self.dispatch_delivered(from, from_addr, frame).await;
                 if matches!(ev, IncomingEvent::Dropped { .. }) {
                     self.note_drop(Some(from));
                 }
@@ -237,6 +237,18 @@ impl MeshData {
                     rtt_ms,
                 })
                 .collect(),
+            paths: self
+                .take_path_stats()
+                .into_iter()
+                .map(|i| PathStatEntry {
+                    node_id: i.peer,
+                    path_id: i.path_id,
+                    frames: i.frames,
+                    gap_missing: i.gap_missing,
+                    reorder: i.reorder,
+                    rtt_ms: i.rtt_ms,
+                })
+                .collect(),
         }
     }
 
@@ -267,8 +279,14 @@ impl MeshData {
     }
 
     /// 送达分发：握手路径借用解析；数据/心跳/广播路径就地解密，
-    /// 明文 freeze 成 Bytes 零拷贝出帧（REQ-053）。
-    async fn dispatch_delivered(&mut self, from: u32, frame: &mut BytesMut) -> IncomingEvent {
+    /// 明文 freeze 成 Bytes 零拷贝出帧（REQ-053）；PATH_PROBE 免会话
+    /// （route_mac 已过校验，握手帧同模型，REQ-064）。
+    async fn dispatch_delivered(
+        &mut self,
+        from: u32,
+        from_addr: SocketAddr,
+        frame: &mut BytesMut,
+    ) -> IncomingEvent {
         let Some(header) = MeshFrameHeader::decode(&frame[..]).ok() else {
             return IncomingEvent::Dropped {
                 reason: DropReason::Short,
@@ -284,6 +302,12 @@ impl MeshData {
             packet_type::UNICAST => self.handle_session_frame(from, frame, false),
             packet_type::HEARTBEAT => self.handle_session_frame(from, frame, true),
             packet_type::BROADCAST => self.handle_broadcast_frame(from, frame),
+            packet_type::PATH_PROBE => match frame_payload(&frame[..]) {
+                Some(payload) => self.handle_path_probe(from_addr, &header, payload).await,
+                None => IncomingEvent::Dropped {
+                    reason: DropReason::Short,
+                },
+            },
             _ => IncomingEvent::Dropped {
                 reason: DropReason::UnsupportedType,
             },

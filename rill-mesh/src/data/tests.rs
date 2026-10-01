@@ -2056,3 +2056,310 @@ async fn telemetry_direct_pair_rtt_recorded_on_pong() {
     // 取走即清零
     assert!(a.take_telemetry().direct.is_empty());
 }
+
+// ==================== 逐路径统计与 PathProbe（REQ-064 / CONTROL_PLANE §3.11） ====================
+
+use landscape_rill_core::frame::PathProbePayload;
+use std::time::{Duration, Instant};
+
+#[tokio::test]
+async fn path_stats_gap_reorder_classified() {
+    // seq 轨迹：1 → 3（前向跳 = 丢 1）→ 2（回退 = 乱序）→ 1（再回退 = 乱序）
+    // → 1（重复 = 既非丢包也非乱序）
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    for seq in [1u32, 3, 2, 1, 1] {
+        a.note_path_frame(2, 0x100, seq);
+    }
+    let st = a.path_stat(2, 0x100).unwrap();
+    assert_eq!(st.frames, 5);
+    assert_eq!(st.gap_missing, 1);
+    assert_eq!(st.reorder, 2);
+    // 回绕前向：0xFFFF_FFFE → 1 = 前进 3（丢 2），不误判乱序
+    a.note_path_frame(3, 0x200, 0xFFFF_FFFE);
+    a.note_path_frame(3, 0x200, 1);
+    let st = a.path_stat(3, 0x200).unwrap();
+    assert_eq!((st.gap_missing, st.reorder), (2, 0));
+    // 分桶按 (peer, path_id)：默认路径独立成桶
+    a.note_path_frame(2, 0, 5);
+    assert_eq!(a.path_stat(2, 0).unwrap().frames, 1);
+}
+
+#[tokio::test]
+async fn take_path_stats_folds_ewma_and_resets() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    // 10 帧、步进 2 = 9 丢失 → 900‰
+    for seq in [1u32, 3, 5, 7, 9, 11, 13, 15, 17, 19] {
+        a.note_path_frame(2, 0x100, seq);
+    }
+    let snap = a.take_path_stats();
+    assert_eq!(snap.len(), 1);
+    assert_eq!((snap[0].frames, snap[0].gap_missing), (10, 9));
+    assert_eq!(
+        a.path_stat(2, 0x100).unwrap().loss_ewma_permille,
+        225,
+        "EWMA = 900/4（新证据 1/4 权重）"
+    );
+    assert_eq!(
+        a.path_stat(2, 0x100).unwrap().frames,
+        0,
+        "区间计数取走即清零"
+    );
+    // 无帧区间：EWMA 冷却 ×3/4，seq 轨迹保留；静默桶不占遥测字节
+    assert!(a.take_path_stats().is_empty());
+    assert_eq!(a.path_stat(2, 0x100).unwrap().loss_ewma_permille, 168);
+    a.note_path_frame(2, 0x100, 21);
+    assert_eq!(
+        a.path_stat(2, 0x100).unwrap().gap_missing,
+        1,
+        "last_seq=19 保留，21 = 丢 1"
+    );
+}
+
+#[tokio::test]
+async fn idle_path_probe_targets_selection() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let in_use = PathEntry {
+        path_id: 1,
+        path_epoch: 1,
+        hops: vec![2],
+        expires_at: unix_seconds() + 3600,
+    };
+    let idle = PathEntry {
+        path_id: 2,
+        path_epoch: 1,
+        hops: vec![3, 2],
+        expires_at: unix_seconds() + 3600,
+    };
+    let expired = PathEntry {
+        path_id: 3,
+        path_epoch: 1,
+        hops: vec![2],
+        expires_at: unix_seconds() - 1,
+    };
+    let no_key = PathEntry {
+        path_id: 4,
+        path_epoch: 1,
+        hops: vec![2],
+        expires_at: unix_seconds() + 3600,
+    };
+    a.set_paths(2, vec![in_use, idle, expired, no_key]);
+    a.set_key_path(1, path_key(1));
+    a.set_key_path(2, path_key(2));
+    a.set_key_path(3, path_key(3));
+    // 在用 = 路径 1（pick_path 落 last_sent_path）
+    let _ = a.pick_path(2, 0).unwrap();
+    let targets = a.idle_path_probe_targets();
+    // 在用/过期/无 key_path 均排除；idle 首跳 = 3
+    assert_eq!(targets, vec![(2u32, 2u64, 3u32)]);
+}
+
+#[tokio::test]
+async fn pick_path_advisory_loss_ordering() {
+    // 健康池内低损优先（advisory，仅排序）；等损保持候选序（稳定排序）
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    let lossy = PathEntry {
+        path_id: 1,
+        path_epoch: 1,
+        hops: vec![2],
+        expires_at: unix_seconds() + 3600,
+    };
+    let clean = PathEntry {
+        path_id: 2,
+        path_epoch: 1,
+        hops: vec![3, 2],
+        expires_at: unix_seconds() + 3600,
+    };
+    a.set_key_path(1, path_key(1));
+    a.set_key_path(2, path_key(2));
+    a.set_paths(2, vec![lossy, clean]);
+    a.path_stats.entry((2, 1)).or_default().loss_ewma_permille = 400;
+    // flow hash 0 = 池首：无观测时按候选序（路径 1），路径 1 有损观测后路径 2 升至池首
+    assert_eq!(a.pick_path(2, 0).unwrap().path_id, 2);
+    // miss 语义不变：全候选 miss 耗尽仍按 miss 升序兜底（advisory 不接管故障切换）
+    for _ in 0..PATH_HEALTH_MISS_LIMIT {
+        a.path_miss(1);
+    }
+    for _ in 0..PATH_HEALTH_MISS_LIMIT + 2 {
+        a.path_miss(2);
+    }
+    assert_eq!(
+        a.pick_path(2, 0).unwrap().path_id,
+        1,
+        "全 miss 池按 miss 升序，与 loss 排序无关"
+    );
+}
+
+#[tokio::test]
+async fn path_probe_timeout_misses_path() {
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    a.path_probe_pending
+        .insert(0xABCD, (2, 0x100, Instant::now() - Duration::from_secs(60)));
+    a.poll_path_probe_timeouts();
+    assert_eq!(a.path_health.get(&0x100).copied(), Some(1));
+    assert!(a.path_probe_pending.is_empty(), "判死即清出在途表");
+}
+
+fn path_probe_frame(from: u32, to: u32, path_id: u64, payload: &PathProbePayload) -> Vec<u8> {
+    let header = MeshFrameHeader {
+        to_node_id: to,
+        from_node_id: from,
+        path_id,
+        packet_type: packet_type::PATH_PROBE,
+        flags: if payload.response {
+            PATH_PROBE_FLAG_RESPONSE
+        } else {
+            0
+        },
+        ..Default::default()
+    };
+    landscape_rill_core::frame::build_unsealed_frame(&header, &path_key(path_id), &payload.encode())
+}
+
+#[tokio::test]
+async fn path_probe_roundtrip_rtt_and_bucket() {
+    // A 探 B 的空闲路径：请求沿首跳 → B 回响应沿同路径 → A 记 RTT + path_ok
+    let (mut a, mut b) = setup_pair().await;
+    let path = PathEntry {
+        path_id: 0x100,
+        path_epoch: 1,
+        hops: vec![2],
+        expires_at: unix_seconds() + 3600,
+    };
+    a.set_paths(2, vec![path.clone()]);
+    a.set_key_path(0x100, path_key(0x100));
+    b.set_key_path(0x100, path_key(0x100));
+    // B 侧转发路径表（响应回程查表；hops 含 B）
+    b.set_forward_path(path);
+    // A 侧桶预置（真实 = 收到过 B 的路径帧）
+    a.note_path_frame(2, 0x100, 1);
+    let nonce = a.send_path_probe(2, 0x100, 2).await.unwrap();
+    // B 收请求：限速通过 → 回响应（回程端点 = A）
+    assert!(matches!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::PathProbeServed { from: 1 }
+    ));
+    // A 收响应：nonce 匹配 → RTT 事件 + 桶更新 + 路径 ok
+    match a.handle_incoming().await.unwrap() {
+        IncomingEvent::PathProbeRtt {
+            dest,
+            path_id,
+            rtt_ms,
+        } => {
+            assert_eq!((dest, path_id), (2, 0x100));
+            assert_eq!(a.path_stat(2, 0x100).unwrap().rtt_ms, rtt_ms);
+        }
+        other => panic!("expected PathProbeRtt, got {:?}", other),
+    }
+    assert_eq!(a.path_health.get(&0x100).copied(), Some(0));
+    // 响应消费后 nonce 不再有效（重放/迟到 → Replay）
+    let replay = path_probe_frame(
+        2,
+        1,
+        0x100,
+        &PathProbePayload {
+            nonce,
+            sent_ms: 0,
+            response: true,
+        },
+    );
+    inject(&a, &replay).await;
+    assert!(matches!(
+        a.handle_incoming().await.unwrap(),
+        IncomingEvent::Dropped {
+            reason: DropReason::Replay
+        }
+    ));
+}
+
+#[tokio::test]
+async fn path_probe_request_rate_limited_per_source() {
+    // 请求响应面按源限速（REQ-046 纪律，与 PONG 同桶）：突发容量耗尽后丢弃
+    let (mut _a, mut b) = setup_pair().await;
+    b.set_key_path(0x100, path_key(0x100));
+    let req = path_probe_frame(
+        1,
+        2,
+        0x100,
+        &PathProbePayload {
+            nonce: 1,
+            sent_ms: 0,
+            response: false,
+        },
+    );
+    // 容量 20（PONG_CAPACITY）：逐个消费令牌（回程无路径表 → NoEndpoint 也已过限速闸），
+    // 第 21 个 → RateLimited
+    for _ in 0..PONG_CAPACITY {
+        inject(&b, &req).await;
+        let _ = b.handle_incoming().await.unwrap();
+    }
+    inject(&b, &req).await;
+    assert!(matches!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Dropped {
+            reason: DropReason::RateLimited
+        }
+    ));
+}
+
+#[tokio::test]
+async fn telemetry_paths_snapshot_carried() {
+    // §3.15 paths 字段：心跳遥测携带逐路径区间快照（REQ-064）
+    let mut a = MeshData::bind("127.0.0.1:0".parse().unwrap(), 1)
+        .await
+        .unwrap();
+    a.note_path_frame(2, 0x100, 1);
+    a.note_path_frame(2, 0x100, 4);
+    let tele = a.take_telemetry();
+    assert_eq!(tele.paths.len(), 1);
+    let p = &tele.paths[0];
+    assert_eq!((p.node_id, p.path_id), (2, 0x100));
+    assert_eq!((p.frames, p.gap_missing), (2, 2));
+    assert!(a.take_telemetry().paths.is_empty(), "取走即清零");
+}
+
+#[tokio::test]
+async fn path_probe_tampered_route_mac_dropped() {
+    // route_mac 即认证（免会话模型）：篡改即弃，不给响应面
+    let (mut _a, mut b) = setup_pair().await;
+    b.set_key_path(0x100, path_key(0x100));
+    let mut req = path_probe_frame(
+        1,
+        2,
+        0x100,
+        &PathProbePayload {
+            nonce: 1,
+            sent_ms: 0,
+            response: false,
+        },
+    );
+    req[26] ^= 0x01; // route_mac 首字节（off::ROUTE_MAC）
+    inject(&b, &req).await;
+    assert!(matches!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Dropped {
+            reason: DropReason::BadRouteMac
+        }
+    ));
+}
+
+#[tokio::test]
+async fn path_probe_pending_cap_rejects_new_sends() {
+    // CN-01：在途饱和 → 拒绝新探测（泵周期重试收敛），不清空旧在途
+    let (mut a, _b) = setup_pair().await;
+    for i in 0..64u32 {
+        a.path_probe_pending.insert(i, (2, 0x100, Instant::now()));
+    }
+    a.set_key_path(0x100, path_key(0x100));
+    assert!(a.send_path_probe(2, 0x100, 2).await.is_none());
+    assert_eq!(a.path_probe_pending.len(), 64);
+}

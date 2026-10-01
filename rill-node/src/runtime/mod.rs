@@ -474,6 +474,18 @@ impl Node {
                 self.handle_probe_pong(from, endpoint, payload).await;
                 None
             }
+            IncomingEvent::PathProbeRtt {
+                dest,
+                path_id,
+                rtt_ms,
+            } => {
+                debug!("[node] path {path_id} to {dest} rtt {rtt_ms}ms");
+                None
+            }
+            IncomingEvent::PathProbeServed { from } => {
+                debug!("[node] path probe served for {from}");
+                None
+            }
             IncomingEvent::Dropped { reason } => {
                 debug!("[node] dropped frame: {:?}", reason);
                 None
@@ -874,6 +886,18 @@ impl Node {
                 payload,
             } => {
                 self.handle_probe_pong(from, endpoint, payload).await;
+                None
+            }
+            IncomingEvent::PathProbeRtt {
+                dest,
+                path_id,
+                rtt_ms,
+            } => {
+                debug!("[node] path {path_id} to {dest} rtt {rtt_ms}ms");
+                None
+            }
+            IncomingEvent::PathProbeServed { from } => {
+                debug!("[node] path probe served for {from}");
                 None
             }
             IncomingEvent::Dropped { reason } => {

@@ -876,6 +876,10 @@ async fn heartbeat_telemetry_stored() {
         assert_eq!(t.direct.len(), 1);
         assert_eq!(t.direct[0].endpoint, "10.0.0.1:10001");
         assert_eq!(t.direct[0].rtt_ms, 42);
+        // 逐路径桶（REQ-064）同样直拷入库
+        assert_eq!(t.paths.len(), 1);
+        assert_eq!((t.paths[0].node_id, t.paths[0].path_id), (9, 7));
+        assert_eq!((t.paths[0].frames, t.paths[0].rtt_ms), (12, 33));
         assert!(t.updated_at > 0);
     });
     let host = addr.ip().to_string();
@@ -908,6 +912,14 @@ async fn heartbeat_telemetry_stored() {
             node_id: 9,
             endpoint: Cow::Borrowed("10.0.0.1:10001"),
             rtt_ms: 42,
+        }],
+        paths: vec![PathStatEntry {
+            node_id: 9,
+            path_id: 7,
+            frames: 12,
+            gap_missing: 1,
+            reorder: 0,
+            rtt_ms: 33,
         }],
     };
     framing::write_frame(&mut tls, &client.heartbeat(Some(tele)))

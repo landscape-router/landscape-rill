@@ -141,11 +141,22 @@ message TelemetryPayload {
   uint64 drop_global = 2;             // 未能归因到 peer 的丢帧
   repeated TelemetryDrop drops = 3;   // per-peer 丢帧归因
   repeated DirectPair direct = 4;     // PONG 确认的直连对（端点 + RTT）
+  repeated PathStatEntry paths = 5;   // per-path_id 路径质量桶（REQ-064，区间值）
 }
 
 message TelemetryDrop {
   fixed32 node_id = 1;  // 0 = 会话/解析层错误，无明确对端
   uint64 count = 2;
+}
+
+// §3.15 per-path 质量桶（REQ-064）：接收侧按 (peer, path_id) 分桶的区间值
+message PathStatEntry {
+  fixed32 node_id = 1;        // 目标节点（peer）
+  fixed64 path_id = 2;        // 0 = 默认路径桶
+  uint64 frames = 3;          // 本区间收帧数
+  uint64 gap_missing = 4;     // 丢失 seq 单元估计（前向 seq 跳越）
+  uint64 reorder = 5;         // 乱序到达计数（回退 seq，非重放）
+  uint32 rtt_ms = 6;          // 最近 PATH_PROBE RTT（0 = 未测）
 }
 
 message Lease {

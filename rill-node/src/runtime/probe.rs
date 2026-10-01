@@ -99,13 +99,17 @@ impl Node {
     /// ① coordinator UDP 回显（STUN 式：发现 NAT 后公网映射）
     /// ② 对全部 peer 候选端点互探（直连确认，CON-03）
     /// ③ 未确认中继端点探测（挂靠确认，CON-04）
-    /// 所有发送过 probe_send_gate（CN-01）：周期开始先把上轮无响应的在途探测
+    /// ④ 空闲候选路径 PATH_PROBE（REQ-064）
+    /// ①~③ 发送过 probe_send_gate（CN-01）：周期开始先把上轮无响应的在途探测
     /// 转为端点退避（miss+1 指数退避），失败按退避重试而非并发轰炸
     pub(super) async fn pump_probes(&mut self, now: Instant) {
         if now.duration_since(self.last_probe) < PROBE_PERIOD {
             return;
         }
         self.last_probe = now;
+        // PATH_PROBE 判死（REQ-064）：空闲路径活性由探活驱动，
+        // 超时未响应 → 路径 miss（与端点退避同一周期收口）
+        self.mesh.poll_path_probe_timeouts();
         // 退避推进：仍 pending = 上轮 PING 无 PONG（发送只发生在本函数，
         // 周期开始时在途探测必然已等满一个周期）
         for (_, ep) in self.mesh.take_pending_probes() {
@@ -160,6 +164,15 @@ impl Node {
             if self.probe_send_gate(&ep, now) {
                 let _ = self.mesh.send_probe_ping(ep, id, node_id).await;
             }
+        }
+        // ④ 空闲候选路径探活（REQ-064）：备份路径无数据流量、被动统计覆盖
+        // 不到 → PATH_PROBE 沿路径首跳主动探活；无响应面（回包沿原路径），
+        // 仅全局令牌桶限速（CN-01/REQ-046），判死走 poll_path_probe_timeouts
+        for (dest, path_id, hop0) in self.mesh.idle_path_probe_targets() {
+            if !self.probe_send_bucket.take() {
+                break;
+            }
+            self.mesh.send_path_probe(dest, path_id, hop0).await;
         }
     }
 

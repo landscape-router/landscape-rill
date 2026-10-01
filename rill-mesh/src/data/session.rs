@@ -420,6 +420,9 @@ impl MeshData {
                         reason: DropReason::Aead,
                     };
                 }
+                // 逐路径统计（REQ-064）：解密成功才计入（未过认证的帧不产生
+                // 观测），seq 轨迹取自解密前的帧头副本
+                self.note_path_frame(from, header.path_id, header.seq);
                 if heartbeat {
                     IncomingEvent::Heartbeat { from }
                 } else {

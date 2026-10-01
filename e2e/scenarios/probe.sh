@@ -1,4 +1,4 @@
-  # probe 场景（CONNECTIVITY §2/§4/§5，CON-01/03/04/05/06 + SEC-26 + REQ-062）：
+  # probe 场景（CONNECTIVITY §2/§4/§5，CON-01/03/04/05/06 + SEC-26 + REQ-062 + REQ-064）：
   # 拓扑：a(net1) — b/d(双网卡自愿 relay) — c(net2)，a↔c 直连黑洞
   # 断言：
   # ① CON-01 coordinator UDP 回显：节点收到 echo confirmed（seen 地址）
@@ -8,6 +8,7 @@
   # ⑤ CON-04 中继兜底：c→a 经 b 可达（b 日志 relayed frame）
   # ⑥ REQ-062 roster 收窄：SIGHUP exclude node-d → roster 仅剩 b，路径仍可用
   # ⑦ CON-06 中继故障切换：exclude 移除（roster 恢复 b+d）→ stop node-b → 经 d 中继仍可达
+  # ⑧ REQ-064 空闲候选路径 PATH_PROBE：c 对 a 的空闲中继路径测得 RTT
   logs() { docker logs "$1" 2>&1; }
   ping_ca() {
     docker exec mesh-node-c ping -c1 -W1 10.42.0.1 >/dev/null 2>&1
@@ -49,7 +50,7 @@ PYEOF
     docker kill -s HUP mesh-coord >/dev/null
   }
 
-  echo "==> probe 阶段 1/7：注册 + CON-01 coordinator UDP 回显"
+  echo "==> probe 阶段 1/8：注册 + CON-01 coordinator UDP 回显"
   for c in mesh-node-a mesh-node-b mesh-node-c mesh-node-d; do
     wait_log $c 'registered:' 1 30 || { echo "FAIL: $c 未注册"; logs $c | tail -10; exit 1; }
   done
@@ -63,7 +64,7 @@ PYEOF
   }
   echo "PASS: CON-01——coordinator UDP 回显（echo confirmed）"
 
-  echo "==> probe 阶段 2/7：SEC-26 反射放大限速（echo 洪泛 → rate-limited 摘要）"
+  echo "==> probe 阶段 2/8：SEC-26 反射放大限速（echo 洪泛 → rate-limited 摘要）"
   # 洪泛目标 = coord 容器 UDP 8443（宿主直达容器固定 IP）；限速 10/s 突发 20，
   # 200 包瞬间灌入 → 大部分被限速（amplification 收敛）
   python3 - <<'PYEOF'
@@ -81,7 +82,7 @@ PYEOF
   }
   echo "PASS: SEC-26——echo 洪泛被限速（rate-limited 摘要出现）"
 
-  echo "==> probe 阶段 3/7：CON-05 relay roster 构建（RTT 轮 → 落位 b+d）"
+  echo "==> probe 阶段 3/8：CON-05 relay roster 构建（RTT 轮 → 落位 b+d）"
   wait_log mesh-coord 'relay rtt' 1 20 || {
     echo "FAIL: coordinator 未输出 relay RTT 轮日志（CON-05）"
     logs mesh-coord | tail -10
@@ -110,7 +111,7 @@ PYEOF
   }
   echo "PASS: CON-05——roster 经 netmap 下发 + 节点持有挂靠候选"
 
-  echo "==> probe 阶段 4/7：CON-03 直连互探确认 + CON-04 中继兜底"
+  echo "==> probe 阶段 4/8：CON-03 直连互探确认 + CON-04 中继兜底"
   wait_log mesh-node-c 'probe confirmed direct via' 1 40 || {
     echo "FAIL: node-c 无互探确认日志（CON-03）"
     logs mesh-node-c | grep -E 'probe|relay' | tail -10
@@ -136,7 +137,19 @@ PYEOF
     }
   done
 
-  echo "==> probe 阶段 5/7：REQ-062 roster 收窄（SIGHUP exclude node-d → 仅 b）"
+  echo "==> probe 阶段 5/8：REQ-064 空闲候选路径 PATH_PROBE（RTT 测得）"
+  # c 持 a 的多候选（direct + 经 b/d 中继）：在用之外的中继路径无数据流量，
+  # 泵周期 PATH_PROBE 沿路径首跳探活、响应沿同路径返回 → RTT 落桶（debug 日志）
+  wait_log mesh-node-c 'path probe rtt:' 1 45 || {
+    echo "FAIL: node-c 无 PATH_PROBE RTT 日志（REQ-064 激活失败）"
+    echo "--- node-c 日志 ---"; logs mesh-node-c | grep -E 'path probe|paths|relay' | tail -10
+    echo "--- node-b 日志 ---"; logs mesh-node-b | grep -E 'path probe|dropped' | tail -5
+    exit 1
+  }
+  logs mesh-node-c | grep 'path probe rtt' | tail -2
+  echo "PASS: REQ-064——空闲中继路径 PATH_PROBE RTT 测得"
+
+  echo "==> probe 阶段 6/8：REQ-062 roster 收窄（SIGHUP exclude node-d → 仅 b）"
   B_RELAYED_BEFORE=$(relay_count mesh-node-b)
   set_exclude "$D_ID"
   narrowed=0
@@ -164,7 +177,7 @@ PYEOF
   fi
   echo "PASS: 收窄后 c→a 仍经 node-b 中继可用（REQ-062 验收⑤）"
 
-  echo "==> probe 阶段 6/7：roster 恢复（b+d）+ CON-06 中继故障切换"
+  echo "==> probe 阶段 7/8：roster 恢复（b+d）+ CON-06 中继故障切换"
   set_exclude ""
   restored=0
   for i in $(seq 1 20); do

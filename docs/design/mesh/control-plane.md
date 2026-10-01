@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-066
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-064 / REQ-066
 
-**版本：v0.21（2026-10-01 修订：REQ-062 relay 池策划——§3.2 `relay_list` 升级为 `relay_roster`（node_id 有序激活名单）+ endpoints 合并视图说明 + EndpointReport 本地/回显分列（§3.11 roster 段）；§3.11 新增 relay roster 段（双资格/自动策划+硬约束/迟滞/raft 语义/生命周期事件全参与者扇出）；§3.12 relay 约束段 + SIGHUP 重提；§3.14 relay roster 状态视图；v0.20 为 REQ-049②/REQ-070 阶段三——binding v2 签发锚点 + §3.16 绑定交叉审计）**
+**版本：v0.22（2026-10-01 修订：REQ-064 逐路径统计与 PathProbe 激活——§3.11 新增统计与探活段（接收侧 (peer, path_id) 分桶 / PATH_PROBE 数据面帧 / advisory 择优）；§3.15 新增逐路径质量桶上报；v0.21 为 REQ-062 relay 池策划）**
 
 **最后修改：2026-10-01**
 
@@ -304,6 +304,15 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - **SIGHUP 联动**：relay 约束热更新后按现有软状态立即重提 roster（新一轮测量 30s 后跟上）
 - **生命周期事件扇出（全参与者）**：withdraw_node / roster 收窄触发的 Withdraw/Update 推送范围 = {source, dest} ∪ hops 内 relay（修原"只推 source"的缝隙——relay/dest 持失效 key_path 直至 TTL）；roster 扩充对幂等命中的既有路径集**显式补员**（`expand_relay_candidates`：保留既有 path_id，按原 max 预算补新 relay 候选）
 
+**逐路径统计与 PathProbe 激活（REQ-064）**
+
+- **被动统计（接收侧零成本）**：解密成功的会话帧按 `(from_node_id, path_id)` 分桶——会话 seq 轨迹做 wrapping diff：前向跳越 = 丢包估计（gap 计数），回退 = 乱序计数；跨区间折叠丢包率 EWMA（千分比，新证据 1/4 权重、无帧指数冷却）。心跳帧恒走默认路径（FRAME_HEADER §2.5），故默认路径桶由心跳持续供给
+- **统计仅 advisory**：EWMA 只喂 `pick_path` 健康池内**稳定排序**（低损优先承接 flow hash 负载，等损保持候选序）；不改变 miss 计数 / 快速切换 / 全 miss 兜底语义——劣化路径仍走既有 miss 机器
+- **PathProbe 激活（空闲路径探活 + RTT 真值）**：空闲候选路径（未过期、有 `key_path`、非在用 `last_sent_path`）无数据流量、被动统计覆盖不到 → 泵周期（CONNECTIVITY §2，30s）沿路径**首跳端点**发 PATH_PROBE 帧（`packet_type 0x05`，免会话、route_mac = `key_path` 即认证——握手帧同模型，FRAME_HEADER §2.7），响应**沿同路径反向**返回（转发节点按响应标记取 hops 前驱）；RTT 以请求发出时刻计
+- **活性闭环**：响应到达 = 该路径 miss 清零 + RTT 落桶；在途超时（35s 判死窗口）→ 该路径 miss +1——空闲路径的活性由探活驱动（心跳只走默认路径，覆盖不到备用路径）
+- **限速纪律（REQ-046）**：发送侧全局令牌桶（与 probe 同闸）+ 在途上限 64 饱和拒绝；响应侧按源限速（与 PONG 同值同桶）——探活可被已认证成员滥用为响应面，必须有上界
+- **远端上报**：逐路径区间快照随心跳遥测上报（§3.15 paths 字段），coord 聚合经 §3.14 状态端点展示；与 REQ-052 分工——052 = per-endpoint 直连对（可达性矩阵），本条 = per-path_id 路径桶（路径质量）
+
 ### 3.12 管理面（v1，REQ-038）
 
 > 管理面 = coordinator 侧的配置权威面（前缀公告白名单 §3.8、auth key 生命周期 §6、策略模型 §3.10 的 v2 载体）。v1 形态定稿：**配置文件为唯一权威 + 库 API 执行面分离**（REQ-038）。
@@ -416,6 +425,7 @@ coordinator 权威地知道"注册了谁"，遥测补齐"数据面实际怎么�
   2. 丢帧归因计数（BadRouteMac/会话错误/未知 node_id——节点侧 drop 计数器现成）
   3. 直连确认对（对端 node_id + 端点 + RTT——probe 发送时间簿记，PONG 算 RTT）
   4. `RegisterRequest.version` 字段（lrill 构建版本；hostname/os/protocol_version 已有）
+  5. 逐路径质量桶（REQ-064，§3.11）：`(peer, path_id)` 区间计数（收帧/gap 估计/乱序）+ 最近探活 RTT——**仅携带有效区间**（有帧或 RTT 变化），静默桶不占心跳字节；与 3 = per-endpoint 直连对粒度互补（路径质量 ≠ 端点可达性）
 - **coord 侧**：聚合为最新快照（latest-wins，只保留最新，不承诺时序存储），经 §3.14 状态端点展示
 - **边界**：尽力而为——不重传、不确认；coord 视图允许短暂陈旧（与 netmap 一致性无关，不影响控制面行为）；不上报负载内容、路由表全量；tun 状态等扩展字段留待按需追加（proto optional）
 

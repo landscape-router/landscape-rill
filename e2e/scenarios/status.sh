@@ -5,7 +5,8 @@
   # ② 认证：无/错密码 401；同源高频错密码 429（按源限速）；明文 HTTP 在 TLS 层被拒
   # ③ 正确密码 200：内容组齐全（networks/nodes/auth_keys/counters/coord/telemetry）
   #    + 节点 build_version（REQ-052 RegisterRequest.version）
-  # ④ 遥测聚合：per-peer 收发计数 > 0、直连确认对非空（probe RTT，latest-wins）
+  # ④ 遥测聚合：per-peer 收发计数 > 0、直连确认对非空（probe RTT，latest-wins）、
+  #    逐路径质量桶非空（REQ-064 paths：区间计数 + RTT）
   # ⑤ SIGHUP 密码轮换：旧密码即刻 401、新密码 200、reload_log 记录 ok（内容组 5）
   # ⑥ 重载失败：坏配置 → SIGHUP → reload_log 记录 failed + 保持旧配置（密码仍可用）
   # ⑦ 红线：明文密码/master_key/signing_seed 不出现在响应；轮换/失败重载后数据面不受影响
@@ -112,7 +113,7 @@ PYEOF
   fi
   echo "PASS: 红线——明文密码/master_key/signing_seed 零输出"
 
-  echo "==> status 阶段 4/8：遥测聚合（per-peer 计数 + 直连确认对）"
+  echo "==> status 阶段 4/8：遥测聚合（per-peer 计数 + 直连确认对 + 逐路径桶）"
   python3 - "$STATUS_IP" <<'PYEOF'
 import http.client, ssl, sys, time
 ctx = ssl._create_unverified_context()
@@ -124,21 +125,26 @@ def fetch():
     return json.loads(body)
 import json
 deadline = time.time() + 60
-peers_ok = direct_ok = False
-while time.time() < deadline and not (peers_ok and direct_ok):
+peers_ok = direct_ok = paths_ok = False
+while time.time() < deadline and not (peers_ok and direct_ok and paths_ok):
     d = fetch()
     tele = d["telemetry"]
     peers_ok = any(
         any(p["tx_frames"] > 0 or p["rx_frames"] > 0 for p in t["peers"]) for t in tele
     )
     direct_ok = any(t["direct"] for t in tele)
-    if peers_ok and direct_ok:
+    # REQ-064：逐路径质量桶随心跳上报（§3.15 paths，区间计数 + RTT）
+    paths_ok = any(
+        any(p["frames"] > 0 for p in t["paths"]) for t in tele
+    )
+    if peers_ok and direct_ok and paths_ok:
         break
     time.sleep(3)
 assert peers_ok, f"per-peer 流量计数未出现: {json.dumps(tele)[:400]}"
 assert direct_ok, "直连确认对未出现（probe RTT 未上报）"
+assert paths_ok, f"逐路径桶未出现（REQ-064）: {json.dumps(tele)[:400]}"
 rtts = [p["rtt_ms"] for t in tele for p in t["direct"]]
-print(f"PASS: 遥测聚合 latest-wins（per-peer 计数 > 0，直连对 RTT={rtts}ms）")
+print(f"PASS: 遥测聚合 latest-wins（per-peer 计数 > 0，直连对 RTT={rtts}ms，路径桶非空）")
 PYEOF
 
   echo "==> status 阶段 5/8：SIGHUP 密码轮换（旧密码即刻 401）"

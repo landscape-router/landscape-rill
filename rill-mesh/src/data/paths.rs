@@ -70,13 +70,21 @@ impl MeshData {
             return None;
         }
         // 主路径 = 有序候选第一条；flow hash 仅在候选健康时做负载
-        let healthy: Vec<&PathEntry> = live
+        let mut healthy: Vec<&PathEntry> = live
             .iter()
             .copied()
             .filter(|p| {
                 self.path_health.get(&p.path_id).copied().unwrap_or(0) < PATH_HEALTH_MISS_LIMIT
             })
             .collect();
+        // advisory 择优（REQ-064）：健康池内按丢包 EWMA 稳定升序——低损路径
+        // 优先承接 flow hash 负载；仅排序，不改 miss/切换语义（劣化仍走 miss 路径）
+        healthy.sort_by_key(|p| {
+            self.path_stats
+                .get(&(dest, p.path_id))
+                .map(|s| s.loss_ewma_permille)
+                .unwrap_or(0)
+        });
         // 全候选 miss 耗尽 → 按 miss 升序（最不坏的优先，稳定排序保持候选序）：
         // 心跳走最可能可用的路径，收包侧 ingress 健康恢复形成闭环（避免死锁在更坏路径）
         let pool: Vec<&PathEntry> = if healthy.is_empty() {

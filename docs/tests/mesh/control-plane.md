@@ -171,6 +171,14 @@
 - 证据：rill-coord/src/coordinator/tests.rs、rill-coord/src/path_service.rs、rill-coord/src/directory.rs、rilld/src/coord_run.rs、e2e/scenarios/relay.sh、e2e/scenarios/probe.sh
 - 说明：roster = node_id 有序激活名单（能力位 ∩ roster 双资格）。单测：交集语义（include 不豁免能力位、exclude 优先、include 兜底 NAT'd、RTT 升序终序）；公网判定（seen IP ∈ 本地接口集合 → 直连公网；NAT 后排除；无 seen 排除）；sync_relays 修正（注册能力位节点不自动进 PathService；roster 空 = 仅 direct；roster 落位 = 中继候选出现；清空 = 收窄回 direct）；退出口迟滞（连续 3 轮 miss 退出、命中恢复）；离线剔除（include 不豁免）；netmap 集合变化才 bump（顺序变化不 bump）；吊销联动出 roster；生命周期事件全参与者扇出（withdraw_node / roster 收窄 → source/dest/hops 全收 Withdraw/Update）；roster 扩充对幂等命中路径集显式补员（保既有 path_id）。e2e：relay 场景（roster 落位日志含 relay + node-b 中继 ping 通）+ probe 场景阶段 5/6（SIGHUP exclude node-d → roster 即时收窄到 b、c→a 仍通；exclude 移除恢复 b+d；stop node-b → 经 d 故障切换）。CI：e2e-mesh run 36920747030（含 relay/probe）
 
+## CTL-26 逐路径统计与 PathProbe（REQ-064）
+
+- 关联 REQ：REQ-064
+- 测试层：单测 + docker e2e
+- 状态：`待补充`
+- 证据：rill-mesh/src/data/path_stats.rs、rill-mesh/src/data/tests.rs、e2e/scenarios/probe.sh、e2e/scenarios/status.sh
+- 说明：接收侧 `(peer, path_id)` 分桶被动统计 + 空闲候选路径 PATH_PROBE（0x05 免会话帧，响应沿同路径反向）。单测：seq gap/乱序/回绕分类（含重复帧不计）；区间取走即清零 + EWMA 折入（1/4 权重/无帧冷却）+ 静默桶不占遥测字节 + seq 轨迹保留；idle 目标筛选（在用/过期/无 key_path 排除）；advisory 择优（低损稳定升序 + 全 miss 池仍按 miss 升序，loss 排序不接管故障切换）；PATH_PROBE 请求→响应同路径往返（RTT 落桶 + miss 清零）、重放 nonce → Replay、篡改 route_mac → BadRouteMac、响应按源限速（PONG_CAPACITY 21 号包 RateLimited）、在途上限饱和拒绝、超时判死 → path miss；遥测 paths 快照携带（取走即清零）。e2e：probe 场景阶段 5（node-c 空闲中继路径 `path probe rtt:` 日志）+ status 场景阶段 4（状态端点 paths 桶 frames > 0）
+
 ## 验收断言
 
 - [x] CTL-01：注册幂等、身份绑定签名可验证
@@ -203,3 +211,4 @@
 - [x] CTL-23：Raft 3 副本 failover e2e——选主收敛/follower 重定向/停 leader 窗口 5×双栈 ping 无丢失（数据面不中断）/停 leader 优雅退出（exit 0）/term 递增选新主/重定向链幂等重注册（node_id 唯一）/旧 leader Follower 回归/终态双栈通（e2e/scenarios/ha.sh，全五阶段断言）
 - [x] CTL-24：绑定交叉审计（REQ-049②）——伪造绑定（签名有效但未进日志）任意已 apply 副本 Conflict 被拒；真实绑定 Verified；超前锚点 Behind；吊销墓碑 Unknown；TLS 线格式往返；e2e ha 阶段 1.5 双节点 audit verified 背书
 - [x] CTL-25：relay roster 策划与收窄（REQ-062）——单测：交集/公网判定/sync_relays 修正/迟滞/离线剔除/bump 联动/全参与者扇出/补员；e2e：relay roster 落位断言 + probe 收窄/恢复/故障切换（CI e2e-mesh run 36920747030 全绿）
+- [ ] CTL-26：逐路径统计与 PathProbe（REQ-064）——单测：分桶 gap/乱序/回绕、EWMA 区间语义、advisory 择优不接管故障切换、PATH_PROBE 往返/重放/篡改/限速/超时判死；e2e：probe PATH_PROBE RTT 日志 + status paths 桶
