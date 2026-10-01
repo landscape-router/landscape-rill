@@ -27,6 +27,9 @@ const RELOAD_LOG_CAP: usize = 20;
 
 pub struct StatusState {
     pub server: Arc<Mutex<landscape_rill_mesh::control::CoordinatorServer>>,
+    /// 写路径门面克隆（REQ-070）：集群模式下管理写经日志提案，不持 server 锁
+    /// 跨 await（axum handler 需 Send future）
+    pub backend: landscape_rill_coord::raft::backend::CoordBackend,
     pub control_addr: String,
     pub status_addr: String,
     pub storage_path: Option<String>,
@@ -40,15 +43,17 @@ pub struct StatusState {
 }
 
 impl StatusState {
-    pub fn new(
+    pub async fn new(
         server: Arc<Mutex<landscape_rill_mesh::control::CoordinatorServer>>,
         control_addr: String,
         status_addr: String,
         storage_path: Option<String>,
         password_hash: PasswordHash,
     ) -> Self {
+        let backend = server.lock().await.coordinator.clone();
         Self {
             server,
+            backend,
             control_addr,
             status_addr,
             storage_path,
@@ -135,7 +140,9 @@ async fn status_handler(
         now_unix: now_unix(),
         reload_log: state.reload_log.lock().await.clone(),
     };
-    let snap = StatusView::snapshot(&guard.coordinator, &meta);
+    let snap = guard
+        .coordinator
+        .with_coord(|c| StatusView::snapshot(c, &meta));
     Json(snap).into_response()
 }
 
@@ -163,8 +170,8 @@ async fn authenticate(
 }
 
 /// POST /admin/revoke（REQ-069，CONTROL_PLANE §3.14 写操作）：
-/// 吊销走单一写路径（REQ-048 窗口语义随行）；请求体认证后手工解析，
-/// 未认证请求不进解析路径（无未限速错误面）
+/// 吊销走单一写路径（集群模式经日志提案，REQ-048 窗口语义随行）；
+/// 请求体认证后手工解析，未认证请求不进解析路径（无未限速错误面）
 async fn admin_revoke_handler(
     State(state): State<Arc<StatusState>>,
     Extension(peer): Extension<SocketAddr>,
@@ -181,14 +188,28 @@ async fn admin_revoke_handler(
     let Ok(req) = serde_json::from_slice::<RevokeRequest>(&body) else {
         return (StatusCode::BAD_REQUEST, "malformed body").into_response();
     };
-    let mut guard = state.server.lock().await;
-    if guard.coordinator.static_pubkey_of(req.node_id).is_none() {
+    if state
+        .backend
+        .with_coord(|c| c.static_pubkey_of(req.node_id))
+        .is_none()
+    {
         return (StatusCode::NOT_FOUND, "unknown node").into_response();
     }
-    guard.coordinator.revoke(req.node_id, now_unix());
-    // 审计日志（AO-05 方向）：动作 + 对象 + 发起方
-    info!("[admin] revoke: node_id={} from {}", req.node_id, peer);
-    Json(serde_json::json!({"revoked": true, "node_id": req.node_id})).into_response()
+    match state.backend.revoke(req.node_id, now_unix()).await {
+        Ok(_) => {
+            // 审计日志（AO-05 方向）：动作 + 对象 + 发起方
+            info!("[admin] revoke: node_id={} from {}", req.node_id, peer);
+            Json(serde_json::json!({"revoked": true, "node_id": req.node_id})).into_response()
+        }
+        Err(_) => {
+            // Forward（非主）/Raft（共识层不可用）统一 503：管理面不代理转发（§3.6 决策）
+            warn!(
+                "[admin] revoke failed (not leader or raft unavailable): node_id={}",
+                req.node_id
+            );
+            (StatusCode::SERVICE_UNAVAILABLE, "not leader").into_response()
+        }
+    }
 }
 
 /// 认证失败路径：同源高频 → 429，否则 401（§3.14）

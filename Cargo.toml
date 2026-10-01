@@ -68,6 +68,8 @@ futures-util = { version = "0.3.33", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# REQ-070：rill-mesh inter-coord 传输直接对接 openraft 网络层（与 rill-coord 同 feature 集）
+openraft = { version = "0.9.25", features = ["serde", "storage-v2", "generic-snapshot-data"] }
 
 # --- HTTP (REQ-051 状态端点；观察面属运维基线，依赖豁免见 CONTROL_PLANE §3.14) ---
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }

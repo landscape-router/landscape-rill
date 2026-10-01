@@ -92,11 +92,11 @@
 
 ## CTL-12 Raft 主切换（P2）
 
-- 关联 REQ：REQ-004
-- 测试层：集成（P2）
-- 状态：`待补充`
-- 证据：—
-- 说明：LeaderRedirect → 幂等重注册（node_id/绑定不变）→ 软状态重建；openraft 未接入
+- 关联 REQ：REQ-004 / REQ-070
+- 测试层：集成 + docker e2e
+- 状态：`已覆盖`
+- 证据：rill-coord/src/raft/tests.rs、e2e/scenarios/ha.sh
+- 说明：LeaderRedirect → 幂等重注册（node_id/绑定不变）→ 软状态重建；进程内 3 副本集群测试覆盖复制/转发错误/故障转移/旧 leader 回归（tests.rs 阶段 3/4 断言），ha e2e 断言重定向链重注册 + node_id 全程唯一 + 旧 leader 以 Follower 回归
 
 ## CTL-13 重连认证（X25519 DH 挑战）
 
@@ -146,6 +146,15 @@
 - 证据：rill-coord/src/raft/mod.rs、rill-coord/src/raft/log_store.rs、rill-coord/src/raft/machine.rs、rill-coord/src/raft/tests.rs、rill-coord/src/store/mod.rs
 - 说明：写操作（register/revoke/set_endpoints/request_paths/rotate_master_key/flush_revoke_rotations）经 client_write → 日志条目 → 按提交顺序 apply；等价性（同命令序列下 raft 路径与直接调用 Coordinator 的持久状态快照相等 + 响应逐字段相等）；重启恢复（状态文件 + 日志，node_id 分配器不回退）；崩溃窗口重放（日志已提交而检查点未落盘 → 重启按 applied 指针恰好一次重放，不重复分配 node_id）；REQ-048 合并轮换窗口经日志语义不变；日志存储边界（无空洞/truncate/purge/空日志回退 purged/vote 持久）；手动快照（CoordState 字节 = 快照数据，meta 覆盖到 applied）。状态 + applied 指针 + membership 同事务原子写（恰好一次 apply）
 
+## CTL-23 Raft 3 副本 failover e2e（REQ-070 阶段二）
+
+- 关联 REQ：REQ-070
+- 测试层：docker e2e
+- 状态：`已覆盖`
+- 证据：e2e/scenarios/ha.sh、e2e/mesh/ha/、e2e/setup.sh
+- 说明：coord 3 副本 raft 集群（node-a→coord1、node-b→coord2，至少一节点初始必连 follower，重定向证据前置；setup.sh 生成 cluster 配置段与多域名证书）。断言：选主收敛（唯一 Leader，raft state 日志尾行）；follower 重定向注册（节点日志 `leader redirect:` ≥1 + 双节点注册完成）；**停 leader 容器窗口 5×双栈 ping 无一丢失**（数据面不经 coord，§4.3/§5.6——节点重连退避分片持续服务 mesh 输入）；存活副本选出新 Leader（term 严格递增）；节点经重定向链幂等重注册（node_id 全程唯一）；旧 leader 重启以 Follower 回归（`state=Follower leader=Some(新主 id)`）；终态 a↔b 双栈通；CI e2e-mesh ha
+- 缺口：节点侧死 coordinator 看门狗（lease 到期主动重连探测）与多 coordinator_url 配置为 docs-silent 待确认项（REQ-070 开放问题 6/7），当前靠既有退避重连 + 重定向链收敛
+
 ## 验收断言
 
 - [x] CTL-01：注册幂等、身份绑定签名可验证
@@ -159,7 +168,7 @@
 - [x] CTL-09：同 coordinator 两网络互不可见、key_dst 互不通用、auth key 归域（SEC-21~25 全覆盖；详见 CTL-09 详细条目与 tests/security/tenancy.md）
 - [x] CTL-10：白名单内公告并入 netmap、白名单外拒绝、过短前缀拒绝、空白名单 fail-closed
 - [x] CTL-11：离线后 routes[] 随可达性撤销（netmap offline 标志 wire 贯通 + 租约超时扫描 + 节点侧路由撤销；详见 CTL-11 详细条目）
-- [ ] CTL-12：主切换幂等重注册、软状态重建（P2）
+- [x] CTL-12：主切换幂等重注册、软状态重建（进程内 3 副本集群 + ha e2e，REQ-070 阶段二）
 - [x] CTL-13：DH 挑战闭环、时间窗口防重放
 - [x] CTL-14：未 opt-in 节点 keydist 不带 broadcast_key（keydist_broadcast_key_opt_in_only）；opt-out 节点本地组播不泛洪（broadcast_opt_out_node_gets_no_key_and_no_flood）；e2e 默认 capabilities=33（relay+broadcast）
 - [x] CTL-15：Path* 消息族 + 候选路径（直连 + relay，幂等）/flow hash 选择/主路径 miss 快速切换/key_path 参与者全量签发/吊销联动撤销/path_id=0 = 默认路径 = key_dst（42B 帧头纳入 route_mac 与 AAD，REQ-066）
@@ -175,3 +184,4 @@
   - 证据：rill-proto/src/lib.rs（heartbeat_telemetry_roundtrip_and_backward_compat）、rill-mesh/src/data/tests.rs（telemetry_* 三测）、rill-mesh/src/control/server_tests.rs、rill-coord/src/coordinator/tests.rs（telemetry_latest_wins_aggregation 等）、e2e/scenarios/status.sh、CI e2e-mesh status（run 33697089991）
   - 证据：rill-mesh/src/control/server.rs（resume_with_valid_key_still_requires_pop / one_time_key_consumed_only_after_pop / resume_caps_mismatch_rejected_after_pop 三单测）、CI e2e-mesh run 33679179273
 - [x] CTL-22：Raft 单机过日志——等价/重启/崩溃重放（恰好一次）/REQ-048 窗口语义/日志边界/手动快照，全部现有测试语义等价通过（458 → 464，rill-coord/src/raft/tests.rs 六测）
+- [x] CTL-23：Raft 3 副本 failover e2e——选主收敛/follower 重定向/停 leader 窗口 5×双栈 ping 无丢失（数据面不中断）/term 递增选新主/重定向链幂等重注册（node_id 唯一）/旧 leader Follower 回归/终态双栈通（e2e/scenarios/ha.sh，全五阶段断言）

@@ -53,10 +53,10 @@ message RegisterResponse {
   fixed32 node_id = 1;          // coordinator 唯一分配
   fixed32 network_id = 2;       // 本网络标识（联邦钩子，v1 恒为本地网络）
   bytes identity_binding = 3;   // coordinator 签名 (node_id || static_pubkey)
-  LeaderRedirect leader_redirect = 4;  // 非主 coordinator 时返回
 }
 
-// §3.6 主重定向（Raft 期）
+// §3.6 主重定向（Raft 期）：follower 对 REGISTER/HEARTBEAT 及写请求以此应答，
+// 节点收到即重连 leader_endpoint（空 = 选主中，退避重试）
 message LeaderRedirect {
   string leader_endpoint = 1;   // 当前主 coordinator 地址
   uint64 raft_term = 2;

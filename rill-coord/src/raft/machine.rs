@@ -107,11 +107,13 @@ impl CoordStateMachine {
                 static_pubkey,
                 capabilities,
                 routes,
+                now,
             } => CoordCommandResult::Register(self.coordinator.register(
                 &auth_key,
                 &static_pubkey,
                 capabilities,
                 routes,
+                now,
             )),
             CoordCommand::Revoke { node_id, now } => {
                 let known = self.coordinator.static_pubkey_of(node_id).is_some();
@@ -122,9 +124,14 @@ impl CoordStateMachine {
                 self.coordinator.set_endpoints(node_id, endpoints);
                 CoordCommandResult::SetEndpoints
             }
-            CoordCommand::RequestPaths { source, dest, max } => {
-                CoordCommandResult::RequestPaths(self.coordinator.request_paths(source, dest, max))
-            }
+            CoordCommand::RequestPaths {
+                source,
+                dest,
+                max,
+                now,
+            } => CoordCommandResult::RequestPaths(
+                self.coordinator.request_paths(source, dest, max, now),
+            ),
             CoordCommand::RotateMasterKey {
                 network,
                 new_master_key,
@@ -195,6 +202,11 @@ impl CoordStateMachine {
         self.current_snapshot
             .as_ref()
             .and_then(|s| s.meta.last_log_id)
+    }
+
+    /// raft 应用指针（收敛性断言用）
+    pub fn last_applied(&self) -> Option<openraft::LogId<u64>> {
+        self.last_applied
     }
 
     /// 当前快照数据字节（CoordState 序列化，测试断言用）

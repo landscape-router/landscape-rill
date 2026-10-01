@@ -37,7 +37,9 @@ fn register_node(c: &mut Coordinator, ak: &str, seed: u8) -> u32 {
 }
 
 fn register_node_caps(c: &mut Coordinator, ak: &str, seed: u8, caps: u32) -> u32 {
-    c.register(ak, &pubkey(seed), caps, vec![]).unwrap().node_id
+    c.register(ak, &pubkey(seed), caps, vec![], 0)
+        .unwrap()
+        .node_id
 }
 
 #[test]
@@ -61,7 +63,7 @@ fn register_idempotent_no_version_bump() {
     register_node(&mut c, &ak, 1);
     let v1 = c.netmap_version();
     assert_eq!(v1, v0 + 1);
-    let out = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap();
+    let out = c.register(&ak, &pubkey(1), 0x01, vec![], 0).unwrap();
     assert_eq!(out.node_id, 1);
     assert_eq!(c.netmap_version(), v1);
 }
@@ -69,10 +71,19 @@ fn register_idempotent_no_version_bump() {
 #[test]
 fn relay_list_follows_registration() {
     let (mut c, ak) = setup();
-    let relay = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap().node_id;
-    let src = c.register(&ak, &pubkey(2), 0x00, vec![]).unwrap().node_id;
-    let dst = c.register(&ak, &pubkey(3), 0x00, vec![]).unwrap().node_id;
-    let cands = c.request_paths(src, dst, 4);
+    let relay = c
+        .register(&ak, &pubkey(1), 0x01, vec![], 0)
+        .unwrap()
+        .node_id;
+    let src = c
+        .register(&ak, &pubkey(2), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let dst = c
+        .register(&ak, &pubkey(3), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let cands = c.request_paths(src, dst, 4, 1_000);
     assert!(cands.iter().any(|(p, _)| p.hops == vec![relay, dst]));
     assert_eq!(cands.len(), 2); // direct + relay
 }
@@ -156,7 +167,10 @@ fn revoke_rotation_window_survives_restore() {
     {
         let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
         c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
-        let a = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap().node_id;
+        let a = c
+            .register(&ak, &pubkey(1), 0x01, vec![], 0)
+            .unwrap()
+            .node_id;
         c.revoke(a, 100);
         drop(c);
     }
@@ -201,11 +215,11 @@ fn offline_sweep_withdraws_routes_and_restores() {
     let (mut c, ak) = setup();
     c.set_announce_whitelist("lab", vec![Prefix::parse("10.0.0.0/8").unwrap()]);
     let a = c
-        .register(&ak, &pubkey(1), 0x01, vec!["10.60.0.0/24".into()])
+        .register(&ak, &pubkey(1), 0x01, vec!["10.60.0.0/24".into()], 0)
         .unwrap()
         .node_id;
     let b = c
-        .register(&ak, &pubkey(2), 0x01, vec!["10.61.0.0/24".into()])
+        .register(&ak, &pubkey(2), 0x01, vec!["10.61.0.0/24".into()], 0)
         .unwrap()
         .node_id;
     let nid = c.network_id_of(a).unwrap();
@@ -241,6 +255,44 @@ fn offline_sweep_withdraws_routes_and_restores() {
     assert_eq!(a_entry.routes, vec!["10.60.0.0/24".to_string()]);
 }
 
+/// REQ-070 阶段二：接管重置活性软状态——陈旧 last_seen（旧主时代的本地快照，
+/// 未随 raft 日志复制）不会把在线节点立即扫成离线；接管后静默超过一个租约
+/// 窗口仍会被 sweep 正常判离线
+#[test]
+fn takeover_reset_liveness_avoids_stale_offline_sweep() {
+    let (mut c, ak) = setup();
+    let a = c
+        .register(&ak, &pubkey(1), 0x01, vec![], 0)
+        .unwrap()
+        .node_id;
+    let b = c
+        .register(&ak, &pubkey(2), 0x01, vec![], 0)
+        .unwrap()
+        .node_id;
+    let nid = c.network_id_of(a).unwrap();
+    // 旧主时代心跳只落在旧主本地（t=100 后未再复制到日志）
+    c.heartbeat(a, 100);
+    c.heartbeat(b, 100);
+    // 新主接管（t=1000）→ 全员新租约 + netmap 版本递增
+    let v = c.netmap_version();
+    c.reset_liveness_on_takeover(1000);
+    assert!(c.netmap_version() > v, "接管重置递增 netmap 版本");
+    // b 先完成重注册（t=1004）：若沿用陈旧快照，a 会被立即扫成离线
+    c.heartbeat(b, 1004);
+    assert!(
+        c.netmap_snapshot(nid).iter().all(|e| !e.offline),
+        "接管租约窗口内不误判离线"
+    );
+    // 接管后静默超过租约窗口 → sweep 恢复正常判离线
+    c.heartbeat(b, 1000 + LEASE_EXPIRY_SECS + 1);
+    let a_entry = c
+        .netmap_snapshot(nid)
+        .into_iter()
+        .find(|e| e.node_id == a)
+        .unwrap();
+    assert!(a_entry.offline, "接管租约耗尽后仍会被判离线");
+}
+
 #[test]
 fn endpoints_enter_netmap() {
     let (mut c, ak) = setup();
@@ -272,6 +324,7 @@ fn announce_routes_enter_netmap_and_whitelist_gates() {
             &pubkey(1),
             0x01,
             vec!["10.42.0.0/24".into(), "fd00:2::/64".into()],
+            0,
         )
         .unwrap()
         .node_id;
@@ -286,16 +339,17 @@ fn announce_routes_enter_netmap_and_whitelist_gates() {
         &pubkey(2),
         0x01,
         vec!["10.42.0.0/24".into(), "172.16.0.0/12".into()],
+        0,
     );
     assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
     // 过短前缀（IPv4 < /8）→ 拒绝
-    let err = c.register(&ak, &pubkey(3), 0x01, vec!["10.0.0.0/7".into()]);
+    let err = c.register(&ak, &pubkey(3), 0x01, vec!["10.0.0.0/7".into()], 0);
     assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
     // 空白名单 = fail-closed（拒绝一切公告）
     let mut c2 = Coordinator::new([0x5a; 32]);
     c2.add_network("lab", [0x77; 32]);
     c2.add_auth_key(&ak, AuthKeyPolicy::Reusable);
-    let err = c2.register(&ak, &pubkey(4), 0x01, vec!["10.42.0.0/24".into()]);
+    let err = c2.register(&ak, &pubkey(4), 0x01, vec!["10.42.0.0/24".into()], 0);
     assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
 }
 
@@ -304,7 +358,10 @@ fn announce_routes_enter_netmap_and_whitelist_gates() {
 fn capability_acl_bit_reserved_v1() {
     let (mut c, ak) = setup();
     // 保留位 0x40（acl）：策略未启用时 coordinator 不解释、netmap 原样带出
-    let id = c.register(&ak, &pubkey(7), 0x40, vec![]).unwrap().node_id;
+    let id = c
+        .register(&ak, &pubkey(7), 0x40, vec![], 0)
+        .unwrap()
+        .node_id;
     let snap = c.netmap_snapshot(c.network_id_of(id).unwrap());
     assert_eq!(
         snap.iter().find(|n| n.node_id == id).unwrap().capabilities & 0x40,
@@ -336,14 +393,17 @@ fn acl_enabled_register_without_bit_rejected() {
     let (mut c, ak) = setup();
     c.set_acl_policy("lab", lab_policy());
     // 不带 0x40 → 拒绝
-    let err = c.register(&ak, &pubkey(8), 0x01, vec![]).unwrap_err();
+    let err = c.register(&ak, &pubkey(8), 0x01, vec![], 0).unwrap_err();
     assert_eq!(err, RegisterError::AclCapabilityRequired);
     // 带 0x40 → 放行（线格式装配断言在 rill-mesh server_tests）
-    let id = c.register(&ak, &pubkey(8), 0x41, vec![]).unwrap().node_id;
+    let id = c
+        .register(&ak, &pubkey(8), 0x41, vec![], 0)
+        .unwrap()
+        .node_id;
     // 幂等重注册同受约束（能力位是注册字段）
-    let again = c.register(&ak, &pubkey(8), 0x41, vec![]);
+    let again = c.register(&ak, &pubkey(8), 0x41, vec![], 0);
     assert_eq!(again.unwrap().node_id, id);
-    let err = c.register(&ak, &pubkey(8), 0x01, vec![]).unwrap_err();
+    let err = c.register(&ak, &pubkey(8), 0x01, vec![], 0).unwrap_err();
     assert_eq!(err, RegisterError::AclCapabilityRequired);
 }
 
@@ -351,7 +411,10 @@ fn acl_enabled_register_without_bit_rejected() {
 #[test]
 fn acl_policy_change_bumps_netmap_version() {
     let (mut c, ak) = setup();
-    let id = c.register(&ak, &pubkey(9), 0x41, vec![]).unwrap().node_id;
+    let id = c
+        .register(&ak, &pubkey(9), 0x41, vec![], 0)
+        .unwrap()
+        .node_id;
     let network_id = c.network_id_of(id).unwrap();
     let v0 = c.netmap_version();
 
@@ -393,17 +456,17 @@ fn netmap_isolated_per_network() {
 fn auth_key_scoped_to_network() {
     let (mut c, ak_a, _ak_b) = two_networks();
     // 网络不存在（key 内嵌未配置网络）→ 拒绝
-    let err = c.register(&lrk("ghost", 86_400), &pubkey(9), 0x00, vec![]);
+    let err = c.register(&lrk("ghost", 86_400), &pubkey(9), 0x00, vec![], 0);
     assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
     // A 网 key 只能注册进 A 网（返回 A 的 network_id）
-    let id = c.register(&ak_a, &pubkey(1), 0x00, vec![]).unwrap();
+    let id = c.register(&ak_a, &pubkey(1), 0x00, vec![], 0).unwrap();
     assert_eq!(id.network_id, network_id_for("lab"));
     // 同 key 幂等：仍是 A 网
-    let again = c.register(&ak_a, &pubkey(1), 0x00, vec![]).unwrap();
+    let again = c.register(&ak_a, &pubkey(1), 0x00, vec![], 0).unwrap();
     assert_eq!(again.node_id, id.node_id);
     assert_eq!(again.network_id, network_id_for("lab"));
     // A 网 key 重复注册（不同 pubkey）进 B 网表不存在 → 仍是 A 网新节点
-    let a2 = c.register(&ak_a, &pubkey(2), 0x00, vec![]).unwrap();
+    let a2 = c.register(&ak_a, &pubkey(2), 0x00, vec![], 0).unwrap();
     assert_eq!(a2.network_id, network_id_for("lab"));
 }
 
@@ -455,13 +518,13 @@ fn whitelist_isolated_per_network() {
     c.set_announce_whitelist("lab", vec![Prefix::parse("10.0.0.0/8").unwrap()]);
     c.set_announce_whitelist("work", vec![Prefix::parse("192.168.0.0/16").unwrap()]);
     // A 网：白名单外前缀拒绝
-    let err = c.register(&ak_a, &pubkey(1), 0x00, vec!["192.168.1.0/24".into()]);
+    let err = c.register(&ak_a, &pubkey(1), 0x00, vec!["192.168.1.0/24".into()], 0);
     assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
     // B 网：其白名单内的 192.168.1.0/24 正常接受（分域证明）
-    let b1 = c.register(&ak_b, &pubkey(2), 0x00, vec!["192.168.1.0/24".into()]);
+    let b1 = c.register(&ak_b, &pubkey(2), 0x00, vec!["192.168.1.0/24".into()], 0);
     assert!(b1.is_ok());
     // A 网节点无法公告 B 网白名单前缀（其白名单无此覆盖）
-    let err = c.register(&ak_a, &pubkey(3), 0x00, vec!["192.168.2.0/24".into()]);
+    let err = c.register(&ak_a, &pubkey(3), 0x00, vec!["192.168.2.0/24".into()], 0);
     assert!(matches!(err, Err(RegisterError::RouteNotAllowed)));
 }
 
@@ -471,10 +534,10 @@ fn cross_network_path_request_rejected() {
     let (mut c, ak_a, ak_b) = two_networks();
     let a1 = register_node(&mut c, &ak_a, 1);
     let b1 = register_node(&mut c, &ak_b, 2);
-    assert!(c.request_paths(a1, b1, 4).is_empty());
+    assert!(c.request_paths(a1, b1, 4, 1_000).is_empty());
     // 同网正常
     let a2 = register_node(&mut c, &ak_a, 3);
-    assert!(!c.request_paths(a1, a2, 4).is_empty());
+    assert!(!c.request_paths(a1, a2, 4, 1_000).is_empty());
 }
 
 /// 每网络独立 relay 集合：A 网 relay 不进 B 网路径候选
@@ -488,16 +551,31 @@ fn relays_isolated_per_network() {
     c.add_auth_key(&ak_a, AuthKeyPolicy::Reusable);
     c.add_auth_key(&ak_b, AuthKeyPolicy::Reusable);
     // A 网 relay（capabilities 0x01）注册
-    let r = c.register(&ak_a, &pubkey(1), 0x01, vec![]).unwrap().node_id;
-    let a1 = c.register(&ak_a, &pubkey(2), 0x00, vec![]).unwrap().node_id;
-    let a2 = c.register(&ak_a, &pubkey(3), 0x00, vec![]).unwrap().node_id;
-    let b1 = c.register(&ak_b, &pubkey(4), 0x00, vec![]).unwrap().node_id;
-    let b2 = c.register(&ak_b, &pubkey(5), 0x00, vec![]).unwrap().node_id;
+    let r = c
+        .register(&ak_a, &pubkey(1), 0x01, vec![], 0)
+        .unwrap()
+        .node_id;
+    let a1 = c
+        .register(&ak_a, &pubkey(2), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let a2 = c
+        .register(&ak_a, &pubkey(3), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let b1 = c
+        .register(&ak_b, &pubkey(4), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let b2 = c
+        .register(&ak_b, &pubkey(5), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
     // A 网路径含 A relay
-    let cands_a = c.request_paths(a1, a2, 4);
+    let cands_a = c.request_paths(a1, a2, 4, 1_000);
     assert!(cands_a.iter().any(|(p, _)| p.hops == vec![r, a2]));
     // B 网路径不含 A relay（relay 集合按网络独立）
-    let cands_b = c.request_paths(b1, b2, 4);
+    let cands_b = c.request_paths(b1, b2, 4, 1_000);
     assert!(cands_b.iter().all(|(p, _)| !p.hops.contains(&r)));
     assert_eq!(cands_b.len(), 1); // 仅 direct（B 无 relay）
 }
@@ -507,8 +585,8 @@ fn relays_isolated_per_network() {
 #[test]
 fn binding_not_verifiable_across_networks() {
     let (mut c, ak_a, ak_b) = two_networks();
-    let a1 = c.register(&ak_a, &pubkey(1), 0x00, vec![]).unwrap();
-    let b1 = c.register(&ak_b, &pubkey(2), 0x00, vec![]).unwrap();
+    let a1 = c.register(&ak_a, &pubkey(1), 0x00, vec![], 0).unwrap();
+    let b1 = c.register(&ak_b, &pubkey(2), 0x00, vec![], 0).unwrap();
     let verifier = c.verifier();
     // 各自绑定对各自节点有效（绑定消息构造 sanity：node_id || static_pubkey）
     let _binding = landscape_rill_core::control::registry::binding_message(a1.node_id, &pubkey(1));
@@ -558,14 +636,14 @@ fn expired_key_rejected_at_admission() {
     c.add_network("lab", [0x77; 32]);
     c.add_auth_key(&expired, AuthKeyPolicy::Reusable);
     assert!(c.has_auth_key(&expired)); // 过期 key 可配置（inert），admission 时拒绝
-    let err = c.register(&expired, &pubkey(1), 0x00, vec![]);
+    let err = c.register(&expired, &pubkey(1), 0x00, vec![], now);
     assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
     // 非 lrk 格式 → fail-closed 拒绝
     let mut c = Coordinator::new([0x5a; 32]);
     c.add_network("lab", [0x77; 32]);
     c.add_auth_key("opaque-key", AuthKeyPolicy::Reusable);
     assert!(!c.has_auth_key("opaque-key"));
-    let err = c.register("opaque-key", &pubkey(1), 0x00, vec![]);
+    let err = c.register("opaque-key", &pubkey(1), 0x00, vec![], 0);
     assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
 }
 
@@ -590,10 +668,16 @@ fn persist_roundtrip_restores_full_state() {
     let path = tmp_db("roundtrip");
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
     c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
-    let a = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap().node_id;
+    let a = c
+        .register(&ak, &pubkey(1), 0x01, vec![], 0)
+        .unwrap()
+        .node_id;
     c.set_endpoints(a, vec!["203.0.113.1:41641".into()]);
-    let b = c.register(&ak, &pubkey(2), 0x00, vec![]).unwrap().node_id;
-    c.request_paths(a, b, 4);
+    let b = c
+        .register(&ak, &pubkey(2), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    c.request_paths(a, b, 4, 1_000);
     drop(c);
 
     let c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
@@ -621,14 +705,14 @@ fn one_time_consumption_survives_restart() {
     let path = tmp_db("onetime");
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
     c.add_auth_key(&ak, AuthKeyPolicy::OneTime);
-    c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap();
+    c.register(&ak, &pubkey(1), 0x00, vec![], 0).unwrap();
     assert!(!c.has_auth_key(&ak));
     drop(c);
 
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
     assert!(!c.has_auth_key(&ak), "一次性 key 消费必须持久化");
     // 同 key 二次注册被拒（未知公钥 + 无有效 key）
-    let err = c.register(&ak, &pubkey(2), 0x00, vec![]);
+    let err = c.register(&ak, &pubkey(2), 0x00, vec![], 0);
     assert!(matches!(err, Err(RegisterError::InvalidAuthKey)));
     drop(c);
     let _ = std::fs::remove_file(&path);
@@ -642,7 +726,7 @@ fn consumed_key_not_revived_by_reload() {
     let path = tmp_db("reload");
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
     c.add_auth_key(&ak, AuthKeyPolicy::OneTime);
-    c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap();
+    c.register(&ak, &pubkey(1), 0x00, vec![], 0).unwrap();
     drop(c);
 
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
@@ -659,23 +743,32 @@ fn node_and_path_ids_monotonic_across_restart() {
     let path = tmp_db("ids");
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
     c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
-    let a = c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap().node_id;
-    let b = c.register(&ak, &pubkey(2), 0x00, vec![]).unwrap().node_id;
-    let paths = c.request_paths(a, b, 4);
+    let a = c
+        .register(&ak, &pubkey(1), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let b = c
+        .register(&ak, &pubkey(2), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
+    let paths = c.request_paths(a, b, 4, 1_000);
     drop(c);
 
     // 重启后新节点不重用 node_id；新路径不重用 path_id
     // （auth key 为配置权威，重启后须重新 apply——模拟 from_config 的 apply_to）
     let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
     c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
-    let d = c.register(&ak, &pubkey(3), 0x00, vec![]).unwrap().node_id;
+    let d = c
+        .register(&ak, &pubkey(3), 0x00, vec![], 0)
+        .unwrap()
+        .node_id;
     assert_eq!(d, 3);
-    let paths2 = c.request_paths(a, d, 4);
+    let paths2 = c.request_paths(a, d, 4, 1_000);
     for (p, _) in &paths2 {
         assert!(!paths.iter().any(|(q, _)| q.path_id == p.path_id));
     }
     // 幂等命中保留原 path_id（参与者间不分叉）
-    let paths3 = c.request_paths(a, b, 4);
+    let paths3 = c.request_paths(a, b, 4, 1_000);
     assert_eq!(paths3.len(), paths.len());
     assert!(paths3
         .iter()
@@ -706,7 +799,7 @@ fn inconsistent_state_fails_closed() {
     {
         let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
         c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
-        c.register(&ak, &pubkey(1), 0x00, vec![]).unwrap();
+        c.register(&ak, &pubkey(1), 0x00, vec![], 0).unwrap();
         drop(c);
     }
     // 篡改快照：把 next_node_id 改回 1（与已注册 node 1 冲突）
@@ -729,8 +822,8 @@ fn persist_roundtrip_two_networks() {
         let mut c = Coordinator::open(&path, &two_networks_arg(), [0x5a; 32]).unwrap();
         c.add_auth_key(&ak_a, AuthKeyPolicy::Reusable);
         c.add_auth_key(&ak_b, AuthKeyPolicy::Reusable);
-        let a1 = c.register(&ak_a, &pubkey(1), 0x00, vec![]).unwrap();
-        let b1 = c.register(&ak_b, &pubkey(2), 0x00, vec![]).unwrap();
+        let a1 = c.register(&ak_a, &pubkey(1), 0x00, vec![], 0).unwrap();
+        let b1 = c.register(&ak_b, &pubkey(2), 0x00, vec![], 0).unwrap();
         c.rotate_master_key("lab", [0x99; 32]);
         drop(a1);
         drop(b1);

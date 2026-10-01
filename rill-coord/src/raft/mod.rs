@@ -1,21 +1,24 @@
-//! Raft 复制层（REQ-070 阶段一）
+//! Raft 复制层（REQ-070）
 //!
-//! openraft 0.9 单机集群：全部持久写操作过共识日志（apply 顺序 = 提交顺序），
+//! openraft 0.9：全部持久写操作过共识日志（apply 顺序 = 提交顺序），
 //! Coordinator 仍是 I/O-free 核心，本层只做 adapter：
 //! - [log_store]：Raft 日志/vote 落 redb（独立文件）
 //! - [machine]：RaftStateMachine 适配器，apply 分派到 Coordinator 既有方法；
 //!   状态快照 + raft 应用指针在状态文件同事务原子写（恰好一次 apply 语义）
-//! - [network]：单机占位网络层（阶段二替换为 inter-coord mTLS RPC）
+//! - [backend]：Single/Cluster 写路径门面（server/管理面统一入口，
+//!   领导权视图驱动 LeaderRedirect，CONTROL_PLANE §3.6）
+//! - [network]：单机/测试占位网络层（集群形态 = rill-mesh::control::raft_rpc mTLS）
 //!
-//! 边界（阶段一）：
+//! 边界：
 //! - 配置面（auth key/白名单/ACL/relay list/网络集合）仍走配置文件 + SIGHUP，
-//!   不过日志——配置权威不复制（REQ-038/040）
+//!   不过日志——配置权威不复制（REQ-038/040）；集群部署要求各副本 signing_seed/
+//!   networks 配置一致（身份绑定验签一致性）
 //! - 软状态（liveness/telemetry/echo/path 事件缓存）replica 本地，不过日志
-//! - register/request_paths 内部取墙钟（auth key 过期判定/PathSet TTL），
-//!   跨副本确定性留待阶段二线程化 now 参数；单机重放按同秒粒度收敛（测试归一化比较）
+//! - 写命令 now 显式线程化（auth key 过期判定/PathSet TTL 的确定性重放）
 //!
-//! 版本：v0.1（2026-09-30）
+//! 版本：v0.2（2026-10-01）
 
+pub mod backend;
 pub mod log_store;
 pub mod machine;
 pub mod network;
@@ -36,8 +39,9 @@ use openraft::TokioRuntime;
 use openraft::{RaftTypeConfig, StorageError};
 use serde::{Deserialize, Serialize};
 
-/// coord 集群 TypeConfig：NodeId = 部署静态成员 id；快照数据 = CoordState 序列化字节
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd)]
+/// coord 集群 TypeConfig：NodeId = 部署静态成员 id；快照数据 = CoordState 序列化字节。
+/// serde 派生满足 openraft 泛型线格式的 C: Serialize/Deserialize 边界（inter-coord RPC）
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct TypeConfig;
 
 impl RaftTypeConfig for TypeConfig {
@@ -59,6 +63,7 @@ pub enum CoordCommand {
         static_pubkey: [u8; 32],
         capabilities: u32,
         routes: Vec<String>,
+        now: u64,
     },
     Revoke {
         node_id: u32,
@@ -72,6 +77,7 @@ pub enum CoordCommand {
         source: u32,
         dest: u32,
         max: u32,
+        now: u64,
     },
     RotateMasterKey {
         network: String,

@@ -68,6 +68,17 @@ pub async fn read_envelope<R: AsyncReadExt + Unpin>(
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad envelope"))
 }
 
+/// 缓冲式读信封（取消安全，framing::read_frame_buf）：字节落在持久缓冲，
+/// select! 取消在途读 future 不丢进度——节点 run loop 多路分派专用
+pub async fn read_envelope_buf<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut bytes::BytesMut,
+) -> std::io::Result<(MsgType, Vec<u8>)> {
+    let body = framing::read_frame_buf(reader, buf).await?;
+    parse_envelope(&body)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad envelope"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

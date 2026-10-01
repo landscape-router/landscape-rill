@@ -1,0 +1,81 @@
+# mesh e2e ha 场景：coordinator 3 副本 raft 集群（REQ-070 阶段二，CONTROL_PLANE §3.6）
+# coord1/2/3 同 bridge 网（服务名 DNS 互解 raft RPC；mTLS 见 setup.sh cluster 段）
+# node-a → coord1、node-b → coord2：至少一节点初始必连 follower（重定向证据）
+# 场景：选主收敛 → 重定向注册 → 停 leader 容器（failover，数据面不断）→
+#       节点重定向链重注册（node_id 不变）→ 旧 leader 重启回集群（Follower 回归）
+services:
+  coord1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord1
+    volumes:
+      - ../../build/coord1.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  coord2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord2
+    volumes:
+      - ../../build/coord2.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.13
+
+  coord3:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord3
+    volumes:
+      - ../../build/coord3.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.16
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24

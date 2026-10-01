@@ -1,6 +1,6 @@
 //! 控制面客户端（runtime 驱动：注册 → 事件循环；断线由调用方重连）
 
-use crate::control::codec::{envelope_bytes, read_envelope};
+use crate::control::codec::{envelope_bytes, read_envelope_buf};
 use crate::control::tls::client_tls_stream;
 use crate::control::{BoxResult, PROTOCOL_VERSION};
 use crate::framing;
@@ -241,6 +241,12 @@ pub enum ControlEvent {
         destination_node_id: u32,
         path_id: u64,
     },
+    /// 主重定向（§3.6，Raft 期）：follower 应答；节点重连 leader_endpoint
+    /// （空端点 = 选主中，退避重试原地址）
+    LeaderRedirect {
+        leader_endpoint: String,
+        raft_term: u64,
+    },
 }
 
 /// 路径候选（control 层消息载体 → runtime 注入 MeshData）
@@ -256,6 +262,9 @@ pub struct PathCandidateMsg {
 pub struct ControlSession {
     client: MeshClient,
     stream: TlsStream<TcpStream>,
+    /// 持久接收缓冲：run loop select! 会取消在途 read_event future，
+    /// 部分进度留在缓冲里续读（framing::read_frame_buf，取消安全）
+    rbuf: bytes::BytesMut,
 }
 
 impl ControlSession {
@@ -273,7 +282,11 @@ impl ControlSession {
             Some(node_id) => MeshClient::with_node_id(config.static_key, node_id),
             None => MeshClient::new(config.static_key),
         };
-        let mut session = Self { client, stream };
+        let mut session = Self {
+            client,
+            stream,
+            rbuf: bytes::BytesMut::with_capacity(4096),
+        };
         session
             .send_envelope(&session.client.register_request(config))
             .await?;
@@ -304,9 +317,10 @@ impl ControlSession {
         envelope_bytes(MsgType::ENDPOINT_REPORT, &msg)
     }
 
-    /// 读取一个控制面事件（阻塞读；io 错误 = 断线，调用方重连）
+    /// 读取一个控制面事件（阻塞读；io 错误 = 断线，调用方重连）。
+    /// 取消安全（缓冲续读）：调用方 run loop 的 select! 随时丢弃在途 future
     pub async fn read_event(&mut self) -> std::io::Result<ControlEvent> {
-        let (msg_type, body) = read_envelope(&mut self.stream).await?;
+        let (msg_type, body) = read_envelope_buf(&mut self.stream, &mut self.rbuf).await?;
         match msg_type {
             MsgType::REGISTER_RESPONSE => {
                 let resp = RegisterResponseOwned::try_from(body).map_err(decoding_err)?;
@@ -434,6 +448,14 @@ impl ControlSession {
                     std::io::ErrorKind::InvalidData,
                     "unexpected path probe on control connection",
                 ))
+            }
+            MsgType::LEADER_REDIRECT => {
+                let mut reader = BytesReader::from_bytes(&body);
+                let r = LeaderRedirect::from_reader(&mut reader, &body).map_err(decoding_err)?;
+                Ok(ControlEvent::LeaderRedirect {
+                    leader_endpoint: r.leader_endpoint.into_owned(),
+                    raft_term: r.raft_term,
+                })
             }
             other => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

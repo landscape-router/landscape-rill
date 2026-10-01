@@ -23,7 +23,13 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
     let cert = std::fs::read(&config.tls_cert_path)?;
     let key = std::fs::read(&config.tls_key_path)?;
     let listener = TcpListener::bind(config.listen_addr.parse::<SocketAddr>()?).await?;
-    let mut server = CoordinatorServer::from_config(&config)?;
+    // 集群形态（REQ-070 阶段二）：写经 raft 提案、副本间 mTLS RPC 随构造拉起；
+    // follower 同样服务（注册/心跳回 LeaderRedirect，§3.6）
+    let mut server = if config.cluster.is_some() {
+        CoordinatorServer::from_config_cluster(&config).await?
+    } else {
+        CoordinatorServer::from_config(&config)?
+    };
     // e2e 故障注入（REQ-057，仅 e2e recover 场景）：丢弃首个 REGISTER_RESPONSE
     if std::env::var("RILL_E2E_DROP_FIRST_REGISTER_RESPONSE").is_ok_and(|v| v == "1") {
         server.arm_drop_first_register_response();
@@ -58,13 +64,16 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
     let status_state = match &config.status {
         Some(status_cfg) => {
             let hash = PasswordHash::parse(&status_cfg.password_hash)?;
-            let state = Arc::new(StatusState::new(
-                server.clone(),
-                config.listen_addr.clone(),
-                status_cfg.listen_addr.clone(),
-                config.storage_path.clone(),
-                hash,
-            ));
+            let state = Arc::new(
+                StatusState::new(
+                    server.clone(),
+                    config.listen_addr.clone(),
+                    status_cfg.listen_addr.clone(),
+                    config.storage_path.clone(),
+                    hash,
+                )
+                .await,
+            );
             spawn_status_server(status_cfg, cert.clone(), key.clone(), state.clone()).await?;
             Some(state)
         }
@@ -255,15 +264,13 @@ async fn run_coord_udp(
                         let mut nodes: Vec<(u32, u64)> =
                             node_best.into_iter().collect();
                         nodes.sort_by_key(|(_, r)| *r);
-                        let mut guard = server.lock().await;
-                        guard.coordinator.set_relay_list(
-                            name,
-                            eps.iter().map(|(e, _)| e.clone()).collect(),
-                        );
-                        guard.coordinator.set_relay_order(
-                            name,
-                            nodes.iter().map(|(n, _)| *n).collect(),
-                        );
+                        let guard = server.lock().await;
+                        guard.coordinator.with_coord_mut(|c| {
+                            c.set_relay_list(name, eps.iter().map(|(e, _)| e.clone()).collect())
+                        });
+                        guard.coordinator.with_coord_mut(|c| {
+                            c.set_relay_order(name, nodes.iter().map(|(n, _)| *n).collect())
+                        });
                         info!(
                             "[coord] relay rtt (net={}): {}",
                             name,
@@ -283,7 +290,7 @@ async fn run_coord_udp(
                             .lock()
                             .await
                             .coordinator
-                            .relay_probe_targets(*net_id);
+                            .with_coord(|c| c.relay_probe_targets(*net_id));
                         for (node, eps) in targets {
                             for ep in eps {
                                 let Ok(addr) = ep.parse::<SocketAddr>() else { continue };

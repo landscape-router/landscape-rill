@@ -29,6 +29,9 @@
 #   mtu   ：MTU 策略（ROUTE_ENGINE §6，RTE-07）——direct 拓扑 + 底网 MTU 1400（tun
 #           配置 1420 > 保守值 1394）：MSS clamp 双向（协商 mss:1354）、DF 超限 →
 #           伪造 PTB v4/v6（next-hop mtu 1314 = 1400−86）、PTB 后会话不受扰
+#   ha    ：coord 3 副本 raft 集群（REQ-070 阶段二，CONTROL_PLANE §3.6）——follower
+#           重定向注册 → 停 leader 容器（数据面 ping 不断 + 新 leader 更高 term）→
+#           节点重定向链幂等重注册（node_id 不变）→ 旧 leader 重启以 Follower 回归
 # 环境变量 MESH_E2E_TRANSPORT（默认 udp，REQ-054）：=tcp 时数据面走真 TCP 兜底档
 #（帧字节与 UDP 一致，仅外覆 2B 长度前缀）——建议与 direct 场景组合验证。
 set -euo pipefail

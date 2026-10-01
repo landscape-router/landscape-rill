@@ -40,7 +40,7 @@ async fn register_over_tls_loopback() {
         let mut server = CoordinatorServer::new(master, seed);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::OneTime));
         server.handle_connection(&mut tls).await.unwrap();
     });
 
@@ -274,7 +274,7 @@ async fn heartbeat_overspeed_ignored() {
         let mut server = CoordinatorServer::new(master, seed);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::Reusable));
         let _ = server.handle_connection(&mut tls).await;
     });
     let host = addr.ip().to_string();
@@ -324,10 +324,10 @@ async fn register_ack_loss_challenge_recovery() {
     let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
     let ak_server = ak_loop.clone();
     let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
-        let mut server = CoordinatorServer::new(master, seed);
+        let server = CoordinatorServer::new(master, seed);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::OneTime));
         server
     }));
     let cert_key = cert;
@@ -404,10 +404,10 @@ async fn register_ack_loss_challenge_bad_tag_rejected() {
     let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
     let ak_server = ak_loop.clone();
     let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
-        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        let server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::OneTime));
         server
     }));
     let server = tokio::spawn(async move {
@@ -475,10 +475,10 @@ async fn register_consumed_key_different_pubkey_rejected() {
     let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
     let ak_server = ak_loop.clone();
     let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
-        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        let server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::OneTime));
         server
     }));
     let server = tokio::spawn(async move {
@@ -547,10 +547,10 @@ async fn register_resume_with_valid_key_still_requires_pop() {
     let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
     let ak_server = ak_loop.clone();
     let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
-        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        let server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::Reusable));
         server
     }));
     let coord_check = coordinator.clone();
@@ -626,7 +626,8 @@ async fn register_resume_with_valid_key_still_requires_pop() {
     // 身份与凭据无扰动
     let srv = coord_check.lock().await;
     assert_eq!(
-        srv.coordinator.node_id_by_pubkey(&victim_pubkey),
+        srv.coordinator
+            .with_coord(|c| c.node_id_by_pubkey(&victim_pubkey)),
         Some(1),
         "受害者身份未被夺取或漂移"
     );
@@ -643,10 +644,10 @@ async fn register_one_time_key_consumed_only_after_pop() {
     let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
     let ak_server = ak_loop.clone();
     let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
-        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        let server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::OneTime);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::OneTime));
         server
     }));
     let server = tokio::spawn(async move {
@@ -709,10 +710,10 @@ async fn register_resume_caps_mismatch_rejected_after_pop() {
     let ak_loop = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
     let ak_server = ak_loop.clone();
     let coordinator = std::sync::Arc::new(tokio::sync::Mutex::new({
-        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        let server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::Reusable));
         server
     }));
     let server = tokio::spawn(async move {
@@ -851,12 +852,17 @@ async fn heartbeat_telemetry_stored() {
         let mut server = CoordinatorServer::new(master, seed);
         server
             .coordinator
-            .add_auth_key(&ak_server, AuthKeyPolicy::Reusable);
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::Reusable));
         let _ = server.handle_connection(&mut tls).await;
         // 客户端断连后验证入库
-        let all = server.coordinator.telemetry_all();
+        let all = server.coordinator.with_coord(|c| {
+            c.telemetry_all()
+                .iter()
+                .map(|(id, t)| (*id, (*t).clone()))
+                .collect::<Vec<_>>()
+        });
         assert_eq!(all.len(), 1);
-        let t = all[0].1;
+        let t = &all[0].1;
         assert_eq!(t.peers.len(), 1);
         assert_eq!(t.peers[0].tx_frames, 5);
         assert_eq!(t.peers[0].tx_bytes, 500);

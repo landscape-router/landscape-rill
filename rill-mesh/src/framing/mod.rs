@@ -1,3 +1,4 @@
+use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAX_MESSAGE_LEN: u32 = 1 << 20;
@@ -18,6 +19,41 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>,
     let mut body = vec![0u8; len as usize];
     reader.read_exact(&mut body).await?;
     Ok(body)
+}
+
+/// 缓冲式收帧（CONTROL_PLANE §3 帧格式不变；取消安全变体）。
+/// read_exact 的部分进度随 future 一起被丢弃——调用方 run loop 的 select!
+/// 随时取消在途读 future，字节一旦从流中读出即丢失 → 流位置错位 → 后续
+/// 把帧体当长度前缀读（"message too long"）。此变体把字节直接追进调用方
+/// 持久缓冲（read_buf），取消后下次调用从缓冲续读，零丢失
+pub async fn read_frame_buf<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut BytesMut,
+) -> Result<Vec<u8>, std::io::Error> {
+    loop {
+        if buf.len() >= 4 {
+            let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            if len > MAX_MESSAGE_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    FrameError::TooLong,
+                ));
+            }
+            let total = 4 + len as usize;
+            if buf.len() >= total {
+                let body = buf[4..total].to_vec();
+                buf.advance(total);
+                return Ok(body);
+            }
+        }
+        let n = reader.read_buf(buf).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "frame truncated",
+            ));
+        }
+    }
 }
 
 pub async fn write_frame<W: AsyncWrite + Unpin>(
@@ -47,6 +83,7 @@ pub async fn write_declared_len<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::io::duplex;
 
     #[tokio::test]
@@ -60,6 +97,72 @@ mod tests {
         let body = read_frame(&mut b).await.unwrap();
         writer.await.unwrap();
         assert_eq!(body, payload);
+    }
+
+    // ---- 取消安全（CONTROL_PLANE §3）：select! 丢弃部分进度的读 future 后，
+    // 已读字节必须留在持久缓冲里供下次续读，不得随 future 丢掉 ----
+
+    #[tokio::test]
+    async fn buffered_read_survives_cancellation_mid_frame() {
+        let (mut a, mut b) = duplex(1024);
+        // 只送长度前缀前 3 字节 → 读 future 必然停在 Pending 且已有部分进度
+        a.write_all(&[0x00, 0x00, 0x00]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut buf = BytesMut::new();
+        {
+            let f = read_frame_buf(&mut b, &mut buf);
+            tokio::pin!(f);
+            tokio::select! {
+                biased;
+                r = &mut f => panic!("incomplete frame must not complete: {r:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+        // 取消丢 future 后补齐（第 4 前缀字节 + 帧体），续读必须还原完整帧
+        a.write_all(&[0x0a]).await.unwrap();
+        a.write_all(&[0x41; 10]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let body = read_frame_buf(&mut b, &mut buf).await.unwrap();
+        assert_eq!(body, vec![0x41; 10]);
+    }
+
+    #[tokio::test]
+    async fn buffered_read_holds_second_frame_after_first() {
+        let (mut a, mut b) = duplex(1024);
+        let mut buf = BytesMut::new();
+        write_frame(&mut a, &[0x41; 4]).await.unwrap();
+        write_frame(&mut a, &[0x42; 6]).await.unwrap();
+        assert_eq!(
+            read_frame_buf(&mut b, &mut buf).await.unwrap(),
+            vec![0x41; 4]
+        );
+        assert_eq!(
+            read_frame_buf(&mut b, &mut buf).await.unwrap(),
+            vec![0x42; 6]
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn buffered_read_rejects_oversize_and_eof() {
+        let (mut a, mut b) = duplex(64);
+        let mut buf = BytesMut::new();
+        write_declared_len(&mut a, MAX_MESSAGE_LEN + 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame_buf(&mut b, &mut buf).await.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let (mut c, mut d) = duplex(64);
+        let mut buf2 = BytesMut::new();
+        write_declared_len(&mut c, 8).await.unwrap();
+        c.write_all(&[0u8; 3]).await.unwrap();
+        drop(c);
+        assert_eq!(
+            read_frame_buf(&mut d, &mut buf2).await.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[tokio::test]

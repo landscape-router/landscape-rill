@@ -4,6 +4,7 @@ use crate::control::codec::{envelope_body, read_envelope, write_msg};
 use crate::control::BoxResult;
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
+use landscape_rill_coord::raft::backend::{CoordBackend, Leadership, WriteError};
 use landscape_rill_coord::status::{
     DirectPairView as DirectPairDst, DropView, PeerTrafficView as PeerTrafficDst, TelemetryView,
 };
@@ -196,7 +197,9 @@ fn key_dist_message(coordinator: &Coordinator, node_id: u32) -> Option<Vec<u8>> 
 }
 
 pub struct CoordinatorServer {
-    pub coordinator: Coordinator,
+    /// 写路径单一门面（REQ-070）：Single = 单机直调；Cluster = 持久写过日志提案、
+    /// 读走本副本已 apply 状态；领导权视图驱动 LeaderRedirect（§3.6）
+    pub coordinator: CoordBackend,
     /// 注册拒绝计数（LOGGING §5：周期摘要；run_coord 周期取走打印）
     pub register_rejected: RateCounter,
     /// 控制面限速/锁定触发计数（LOGGING §5；run_coord 周期取走打印，SEC-20 证据）
@@ -246,7 +249,7 @@ impl CoordinatorServer {
 
     pub fn new(master_key: [u8; 32], signing_seed: [u8; 32]) -> Self {
         Self {
-            coordinator: Coordinator::new(signing_seed),
+            coordinator: CoordBackend::single(Coordinator::new(signing_seed)),
             register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
             rate_limited: RateCounter::new(RATE_SUMMARY_PERIOD),
             register_limiter: Self::default_limiter(),
@@ -258,13 +261,27 @@ impl CoordinatorServer {
     }
 
     /// 注册网络域（多网络；网络名 → fnv1a network_id，CONTROL_PLANE §1.5）
-    pub fn with_network(mut self, name: &str, master_key: [u8; 32]) -> Self {
-        self.coordinator.add_network(name, master_key);
+    pub fn with_network(self, name: &str, master_key: [u8; 32]) -> Self {
+        self.coordinator
+            .with_coord_mut(|c| c.add_network(name, master_key));
         self
     }
 
+    fn with_backend(coordinator: CoordBackend) -> Self {
+        Self {
+            coordinator,
+            register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
+            rate_limited: RateCounter::new(RATE_SUMMARY_PERIOD),
+            register_limiter: Self::default_limiter(),
+            register_lockout: HashMap::new(),
+            heartbeat_min_interval: HEARTBEAT_MIN_INTERVAL,
+            drop_first_register_response: false,
+        }
+    }
+
     /// 管理面库 API（REQ-038，CONTROL_PLANE §3.12）：从配置构造（网络域 + auth keys + 白名单）；
-    /// 配置 storage_path 时打开持久化存储（REQ-037），损坏/不一致 → Err（fail-closed）
+    /// 配置 storage_path 时打开持久化存储（REQ-037），损坏/不一致 → Err（fail-closed）。
+    /// 单机形态——集群形态见 [`Self::from_config_cluster`]
     pub fn from_config(cfg: &CoordConfig) -> BoxResult<Self> {
         let networks: Vec<(String, [u8; 32])> = cfg
             .networks
@@ -283,22 +300,142 @@ impl CoordinatorServer {
                 coord
             }
         };
-        let mut server = Self {
-            coordinator,
-            register_rejected: RateCounter::new(RATE_SUMMARY_PERIOD),
-            rate_limited: RateCounter::new(RATE_SUMMARY_PERIOD),
-            register_limiter: Self::default_limiter(),
-            register_lockout: HashMap::new(),
-            heartbeat_min_interval: HEARTBEAT_MIN_INTERVAL,
-            drop_first_register_response: false,
-        };
-        cfg.apply_to(&mut server.coordinator);
+        let server = Self::with_backend(CoordBackend::single(coordinator));
+        server.coordinator.with_coord_mut(|c| cfg.apply_to(c));
         Ok(server)
+    }
+
+    /// 集群形态（REQ-070 阶段二）：openraft 单副本——日志/状态存储从 storage_path
+    /// 派生，配置面在 Raft::new 前注入（选主期间可能重放日志，auth key 须先就位），
+    /// 静态成员 initialize（首次组网单点执行，已是成员的 NotAllowed 静默），
+    /// 副本间 raft RPC 监听（mTLS）随返回一并拉起
+    pub async fn from_config_cluster(cfg: &CoordConfig) -> BoxResult<Self> {
+        use landscape_rill_coord::raft::log_store::RaftLogStore;
+        use landscape_rill_coord::raft::machine::{MachineConfig, SharedStateMachine};
+        use openraft::{BasicNode, Config as RaftConfig, Raft};
+
+        let cluster = cfg.cluster.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no cluster section")
+        })?;
+        let storage = cfg.storage_path.as_deref().expect("validated");
+        let (log_path, state_path) = cluster.raft_storage_paths(storage);
+        let log_store = RaftLogStore::open(&log_path)?;
+        let machine = SharedStateMachine::open(
+            MachineConfig {
+                signing_seed: cfg.signing_seed,
+                networks: cfg
+                    .networks
+                    .iter()
+                    .map(|n| (n.name.clone(), n.master_key))
+                    .collect(),
+            },
+            &state_path,
+        )?;
+        machine.with_coordinator_mut(|c| cfg.apply_to(c));
+        let material = crate::control::raft_rpc::RaftTlsMaterial {
+            cert_pem: std::fs::read(&cfg.tls_cert_path)?,
+            key_pem: std::fs::read(&cfg.tls_key_path)?,
+            ca_pem: std::fs::read(&cluster.ca_cert_path)?,
+        };
+        let rpc_addrs: std::collections::HashMap<u64, String> = cluster
+            .members
+            .iter()
+            .map(|m| (m.id, m.addr.clone()))
+            .collect();
+        // LeaderRedirect 提示用节点面地址（§3.6：节点重连目标）
+        let advertise: std::collections::HashMap<u64, String> = cluster
+            .members
+            .iter()
+            .map(|m| (m.id, m.advertise.clone()))
+            .collect();
+        let factory = crate::control::raft_rpc::RaftTlsNetworkFactory::new(material.clone());
+        let raft_config = RaftConfig {
+            cluster_name: format!("coord-ha-{}", cluster.node_id),
+            // 跨主机副本（非共址）：心跳/选主留足网络与调度余量——过紧的超时
+            // 在负载下会误判心跳丢失触发无谓选主（写路径 ForwardToLeader 抖动）
+            heartbeat_interval: 100,
+            election_timeout_min: 1000,
+            election_timeout_max: 2000,
+            ..Default::default()
+        }
+        .validate()?;
+        let raft = Raft::new(
+            cluster.node_id,
+            std::sync::Arc::new(raft_config),
+            factory,
+            log_store,
+            machine.clone(),
+        )
+        .await?;
+        // 静态成员首启组网：任一成员单点 initialize；已在集群中的成员收 NotAllowed（正常）
+        let nodes: std::collections::BTreeMap<u64, BasicNode> = rpc_addrs
+            .iter()
+            .map(|(id, addr)| (*id, BasicNode::new(addr.clone())))
+            .collect();
+        if let Err(e) = raft.initialize(nodes).await {
+            if e.to_string().contains("NotAllowed") {
+                tracing::debug!("[coord] raft already initialized (rejoin)");
+            } else {
+                tracing::warn!("[coord] raft initialize: {e} (retry via replication)");
+            }
+        }
+        let listener = tokio::net::TcpListener::bind(
+            cluster.raft_listen_addr.parse::<std::net::SocketAddr>()?,
+        )
+        .await?;
+        tokio::spawn(crate::control::raft_rpc::serve_raft_rpc(
+            raft.clone(),
+            listener,
+            material,
+        ));
+        // 领导权转移观测（REQ-070 阶段二验收证据）：state/leader/term 变更时记一条；
+        // 接管 Leader 时重置活性软状态（陈旧 last_seen 会把在线节点扫成离线，§5.2）
+        tokio::spawn({
+            let raft = raft.clone();
+            let machine = machine.clone();
+            let node_id = cluster.node_id;
+            async move {
+                let mut rx = raft.metrics();
+                let mut seen: (openraft::ServerState, Option<u64>, u64) =
+                    (openraft::ServerState::Learner, None, 0);
+                while rx.changed().await.is_ok() {
+                    let m = rx.borrow_and_update();
+                    let key = (m.state, m.current_leader, m.current_term);
+                    if key != seen {
+                        if m.state == openraft::ServerState::Leader && seen.0 != m.state {
+                            machine.with_coordinator_mut(|c| {
+                                c.reset_liveness_on_takeover(unix_seconds())
+                            });
+                        }
+                        seen = key;
+                        tracing::info!(
+                            "[coord] raft node_id={} state={:?} leader={:?} term={}",
+                            node_id,
+                            m.state,
+                            m.current_leader,
+                            m.current_term
+                        );
+                    }
+                }
+            }
+        });
+        tracing::info!(
+            "[coord] raft cluster started: node_id={} members={} rpc={}",
+            cluster.node_id,
+            cluster.members.len(),
+            cluster.raft_listen_addr
+        );
+        Ok(Self::with_backend(CoordBackend::Cluster {
+            raft,
+            machine,
+            members: std::sync::Arc::new(advertise),
+            self_id: cluster.node_id,
+        }))
     }
 
     /// 管理面库 API（REQ-038）：配置重载（SIGHUP）入口，增量收敛、不中断在途连接
     pub fn apply_config(&mut self, cfg: &CoordConfig) {
-        cfg.apply_to(&mut self.coordinator);
+        self.coordinator.with_coord_mut(|c| cfg.apply_to(c));
     }
 
     /// 注册成功/挑战通过后：全量 netmap + 逐节点 key_dst + 广播密钥（v1 全量互连）。
@@ -308,20 +445,50 @@ impl CoordinatorServer {
         stream: &mut W,
         network_id: u32,
     ) -> BoxResult<()> {
-        let push = netmap_push_message(&self.coordinator, network_id);
-        write_msg(stream, MsgType::NETMAP_PUSH, &envelope_body(&push)).await?;
-        let node_ids: Vec<u32> = self
+        let push = self
             .coordinator
-            .netmap_snapshot(network_id)
-            .into_iter()
-            .map(|n| n.node_id)
-            .collect();
+            .with_coord(|c| netmap_push_message(c, network_id));
+        write_msg(stream, MsgType::NETMAP_PUSH, &envelope_body(&push)).await?;
+        let node_ids: Vec<u32> = self.coordinator.with_coord(|c| {
+            c.netmap_snapshot(network_id)
+                .into_iter()
+                .map(|n| n.node_id)
+                .collect()
+        });
         for node_id in node_ids {
-            if let Some(body) = key_dist_message(&self.coordinator, node_id) {
+            if let Some(body) = self
+                .coordinator
+                .with_coord(|c| key_dist_message(c, node_id))
+            {
                 write_msg(stream, MsgType::KEY_DIST, &body).await?;
             }
         }
         Ok(())
+    }
+
+    /// LeaderRedirect 应答（§3.6）：空端点 = 选主中（节点退避重试）
+    async fn write_leader_redirect<W: AsyncWriteExt + Unpin>(
+        &self,
+        stream: &mut W,
+        leadership: &Leadership,
+    ) -> BoxResult<()> {
+        let Leadership::Follower {
+            leader_endpoint,
+            term,
+        } = leadership
+        else {
+            return Ok(());
+        };
+        let msg = LeaderRedirect {
+            leader_endpoint: Cow::Owned(leader_endpoint.clone().unwrap_or_default()),
+            raft_term: *term,
+        };
+        tracing::debug!(
+            "[coord] leader redirect: endpoint={:?} term={}",
+            msg.leader_endpoint,
+            msg.raft_term
+        );
+        Ok(write_msg(stream, MsgType::LEADER_REDIRECT, &envelope_body(&msg)).await?)
     }
 
     pub async fn handle_connection(
@@ -357,6 +524,12 @@ impl CoordinatorServer {
         let peer_ip = stream.get_ref().0.peer_addr().ok().map(|a| a.ip());
         match msg_type {
             MsgType::REGISTER => {
+                // follower 不准入：直接重定向（§3.6），挑战/限速面一并跳过
+                let leadership = self.coordinator.leadership();
+                if matches!(leadership, Leadership::Follower { .. }) {
+                    self.write_leader_redirect(stream, &leadership).await?;
+                    return Ok(());
+                }
                 // 准入闸门（REQ-047/SEC-20）：锁定优先，其次 per-源 IP 限速
                 if let Some(ip) = peer_ip {
                     if self.register_locked(ip, Instant::now()) {
@@ -400,33 +573,38 @@ impl CoordinatorServer {
                     version: req.version.to_string(),
                     resume: false,
                 };
-                let (node_id, ch_pubkey, pending) =
-                    match self.coordinator.node_id_by_pubkey(&pubkey) {
-                        // 恢复类：key 有效性不参与（PoP 强于共享 key 的成员资格证明），
-                        // 不计失败锁定（合法恢复路径，§3.9）
-                        Some(node_id) => (
-                            node_id,
-                            pubkey,
-                            PendingRegister {
-                                resume: true,
-                                ..pending
-                            },
-                        ),
-                        // 新建类：key 只读校验（格式/过期/归域/在册），失败计入锁定闸门
-                        None => {
-                            if !self.coordinator.auth_key_admissible(&pending.auth_key) {
-                                if let Some(ip) = peer_ip {
-                                    self.note_register_failure(ip, Instant::now());
-                                }
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::PermissionDenied,
-                                    "invalid auth key",
-                                )
-                                .into());
+                let (node_id, ch_pubkey, pending) = match self
+                    .coordinator
+                    .with_coord(|c| c.node_id_by_pubkey(&pubkey))
+                {
+                    // 恢复类：key 有效性不参与（PoP 强于共享 key 的成员资格证明），
+                    // 不计失败锁定（合法恢复路径，§3.9）
+                    Some(node_id) => (
+                        node_id,
+                        pubkey,
+                        PendingRegister {
+                            resume: true,
+                            ..pending
+                        },
+                    ),
+                    // 新建类：key 只读校验（格式/过期/归域/在册），失败计入锁定闸门
+                    None => {
+                        if !self
+                            .coordinator
+                            .with_coord(|c| c.auth_key_admissible(&pending.auth_key))
+                        {
+                            if let Some(ip) = peer_ip {
+                                self.note_register_failure(ip, Instant::now());
                             }
-                            (0, pubkey, pending)
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "invalid auth key",
+                            )
+                            .into());
                         }
-                    };
+                        (0, pubkey, pending)
+                    }
+                };
                 let ch = ChallengeState::new(node_id, ch_pubkey, pending);
                 let msg = Challenge {
                     eph_pub: Cow::Owned(
@@ -473,7 +651,8 @@ impl CoordinatorServer {
                 };
                 // 恢复类前置检查：条目须仍存在且 pubkey 一致（吊销/重注册后旧挑战失效）
                 if resume {
-                    let Some(entry_pub) = self.coordinator.static_pubkey_of(ch_node) else {
+                    let entry_pub = self.coordinator.with_coord(|c| c.static_pubkey_of(ch_node));
+                    let Some(entry_pub) = entry_pub else {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
                             "unknown node in challenge ack",
@@ -512,7 +691,7 @@ impl CoordinatorServer {
                     // 不校验 key 有效性（吊销以条目移除为准）
                     if !self
                         .coordinator
-                        .resume_matches(ch_node, capabilities, &routes)
+                        .with_coord(|c| c.resume_matches(ch_node, capabilities, &routes))
                     {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
@@ -522,15 +701,22 @@ impl CoordinatorServer {
                     }
                     tracing::info!("[coord] challenge ok: node_id={ch_node}");
                     state.registered = Some(ch_node);
-                    self.coordinator.heartbeat(ch_node, unix_seconds());
                     self.coordinator
-                        .set_protocol_version(ch_node, protocol_version);
+                        .with_coord_mut(|c| c.heartbeat(ch_node, unix_seconds()));
+                    self.coordinator
+                        .with_coord_mut(|c| c.set_protocol_version(ch_node, protocol_version));
                     if !version.is_empty() {
-                        self.coordinator.set_build_version(ch_node, version.clone());
+                        self.coordinator
+                            .with_coord_mut(|c| c.set_build_version(ch_node, version.clone()));
                     }
-                    let network_id = self.coordinator.network_id_of(ch_node).unwrap_or(0);
+                    let network_id = self
+                        .coordinator
+                        .with_coord(|c| c.network_id_of(ch_node))
+                        .unwrap_or(0);
                     // binding 缺失属不变量破坏——fail-closed 而非空绑定静默降级
-                    let Some(identity_binding) = self.coordinator.identity_binding_of(ch_node)
+                    let Some(identity_binding) = self
+                        .coordinator
+                        .with_coord(|c| c.identity_binding_of(ch_node))
                     else {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
@@ -542,7 +728,6 @@ impl CoordinatorServer {
                         node_id: ch_node,
                         network_id,
                         identity_binding: Cow::Owned(identity_binding),
-                        leader_redirect: None,
                     };
                     write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp)).await?;
                     self.push_snapshot(stream, network_id).await?;
@@ -551,17 +736,20 @@ impl CoordinatorServer {
                     // 全部后置到 PoP 之后；失败仍 fail-closed
                     match self
                         .coordinator
-                        .register(&auth_key, &ch_pub, capabilities, routes)
+                        .register(&auth_key, &ch_pub, capabilities, routes, unix_seconds())
+                        .await
                     {
                         Ok(data) => {
                             if let Some(ip) = peer_ip {
                                 self.register_lockout.remove(&ip);
                             }
-                            self.coordinator
-                                .set_protocol_version(data.node_id, protocol_version);
+                            self.coordinator.with_coord_mut(|c| {
+                                c.set_protocol_version(data.node_id, protocol_version)
+                            });
                             if !version.is_empty() {
-                                self.coordinator
-                                    .set_build_version(data.node_id, version.clone());
+                                self.coordinator.with_coord_mut(|c| {
+                                    c.set_build_version(data.node_id, version.clone())
+                                });
                             }
                             // e2e 故障注入（REQ-057）：注册已消费、响应丢弃并断连——
                             // 客户端须走退避重连 + 挑战恢复（ack 丢失模拟）
@@ -578,22 +766,22 @@ impl CoordinatorServer {
                             }
                             tracing::info!("[coord] challenge ok: node_id={}", data.node_id);
                             state.registered = Some(data.node_id);
-                            self.coordinator.heartbeat(data.node_id, unix_seconds());
+                            self.coordinator
+                                .with_coord_mut(|c| c.heartbeat(data.node_id, unix_seconds()));
                             let resp = RegisterResponse {
                                 node_id: data.node_id,
                                 network_id: data.network_id,
                                 identity_binding: Cow::Owned(data.identity_binding),
-                                leader_redirect: None,
                             };
                             write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp))
                                 .await?;
-                            self.push_snapshot(
-                                stream,
-                                self.coordinator.network_id_of(data.node_id).unwrap_or(0),
-                            )
-                            .await?;
+                            let network_id = self
+                                .coordinator
+                                .with_coord(|c| c.network_id_of(data.node_id))
+                                .unwrap_or(0);
+                            self.push_snapshot(stream, network_id).await?;
                         }
-                        Err(e) => {
+                        Err(WriteError::Local(e)) => {
                             // 准入在 PoP 后失败：按注册失败计（LOGGING §5 周期摘要）
                             if let Some(ip) = peer_ip {
                                 self.note_register_failure(ip, Instant::now());
@@ -603,6 +791,21 @@ impl CoordinatorServer {
                                 std::io::Error::new(std::io::ErrorKind::InvalidData, e).into()
                             );
                         }
+                        Err(WriteError::Forward { .. }) => {
+                            // 提案期间领导权易主：重定向节点（幂等重注册走新主）
+                            let leadership = self.coordinator.leadership();
+                            self.write_leader_redirect(stream, &leadership).await?;
+                            return Ok(());
+                        }
+                        Err(WriteError::Raft(e)) => {
+                            if let Some(ip) = peer_ip {
+                                self.note_register_failure(ip, Instant::now());
+                            }
+                            self.register_rejected.tick();
+                            return Err(
+                                std::io::Error::other(format!("raft unavailable: {e}")).into()
+                            );
+                        }
                     }
                 }
             }
@@ -610,11 +813,18 @@ impl CoordinatorServer {
                 let mut reader = BytesReader::from_bytes(body);
                 let hb = Heartbeat::from_reader(&mut reader, body)?;
                 if let Some(node_id) = state.registered {
+                    // 领导权易主（failover 后旧连接）：重定向节点重连新主（§3.6/§5.6）
+                    let leadership = self.coordinator.leadership();
+                    if matches!(leadership, Leadership::Follower { .. }) {
+                        self.write_leader_redirect(stream, &leadership).await?;
+                        return Ok(());
+                    }
                     // 遥测聚合（REQ-052/§3.15）：latest-wins 快照，旧值直接覆盖；
                     // 无载荷（旧节点）不触碰已有快照
                     if let Some(telemetry) = hb.telemetry {
-                        self.coordinator
-                            .store_telemetry(node_id, telemetry_view(telemetry));
+                        self.coordinator.with_coord_mut(|c| {
+                            c.store_telemetry(node_id, telemetry_view(telemetry))
+                        });
                     }
                     // 超频忽略（REQ-047）：间隔不足即丢弃——不更新 last_seen、
                     // 不推快照、不回 LEASE（零成本），租约/离线判定语义不变
@@ -626,9 +836,13 @@ impl CoordinatorServer {
                         return Ok(());
                     }
                     state.last_heartbeat = Some(now);
-                    self.coordinator.heartbeat(node_id, unix_seconds());
+                    self.coordinator
+                        .with_coord_mut(|c| c.heartbeat(node_id, unix_seconds()));
                     // 周期收敛：端点/离线等软状态随心跳广播（v1 无增量推送）
-                    let network_id = self.coordinator.network_id_of(node_id).unwrap_or(0);
+                    let network_id = self
+                        .coordinator
+                        .with_coord(|c| c.network_id_of(node_id))
+                        .unwrap_or(0);
                     self.push_snapshot(stream, network_id).await?;
                     // 路径事件推送（v1.5，CONTROL_PLANE §3.11）：PathUpdate/PathWithdraw
                     self.push_path_events(stream, node_id).await?;
@@ -649,13 +863,21 @@ impl CoordinatorServer {
                     )
                     .into());
                 };
-                let _ = self.coordinator.request_paths(
-                    source,
-                    req.destination_node_id,
-                    req.max_candidates,
-                );
                 // 响应不下发：路径集事件走心跳推送通道（push_path_events），
                 // 与 NETMAP/LEASE 同批次写入——即时写回在并发下不可靠
+                if let Err(WriteError::Forward { .. }) = self
+                    .coordinator
+                    .request_paths(
+                        source,
+                        req.destination_node_id,
+                        req.max_candidates,
+                        unix_seconds(),
+                    )
+                    .await
+                {
+                    let leadership = self.coordinator.leadership();
+                    self.write_leader_redirect(stream, &leadership).await?;
+                }
             }
             MsgType::PATH_PROBE
             | MsgType::PATH_PROBE_RESPONSE
@@ -672,7 +894,12 @@ impl CoordinatorServer {
                     let endpoints: Vec<String> =
                         report.endpoints.iter().map(|s| s.to_string()).collect();
                     if !endpoints.is_empty() {
-                        self.coordinator.set_endpoints(node_id, endpoints);
+                        if let Err(WriteError::Forward { .. }) =
+                            self.coordinator.set_endpoints(node_id, endpoints).await
+                        {
+                            let leadership = self.coordinator.leadership();
+                            self.write_leader_redirect(stream, &leadership).await?;
+                        }
                     }
                 }
             }
@@ -687,7 +914,9 @@ impl CoordinatorServer {
         stream: &mut W,
         source: u32,
     ) -> BoxResult<()> {
-        let events = self.coordinator.take_path_events(source);
+        let events = self
+            .coordinator
+            .with_coord_mut(|c| c.take_path_events(source));
         for event in events {
             match event {
                 landscape_rill_coord::path_service::PathEvent::Update {
@@ -700,16 +929,17 @@ impl CoordinatorServer {
                         candidates: set
                             .candidates
                             .iter()
-                            .map(|c| CandidatePath {
-                                path_id: c.path_id,
-                                path_epoch: c.path_epoch,
-                                hops: Cow::Owned(crate::control::hops_bytes(&c.hops)),
-                                expires_at: c.expires_at,
-                                key_path: Cow::Owned(
-                                    self.coordinator
-                                        .key_path_for(src, c.path_id, c.path_epoch)
-                                        .to_vec(),
-                                ),
+                            .map(|c| {
+                                let key_path = self.coordinator.with_coord(|coord| {
+                                    coord.key_path_for(src, c.path_id, c.path_epoch).to_vec()
+                                });
+                                CandidatePath {
+                                    path_id: c.path_id,
+                                    path_epoch: c.path_epoch,
+                                    hops: Cow::Owned(crate::control::hops_bytes(&c.hops)),
+                                    expires_at: c.expires_at,
+                                    key_path: Cow::Owned(key_path),
+                                }
                             })
                             .collect(),
                         path_version: set.version,

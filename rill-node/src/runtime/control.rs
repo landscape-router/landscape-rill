@@ -173,6 +173,23 @@ impl Node {
                     destination_node_id, path_id
                 );
             }
+            ControlEvent::LeaderRedirect {
+                leader_endpoint,
+                raft_term,
+            } => {
+                // §3.6/§5.6：follower 应答重定向。非空端点 = 会话级覆盖重连目标；
+                // 空 = 选主中，保持既有目标退避重试。断开现连接让 run 循环立即重连
+                if !leader_endpoint.is_empty() {
+                    info!(
+                        "[node] leader redirect: {} (term {raft_term})",
+                        leader_endpoint
+                    );
+                    self.coord_override = Some(format!("https://{leader_endpoint}"));
+                } else {
+                    info!("[node] leader redirect: election in progress (term {raft_term})");
+                }
+                self.control = None;
+            }
         }
         Ok(())
     }

@@ -508,9 +508,10 @@ impl Coordinator {
         static_pubkey: &[u8; 32],
         capabilities: u32,
         routes: Vec<String>,
+        now: u64,
     ) -> Result<RegisterData, RegisterError> {
         // 注册拒绝计数（REQ-051 §3.14 内容组 4）：任何 Err 路径收口统计
-        let r = self.register_inner(auth_key, static_pubkey, capabilities, routes);
+        let r = self.register_inner(auth_key, static_pubkey, capabilities, routes, now);
         if r.is_err() {
             self.register_rejects = self.register_rejects.saturating_add(1);
         }
@@ -523,12 +524,13 @@ impl Coordinator {
         static_pubkey: &[u8; 32],
         capabilities: u32,
         routes: Vec<String>,
+        now: u64,
     ) -> Result<RegisterData, RegisterError> {
         // 过期时间内嵌在 key 自身（REQ-043）：admission 时解析校验；
         // 解析失败 = 非法 key（fail-closed）。格式知识在 rill-coord，注册表按不透明字符串处理。
         let parsed =
             crate::authkey::parse_auth_key(auth_key).map_err(|_| RegisterError::InvalidAuthKey)?;
-        if parsed.1 != 0 && unix_seconds() > parsed.1 {
+        if parsed.1 != 0 && now > parsed.1 {
             return Err(RegisterError::InvalidAuthKey);
         }
         // 归域（CONTROL_PLANE §1.5）：注册即归域——key 内嵌网络必须存在，只可能进入该网络
@@ -608,12 +610,14 @@ impl Coordinator {
     // ==================== 路径服务（v1.5，CONTROL_PLANE §3.11） ====================
 
     /// PathRequest 处理：构造候选路径集（直连 + 经 relay），返回 (候选, key_path)。
+    /// now 显式传入（REQ-070：raft 重放确定性；TTL 以此计）
     /// 跨网络路径请求 → 空集（fail-closed：netmap 隔离下源本就看不到异网节点）。
     pub fn request_paths(
         &mut self,
         source: u32,
         dest: u32,
         max: u32,
+        now: u64,
     ) -> Vec<(PathCandidate, [u8; KEY_DST_LEN])> {
         let (Some(sd), Some(dd)) = (self.domain_of_node(source), self.domain_of_node(dest)) else {
             return Vec::new();
@@ -622,7 +626,6 @@ impl Coordinator {
             return Vec::new();
         }
         let network_id = sd.network_id;
-        let now = unix_seconds();
         let out = self
             .domains
             .iter_mut()
@@ -743,6 +746,18 @@ impl Coordinator {
         if known && self.liveness.mark_offline(node_id) {
             self.directory.bump_netmap();
         }
+    }
+
+    /// 领导权接管时重置活性软状态（REQ-070 阶段二，§5.2）：last_seen/offline
+    /// 只在处理心跳的副本本地维护（不进 raft 日志），新主继承的是旧主时代的
+    /// 陈旧快照——直接沿用会把在线节点立即扫成离线（netmap 撤路由 → 数据面
+    /// 断流，违背 §4.3 failover 期间数据面不中断）。接管 = 给全体已知节点一份
+    /// 新租约；接管后静默超过一个租约窗口的节点由 sweep 重新判离线
+    pub fn reset_liveness_on_takeover(&mut self, now: u64) {
+        for entry in self.domains.iter().flat_map(|d| d.registry.entries()) {
+            self.liveness.heartbeat(entry.node_id, now);
+        }
+        self.directory.bump_netmap();
     }
 
     pub fn offline_nodes(&self) -> &[u32] {

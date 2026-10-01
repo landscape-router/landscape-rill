@@ -134,6 +134,9 @@ pub struct Node {
     advertise_ips: Vec<IpAddr>,
     engine: RouteEngine,
     control: Option<ControlSession>,
+    /// LeaderRedirect 会话级覆盖（§3.6，Raft 期）：重连目标优先于配置地址；
+    /// 空 = 用配置地址（重定向到选举中时不清除既有覆盖）
+    coord_override: Option<String>,
     tun: Option<TunDevice>,
     node_id: Option<u32>,
     network_id: u32,
@@ -226,6 +229,7 @@ impl Node {
             last_data_heartbeat: Instant::now(),
             next_rekey,
             reconnect: reconnect::ReconnectPolicy::new(),
+            coord_override: None,
             peer_heartbeats: HashMap::new(),
             pending_path_requests: Vec::new(),
             path_requested: HashSet::new(),
@@ -288,15 +292,32 @@ impl Node {
 
     /// 控制面连接（含初始注册）。重连传上次 node_id（幂等注册/挑战路径）。
     pub async fn connect_control(&mut self) -> BoxResult<()> {
-        let session = Self::establish_control(&self.cfg, self.node_id).await?;
-        self.control = Some(session);
-        info!("[node] control connected");
-        Ok(())
+        let url = self
+            .coord_override
+            .clone()
+            .unwrap_or_else(|| self.cfg.coordinator_url.clone());
+        match Self::establish_control(&self.cfg, &url, self.node_id).await {
+            Ok(session) => {
+                self.control = Some(session);
+                info!("[node] control connected");
+                Ok(())
+            }
+            Err(e) => {
+                // 重定向目标失效（failover 后旧 leader 不可达）→ 回落配置地址；
+                // 若配置地址也是 follower 会再次收到重定向形成新覆盖（§3.6/§5.6）
+                self.coord_override = None;
+                Err(e)
+            }
+        }
     }
 
     /// 字段级构造控制面会话（run() 的 connect 分支做字段级借用，不经 &mut self）
-    async fn establish_control(cfg: &Config, node_id: Option<u32>) -> BoxResult<ControlSession> {
-        let (host, port) = Self::parse_url(&cfg.coordinator_url)?;
+    async fn establish_control(
+        cfg: &Config,
+        url: &str,
+        node_id: Option<u32>,
+    ) -> BoxResult<ControlSession> {
+        let (host, port) = Self::parse_url(url)?;
         let ca = std::fs::read(&cfg.ca_cert_path)
             .map_err(|e| std::io::Error::new(e.kind(), format!("ca: {}", e)))?;
         let mut announce_routes = cfg.announce_routes.clone();
@@ -537,8 +558,9 @@ impl Node {
                 ev = control_read, if control_ready => {
                     match ev {
                         Ok(ev) => { let _ = self.handle_control_event(ev).await; }
-                        Err(_) => {
+                        Err(e) => {
                             // 断线同样走退避（REQ-056）：连上即断不再热循环
+                            debug!("[node] control read error: {e}");
                             self.control = None;
                             let wait = self.reconnect.on_disconnect();
                             self.sleep_with_timers(wait).await;
@@ -559,20 +581,30 @@ impl Node {
     }
 
     /// 分片退避等待（REQ-056）：100ms 片轮转，片内持续服务数据面——
-    /// tun 读 + dn42 leg 事件/明文 + 定时器。dn42-only 形态无 coordinator，
-    /// 控制面永久退避，数据面（tun/dn42）不得随之停摆（DN42_LEG §5）。
+    /// mesh 收帧 + tun 读 + dn42 leg 事件/明文 + 定时器。控制面退避不得
+    /// 停摆数据面（DN42_LEG §5 / REQ-070 §4.3 failover 期间数据面不中断）：
+    /// 会话心跳/握手在重连窗口内照常收发，否则 coordinator 故障波及 mesh 会话
     async fn sleep_with_timers(&mut self, mut remaining: Duration) {
         while remaining > Duration::ZERO {
             let slice = remaining.min(Duration::from_millis(100));
             remaining = remaining.saturating_sub(slice);
-            if self.tun.is_some() {
-                // 片内等一个 tun 包；无包则按片超时，不阻塞其他泵
-                let _ = tokio::time::timeout(slice, async {
-                    if let Ok(pkt) = self.tun.as_mut().unwrap().read_packet().await {
+            let deadline = tokio::time::Instant::now() + slice;
+            tokio::select! {
+                ev = self.mesh.handle_incoming() => {
+                    if let Ok(ev) = ev {
+                        if let Some(payload) = self.handle_mesh_event(ev).await {
+                            if !self.forward_transit(&payload, TransitFrom::Mesh).await {
+                                self.write_lan(&payload).await;
+                            }
+                        }
+                    }
+                }
+                pkt = async { self.tun.as_mut().unwrap().read_packet().await }, if self.tun.is_some() => {
+                    if let Ok(pkt) = pkt {
                         let _ = self.pump_lan_packet(&pkt).await;
                     }
-                })
-                .await;
+                }
+                _ = tokio::time::sleep_until(deadline) => {}
             }
             self.pump_dn42().await;
             self.pump_timers().await;

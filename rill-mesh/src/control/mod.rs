@@ -4,9 +4,11 @@
 //! - [tls]：客户端/服务端 TLS 流建立
 //! - [client]：MeshClient + ControlSession（节点侧注册与事件消费）
 //! - [server]：CoordinatorServer（coordinator 侧消息分派与推送）
+//! - [raft_rpc]：副本间 raft RPC 传输（mTLS，REQ-070 阶段二）
 
 pub mod client;
 mod codec;
+pub mod raft_rpc;
 pub mod server;
 pub mod tls;
 
@@ -14,6 +16,7 @@ pub use client::{ControlEvent, ControlSession, MeshClient, MeshEvent, MeshLegCon
 pub use codec::{
     envelope_body, envelope_bytes, parse_envelope, read_envelope, write_msg, EnvelopeError,
 };
+pub use raft_rpc::{serve_raft_rpc, RaftTlsMaterial, RaftTlsNetworkFactory};
 pub use server::{ConnectionState, CoordinatorServer};
 pub use tls::{client_tls_stream, server_tls_accept, server_tls_acceptor, server_tls_stream};
 

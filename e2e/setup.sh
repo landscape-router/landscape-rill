@@ -36,6 +36,8 @@ elif [ "$SCENARIO" = "recover" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/recover/docker-compose.yaml"
 elif [ "$SCENARIO" = "dn42" ]; then
   COMPOSE="docker compose -f $E2E_DIR/mesh/dn42/docker-compose.yaml"
+elif [ "$SCENARIO" = "ha" ]; then
+  COMPOSE="docker compose -f $E2E_DIR/mesh/ha/docker-compose.yaml"
 elif [ "$SCENARIO" = "mtu" ]; then
   # MTU 场景（ROUTE_ENGINE §6，RTE-07）：direct 拓扑 + 底网 MTU 1400
   #（tun 配置仍 1420 → 断言 MSS clamp 与伪造 PTB；路由注入走 direct 分支）
@@ -104,13 +106,14 @@ echo "==> 4/6 生成配置"
 NODE_A_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_C_AUTHKEY=$("$OVERLAY" authkey --network lab)
-gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认33=relay+broadcast，REQ-035)
+gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认33=relay+broadcast，REQ-035) $8=coordinator_url(默认 https://coord:8443)
   CAP="${7:-33}"
+  CURL="${8:-https://coord:8443}"
   # 数据面 underlay（REQ-054）：MESH_E2E_TRANSPORT=tcp 时节点走真 TCP 兜底档
   DT="${MESH_E2E_TRANSPORT:-udp}"
   cat > "$BUILD_DIR/$1" <<EOF
 {
-  "coordinator_url": "https://coord:8443",
+  "coordinator_url": "$CURL",
   "auth_key": "$6",
   "static_key_seed": "$2",
   "capabilities": $CAP,
@@ -582,6 +585,63 @@ with open(path + ".rotated", "w") as f:
 PYEOF
 fi
 
+if [ "$SCENARIO" = "ha" ]; then
+  # ha 场景（REQ-070 阶段二，CONTROL_PLANE §3.6）：coord 3 副本 raft 集群。
+  # 服务端证书补 coord1/2/3 SAN（节点面客户端与 raft RPC 客户端均按服务名验证；
+  # raft mTLS 双向用同一证书——同一 CA 签发，e2e 不分角色）
+  cat > "$BUILD_DIR/coord.ext" <<'EOF'
+subjectAltName = DNS:coord, DNS:coord1, DNS:coord2, DNS:coord3, IP:127.0.0.1
+EOF
+  openssl x509 -req -in "$BUILD_DIR/coord.csr" -CA "$BUILD_DIR/ca.pem" -CAkey "$BUILD_DIR/ca.key" \
+      -CAcreateserial -out "$BUILD_DIR/coord.crt" -days 30 \
+      -extfile "$BUILD_DIR/coord.ext" 2>/dev/null
+
+  # 静态成员表（addr = raft RPC，服务名 DNS 解析；advertise = 节点面 LeaderRedirect 目标）
+  gen_coord_cluster_config() {  # $1=node_id $2=输出文件
+    cat > "$BUILD_DIR/$2" <<EOF
+{
+  "coord": {
+    "listen_addr": "0.0.0.0:8443",
+    "signing_seed": "$SIGNING_SEED",
+    "tls_cert_path": "/etc/landscape/coord.crt",
+    "tls_key_path": "/etc/landscape/coord.key",
+    "storage_path": "/root/coord-$1.redb",
+    "cluster": {
+      "node_id": $1,
+      "raft_listen_addr": "0.0.0.0:9247",
+      "members": [
+        { "id": 1, "addr": "coord1:9247", "advertise": "coord1:8443" },
+        { "id": 2, "addr": "coord2:9247", "advertise": "coord2:8443" },
+        { "id": 3, "addr": "coord3:9247", "advertise": "coord3:8443" }
+      ],
+      "ca_cert_path": "/etc/landscape/ca.pem"
+    },
+    "networks": [
+      {
+        "name": "lab",
+        "master_key": "$MASTER_KEY",
+        "auth_keys": [
+          { "key": "$NODE_A_AUTHKEY", "policy": "reusable" },
+          { "key": "$NODE_B_AUTHKEY", "policy": "reusable" }
+        ],
+        "announce_whitelist": ["10.0.0.0/8", "fd00::/8"]
+      }
+    ]
+  }
+}
+EOF
+  }
+  gen_coord_cluster_config 1 coord1.json
+  gen_coord_cluster_config 2 coord2.json
+  gen_coord_cluster_config 3 coord3.json
+
+  # node-a → coord1、node-b → coord2：至少一节点初始必连 follower（重定向证据）
+  gen_node_config node-a.json "$NODE_A_KEY" "10.42.0.1/24" "fd00:2::1/64" \
+    '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_A_AUTHKEY" 33 "https://coord1:8443"
+  gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" \
+    '["10.43.0.0/24", "fd00:3::/64"]' "$NODE_B_AUTHKEY" 33 "https://coord2:8443"
+fi
+
 if [ "$SCENARIO" = "relay" ] || { [ "$SCENARIO" = "iperf" ] && [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; }; then
   # 宿主若已配置 e2e 网段路由则与容器网段冲突（须在 compose up 前检查，
   # 否则 docker 网桥自身路由会命中；ip route get 命中默认路由不可用）
@@ -609,13 +669,23 @@ if [ -n "${MESH_E2E_CPUS:-}" ]; then
 fi
 
 echo "==> 6/6 等待注册 + 注入 mesh 路由/黑洞（场景: $SCENARIO）"
-if [ "$SCENARIO" != "dn42" ]; then
+if [ "$SCENARIO" = "ha" ]; then
+  # 3 副本各自完成节点面监听（raft 选主在后台收敛，由场景脚本断言）
+  for _ in $(seq 1 60); do
+    ok=1
+    for c in mesh-coord1 mesh-coord2 mesh-coord3; do
+      docker logs "$c" 2>/dev/null | grep -q "listening" || ok=0
+    done
+    [ "$ok" = 1 ] && break
+    sleep 1
+  done
+elif [ "$SCENARIO" != "dn42" ]; then
   for _ in $(seq 1 30); do
     docker logs mesh-coord 2>/dev/null | grep -q "listening" && break
     sleep 1
   done
-  sleep 3
 fi
+sleep 3
 
 # 内核最小参与：mesh 前缀 → tun0（生产由 runtime 自动注入）
 # direct 场景：a↔b；relay 场景：a↔c（经 b 中继）；tenancy 场景：a1↔a2、b1↔b2（组内）

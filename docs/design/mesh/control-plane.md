@@ -5,7 +5,7 @@
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
 > 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
 
-**版本：v0.16（2026-10-01 修订：REQ-048——§5.5 批量吊销合并轮换；§3.5 联动）**
+**版本：v0.17（2026-10-01 修订：REQ-070 阶段二——§1.2 静态成员集群落地；§3.6 LeaderRedirect 具体化；§5.6 接管软状态重置 + 数据面不中断约束；§6 mTLS 落地）**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -23,8 +23,8 @@
 ### 1.2 高可用演进路径（P2）
 
 - **v1**：单 coordinator（协议与后端存储解耦，见 §4.1）
-- **P2**：openraft 集群（3~5 台、单数），Raft 选举主 coordinator
-- 关键原则：**Raft 是 coordinator 内部实现细节，客户端协议零感知**——协议按 §4 的状态模型设计，天然 Raft 兼容（幂等 + 软硬状态分离 + 版本号 CAS）
+- **P2（REQ-070，阶段二已落地）**：openraft 集群——**静态成员**（`cluster` 配置段：`node_id` + 成员地址表；成员变更 = 改配置按序重启，动态 add/remove 不做）；副本间复制/投票走 mTLS RPC（§6）；全部写经 raft 日志提案、按提交顺序 apply（阶段一语义）；follower 本地读 + LeaderRedirect（§3.6），写端点 follower 不代理转发、直接重定向
+- 关键原则：**Raft 是 coordinator 内部实现细节，客户端协议零感知**——协议按 §4 的状态模型设计，天然 Raft 兼容（幂等 + 软硬状态分离 + 版本号 CAS）；线性化读（ReadIndex）推迟，v1 leader 本地读已足
 
 ### 1.3 coordinator 部署
 
@@ -152,8 +152,10 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 
 ### 3.6 LeaderRedirect（主重定向，Raft 期）
 
-- 非主 coordinator 在注册/心跳响应中返回当前主地址
-- 节点重定向重连；重连后按 §5.6 重建软状态
+- follower 对需要 leader 处理的消息一律立即回 `LeaderRedirect { leader_endpoint, raft_term }`，**不做代理转发**：REGISTER（未注册连接）、已注册会话的写路径（心跳租约更新、端点上报、路径请求），以及在途写提案期间领导权易主（ForwardToLeader）
+- `leader_endpoint` 为空 = 选主进行中，节点保持目标退避重试（不切换）
+- 节点重定向重连；重连后按 §5.6 重建软状态（幂等重注册，node_id 不变）
+- 读路径（状态查询类）follower 本地读（REQ-070 决策：v1 不做 ReadIndex）
 
 ### 3.7 Peer\*（预留，联邦 v2）
 
@@ -497,6 +499,9 @@ coordinator Revoke(node_id)
   → KeyDist 按需补发
 ```
 
+- **接管软状态重置（REQ-070 阶段二）**：last_seen/offline 等活性软状态只在处理心跳的副本本地维护（不进 raft 日志）；新主接管时对全体已知节点重置一份新租约——防陈旧 last_seen 把在线节点扫成离线（netmap 撤路由误伤数据面，§4.3）；接管后静默超过一个租约窗口的节点由 sweep 重新判离线（§5.2）
+- **数据面不中断约束（REQ-070 阶段二，§4.3）**：coordinator 故障/切换期间节点既有 mesh 会话照常收发（心跳/数据帧不经 coordinator）；节点 run loop 的控制面重连退避分片持续服务数据面输入，控制面读采用持久缓冲（select! 取消安全），重定向帧不因多路分派竞态丢字节（流错位表现为 `message too long` 断连循环）
+
 ### 5.7 节点密钥丢失恢复
 
 ```
@@ -516,7 +521,7 @@ coordinator Revoke(node_id)
 - **auth key 格式（REQ-036 定稿，REQ-043 修订）**：`lrk-<network>-<expiry>-<secret>`——`lrk` 固定前缀（类型标识 + 配置校验拒绝非 `lrk` 开头的键）；`<network>` 为配置声明的网络标识（小写字母数字，**不含连字符**——段分隔符冲突，归域绑定 §1.5）；`<expiry>` = 十进制 unix 秒（**0 = 永不过期**），**解析即知过期**；`<secret>` = 32B CSPRNG → base32（RFC 4648 无填充，52 字符）。格式非法 → 配置加载即拒绝启动；network 段与配置不匹配 → 注册拒绝；**过期在注册时（admission）校验**（嵌入时间仅 advisory，防篡改 key 改长有效期——coordinator 是最终裁决），节点侧启动对过期 key 仅告警不阻断（已注册节点仍可经挑战恢复）。**生成不依赖 master_key**（auth key 是注册凭据非 KDF 派生），`lrill authkey --network <slug> --ttl <dur>` 纯本地生成（默认 24h，`0` = 永不过期），输出仅 stdout（不落日志，教训 AO-01/AO-02）
 - **身份绑定签名**：防成员冒充/中继 MITM 的关键——数据面握手双保险：msg1 携带目标 node_id + 接收方校验（FRAME_HEADER §2.3），握手后双方交叉验证 coordinator 签发的绑定
 - **边界划分**：控制面管"谁有资格"（身份/密钥），数据面管"包是否合法"（route_mac / AEAD 双层认证）
-- **传输安全**：TLS 1.3；coordinator 间 mTLS（P2 Raft 期）
+- **传输安全**：TLS 1.3；coordinator 间 mTLS（P2，REQ-070 阶段二已落地：副本复制/投票 RPC 双向证书认证）
 - **TLS 信任锚**：**公网证书为主**（标准 PKI，coordinator 需公网可解析域名 + 有效证书，与 headscale 过渡部署的反代 + Let's Encrypt 形态一致）；内网部署可选**自签 CA 预置**（节点配置预置 coordinator CA 证书，rustls 原生支持）——伪 coordinator 钓鱼 auth key 的防护基础，实现时必配
 - **算法 fail-closed**：ChaCha20-Poly1305 / HKDF-SHA256 不可用即**拒绝启动组网，无降级路径**（防降级攻击）；KDF 统一 **HKDF-SHA256**（Noise 规范内建，主密钥/会话/派生共用）
 - **信任根**：coordinator 私钥 = 网络信任根；泄露即全网 key 轮换 + 身份绑定重签；**每网络主密钥独立**（§1.5），一个网络的泄露不影响其他网络

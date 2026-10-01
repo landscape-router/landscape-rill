@@ -61,6 +61,11 @@ node-C 容器 ──┘
     组内双栈互通、跨网络不可达、netmap 各见本网条目；node-d 持未配置网络（ghost）key 注册被拒；
     `e2e/mesh/tenancy/forge.py` 向 node-a2 注入伪造 42B 帧（route_mac 用 work 主密钥派生）
     断言 BadRouteMac 丢弃 + lab 主密钥正对照（越过 route_mac，证明 drop 因密钥不匹配）
+  - `ha`：coordinator Raft 3 副本 failover（REQ-070 阶段二，CTL-23，CONTROL_PLANE
+    §3.6/§5.6）——coord1/2/3 静态成员集群（node-a→coord1、node-b→coord2，至少一节点
+    初始必连 follower）：选主收敛 → follower 重定向注册 → `docker stop` leader 窗口
+    5×双栈 ping 无一丢失（数据面不经 coord）→ 存活副本 term 递增选新主 → 节点经
+    重定向链幂等重注册（node_id 唯一）→ 旧 leader 重启以 Follower 回归 → 终态双栈通
 - **e2e 容器网段**（RFC 1918，避开 docker 默认池 172.17-172.30 与 CGNAT）：
   - `192.168.240.0/23`：mesh e2e 专用（direct 用 `192.168.240.0/24`，relay 的
     net1/net2 用 `192.168.240.0/24` + `192.168.241.0/24`）
@@ -70,7 +75,7 @@ node-C 容器 ──┘
 
 | 脚本 | 覆盖 | 前置条件 |
 |---|---|---|
-| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist\|log\|reload\|tenancy\|probe\|iperf`（默认 direct） | docker + compose 构建 |
+| `e2e/run_e2e.sh` | mesh 全链路入口：`setup.sh` + 场景断言；`MESH_E2E_SCENARIO=direct\|relay\|persist\|log\|reload\|tenancy\|probe\|recover\|mtu\|acl\|status\|dn42\|ha\|iperf`（默认 direct；全场景清单见 `e2e/scenarios/`） | docker + compose 构建 |
 
 `iperf` 场景（性能基准 L4，见 [../perf.md](../perf.md)）：TUN 隧道 iperf3 双向吞吐，PASS 只判退出码（数值记录 perf.md，不设阈值）。环境变量：`MESH_E2E_TOPOLOGY=relay` 用线形拓扑（经中继，转发优化最灵敏配置）；`MESH_E2E_CPUS=0` 全容器 cpuset 绑单核（资源约束约定见 perf.md §2.2）。
 | `e2e/setup.sh` | 初始化：base 镜像/CA/密钥/编译/配置/构建启动/路由与黑洞注入；幂等（开头强制 `cleanup.sh`） | 同上 |

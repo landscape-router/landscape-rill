@@ -54,11 +54,13 @@ async fn start_coord_with_handle() -> (String, String, Arc<Mutex<CoordinatorServ
         .lock()
         .await
         .coordinator
-        .add_auth_key(&ak, AuthKeyPolicy::Reusable);
-    server.lock().await.coordinator.set_announce_whitelist(
-        "lab",
-        vec![landscape_rill_core::route::Prefix::parse("10.0.0.0/8").unwrap()],
-    );
+        .with_coord_mut(|c| c.add_auth_key(&ak, AuthKeyPolicy::Reusable));
+    server.lock().await.coordinator.with_coord_mut(|c| {
+        c.set_announce_whitelist(
+            "lab",
+            vec![landscape_rill_core::route::Prefix::parse("10.0.0.0/8").unwrap()],
+        )
+    });
     let srv = server.clone();
     tokio::spawn(async move {
         let mut listener = listener;
@@ -623,7 +625,7 @@ async fn acl_prefix_rules_enforced_at_target_node() {
         .lock()
         .await
         .coordinator
-        .set_acl_policy("lab", lab_policy(vec![1]));
+        .with_coord_mut(|c| c.set_acl_policy("lab", lab_policy(vec![1])));
     let mut a = Node::new(node_config(&url, &ca, 1, vec![]), fast_opts())
         .await
         .unwrap();
@@ -679,7 +681,7 @@ async fn acl_prefix_rules_enforced_at_target_node() {
         .lock()
         .await
         .coordinator
-        .set_acl_policy("lab", tightened.clone());
+        .with_coord_mut(|c| c.set_acl_policy("lab", tightened.clone()));
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         assert!(Instant::now() < deadline, "acl convergence timeout");

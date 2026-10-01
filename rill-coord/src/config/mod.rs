@@ -48,6 +48,35 @@ pub struct CoordConfig {
     /// 密码只存 PBKDF2 哈希（明文禁止落盘，教训 KC-02）；哈希非法 → 拒绝启动（fail-closed）
     #[serde(default)]
     pub status: Option<StatusConfig>,
+    /// Raft 集群（REQ-070 阶段二）；None = 单机形态。
+    /// 静态成员：变更 = 改配置 + 按序重启（2026-10-01 决策）。
+    /// 日志/状态存储 = storage_path 派生（<path 去扩展名>-raftlog.redb / -raftstate.redb）
+    #[serde(default)]
+    pub cluster: Option<ClusterConfig>,
+}
+
+/// Raft 集群静态成员配置（REQ-070 阶段二，CONTROL_PLANE §1.2 副本间 mTLS）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterConfig {
+    /// 本副本成员 id（静态，配置权威）
+    pub node_id: u64,
+    /// 副本间 raft RPC 监听地址（mTLS，客户端证书必带）
+    pub raft_listen_addr: String,
+    /// 全体成员（含自己）；id 唯一且须含本 id
+    pub members: Vec<ClusterMember>,
+    /// 副本间 mTLS CA（验证对端证书；本副本客户端证书 = tls_cert_path/tls_key_path）
+    pub ca_cert_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterMember {
+    pub id: u64,
+    /// 副本间 raft RPC 地址（host:port；host 可为 DNS 名——容器部署服务名解析）
+    pub addr: String,
+    /// 节点面控制端地址（host:port）：LeaderRedirect 提示节点重连的目标（§3.6）
+    pub advertise: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,6 +199,59 @@ impl AclConfig {
     }
 }
 
+impl ClusterConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.raft_listen_addr.parse::<SocketAddr>().map_err(|_| {
+            ConfigError(format!(
+                "invalid cluster.raft_listen_addr: {}",
+                self.raft_listen_addr
+            ))
+        })?;
+        if self.members.is_empty() {
+            return Err(ConfigError("cluster.members must not be empty".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for m in &self.members {
+            if !seen.insert(m.id) {
+                return Err(ConfigError(format!(
+                    "duplicate cluster member id: {}",
+                    m.id
+                )));
+            }
+            // host:port（host 可为 DNS 名——容器部署服务名解析）
+            for addr in [&m.addr, &m.advertise] {
+                let Some((_, port)) = addr.rsplit_once(':') else {
+                    return Err(ConfigError(format!("invalid cluster member addr: {addr}")));
+                };
+                port.parse::<u16>()
+                    .map_err(|_| ConfigError(format!("invalid cluster member addr: {addr}")))?;
+            }
+        }
+        if !self.members.iter().any(|m| m.id == self.node_id) {
+            return Err(ConfigError(format!(
+                "cluster.node_id {} not in members list",
+                self.node_id
+            )));
+        }
+        if self.ca_cert_path.trim().is_empty() {
+            return Err(ConfigError("cluster.ca_cert_path is empty".into()));
+        }
+        Ok(())
+    }
+
+    /// raft 日志/状态存储路径（storage_path 派生：去扩展名 + 后缀）
+    pub fn raft_storage_paths(
+        &self,
+        storage_path: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let stem = storage_path.strip_suffix(".redb").unwrap_or(storage_path);
+        (
+            std::path::PathBuf::from(format!("{stem}-raftlog.redb")),
+            std::path::PathBuf::from(format!("{stem}-raftstate.redb")),
+        )
+    }
+}
+
 impl CoordConfig {
     /// 从 JSON 文本解析（加载即校验，fail-closed：任何非法配置拒绝启动）
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
@@ -235,6 +317,14 @@ impl CoordConfig {
         if let Some(addr) = &self.udp_listen_addr {
             addr.parse::<SocketAddr>()
                 .map_err(|_| ConfigError(format!("invalid udp_listen_addr: {addr}")))?;
+        }
+        if let Some(cluster) = &self.cluster {
+            if self.storage_path.is_none() {
+                return Err(ConfigError(
+                    "cluster requires storage_path (raft log/state derive from it)".into(),
+                ));
+            }
+            cluster.validate()?;
         }
         if let Some(status) = &self.status {
             status.listen_addr.parse::<SocketAddr>().map_err(|_| {

@@ -1,5 +1,6 @@
-//! Raft 网络层占位（REQ-070 阶段一）：单机集群无对端 RPC，全部方法不可达。
-//! 阶段二替换为 inter-coord mTLS RPC（成员静态配置 + LeaderRedirect，CONTROL_PLANE §3.6）
+//! Raft 网络层占位（单机过日志形态）：无对端 RPC，全部方法不可达。
+//! 集群形态的 inter-coord mTLS RPC 在 rill-mesh::control::raft_rpc（REQ-070 阶段二）；
+//! 本模块保留给单机/测试装置（写路径仍过日志，复制面不启用）
 
 #![allow(clippy::result_large_err)] // openraft RPCError 体积较大（外部类型）
 

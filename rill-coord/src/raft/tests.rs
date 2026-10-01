@@ -61,9 +61,10 @@ fn raft_config() -> Arc<Config> {
     Arc::new(
         Config {
             cluster_name: "coord-test".to_string(),
-            heartbeat_interval: 10,
-            election_timeout_min: 30,
-            election_timeout_max: 60,
+            // 留足余量：并行测试负载下过紧的选举超时会让 leader 错过心跳而卸任
+            heartbeat_interval: 25,
+            election_timeout_min: 150,
+            election_timeout_max: 300,
             ..Default::default()
         }
         .validate()
@@ -120,19 +121,19 @@ async fn write(raft: &Raft<TypeConfig>, cmd: CoordCommand) -> CoordCommandResult
 }
 
 async fn register(raft: &Raft<TypeConfig>, ak: &str, seed: u8) -> u32 {
-    match write(
-        raft,
-        CoordCommand::Register {
-            auth_key: ak.to_string(),
-            static_pubkey: pubkey(seed),
-            capabilities: 0,
-            routes: vec![],
-        },
-    )
-    .await
-    {
+    match write(raft, register_cmd(ak, seed, 0, vec![])).await {
         CoordCommandResult::Register(Ok(d)) => d.node_id,
         other => panic!("register failed: {other:?}"),
+    }
+}
+
+fn register_cmd(ak: &str, seed: u8, capabilities: u32, routes: Vec<String>) -> CoordCommand {
+    CoordCommand::Register {
+        auth_key: ak.to_string(),
+        static_pubkey: pubkey(seed),
+        capabilities,
+        routes,
+        now: 0,
     }
 }
 
@@ -195,27 +196,13 @@ async fn single_node_equivalent_to_direct_calls() {
 
     // 注册 ×2：响应逐字段等价
     for seed in 1..=2u8 {
-        let raft_data = match write(
-            &raft,
-            CoordCommand::Register {
-                auth_key: ak.clone(),
-                static_pubkey: pubkey(seed),
-                capabilities: 0x01,
-                routes: vec![format!("10.4{}.0.0/24", seed)],
-            },
-        )
-        .await
-        {
+        let routes = vec![format!("10.4{}.0.0/24", seed)];
+        let raft_data = match write(&raft, register_cmd(&ak, seed, 0x01, routes.clone())).await {
             CoordCommandResult::Register(Ok(d)) => d,
             other => panic!("register failed: {other:?}"),
         };
         let direct_data = direct
-            .register(
-                &ak,
-                &pubkey(seed),
-                0x01,
-                vec![format!("10.4{}.0.0/24", seed)],
-            )
+            .register(&ak, &pubkey(seed), 0x01, routes, 0)
             .unwrap();
         assert_eq!(raft_data, direct_data);
     }
@@ -237,6 +224,7 @@ async fn single_node_equivalent_to_direct_calls() {
             source: 1,
             dest: 2,
             max: 4,
+            now: 5_000,
         },
     )
     .await
@@ -244,7 +232,7 @@ async fn single_node_equivalent_to_direct_calls() {
         CoordCommandResult::RequestPaths(p) => p,
         other => panic!("request_paths failed: {other:?}"),
     };
-    let direct_paths = direct.request_paths(1, 2, 4);
+    let direct_paths = direct.request_paths(1, 2, 4, 5_000);
     assert_eq!(raft_paths.len(), direct_paths.len());
     assert!(!raft_paths.is_empty());
 
@@ -363,7 +351,7 @@ async fn revoke_rotation_window_semantics_hold_through_log() {
     .await;
     let mut direct = direct_coordinator(&ak);
     register(&raft, &ak, 1).await;
-    direct.register(&ak, &pubkey(1), 0, vec![]).unwrap();
+    direct.register(&ak, &pubkey(1), 0, vec![], 0).unwrap();
     let version_before = machine.with(|m| m.coordinator().key_version_for("lab"));
 
     // 未知节点吊销：不命中、不动窗口
@@ -515,4 +503,532 @@ async fn manual_snapshot_builds_from_state_and_restarts_from_it() {
             .unwrap();
     assert_eq!(snap_state.nodes.len(), 1, "快照内容 = CoordState");
     raft.shutdown().await.unwrap();
+}
+
+// ============================================================================
+// 阶段二：进程内 3 节点集群（静态成员）——复制/follower 写拒绝/故障转移/旧 leader 回归。
+// 真实部署的 inter-coord mTLS RPC 由接线层实现，此处 channel 直连验证共识层行为
+// ============================================================================
+
+use openraft::error::{
+    ClientWriteError, Fatal, RPCError, RaftError, ReplicationClosed, StreamingError, Unreachable,
+};
+use openraft::network::RPCOption;
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+};
+use std::collections::HashMap;
+use tokio::sync::{mpsc, oneshot};
+
+#[allow(clippy::large_enum_variant)]
+enum TestMsg {
+    Append(
+        AppendEntriesRequest<TypeConfig>,
+        oneshot::Sender<Result<AppendEntriesResponse<u64>, String>>,
+    ),
+    Vote(
+        VoteRequest<u64>,
+        oneshot::Sender<Result<VoteResponse<u64>, String>>,
+    ),
+    FullSnapshot(
+        openraft::Vote<u64>,
+        openraft::Snapshot<TypeConfig>,
+        oneshot::Sender<Result<SnapshotResponse<u64>, String>>,
+    ),
+}
+
+#[derive(Clone)]
+struct TestNetwork {
+    txs: Arc<std::sync::Mutex<HashMap<u64, mpsc::UnboundedSender<TestMsg>>>>,
+}
+
+#[derive(Clone)]
+struct TestNetworkFactory {
+    net: TestNetwork,
+}
+
+#[derive(Clone)]
+struct TestNetworkClient {
+    net: TestNetwork,
+    target: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("test rpc failed: {0}")]
+struct TestRpcError(String);
+
+#[allow(clippy::result_large_err)]
+fn rpc_unreachable<T>(msg: &str) -> Result<T, RPCError<u64, BasicNode, RaftError<u64>>> {
+    Err(RPCError::Unreachable(Unreachable::new(&TestRpcError(
+        msg.to_string(),
+    ))))
+}
+
+impl TestNetwork {
+    fn new() -> Self {
+        Self {
+            txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 挂接节点服务循环：入站 RPC 转调 raft 服务端方法
+    fn attach(&self, id: u64, raft: Raft<TypeConfig>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        self.txs.lock().unwrap().insert(id, tx);
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    TestMsg::Append(rpc, reply) => {
+                        let _ =
+                            reply.send(raft.append_entries(rpc).await.map_err(|e| e.to_string()));
+                    }
+                    TestMsg::Vote(rpc, reply) => {
+                        let _ = reply.send(raft.vote(rpc).await.map_err(|e| e.to_string()));
+                    }
+                    TestMsg::FullSnapshot(vote, snapshot, reply) => {
+                        let _ = reply.send(
+                            raft.install_full_snapshot(vote, snapshot)
+                                .await
+                                .map_err(|e| e.to_string()),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[allow(clippy::result_large_err)]
+    async fn request<T>(
+        &self,
+        target: u64,
+        build: impl FnOnce(oneshot::Sender<Result<T, String>>) -> TestMsg,
+    ) -> Result<T, RPCError<u64, BasicNode, RaftError<u64>>> {
+        let (tx, rx) = oneshot::channel();
+        {
+            let Ok(map) = self.txs.lock() else {
+                return rpc_unreachable("network poisoned");
+            };
+            let Some(sender) = map.get(&target) else {
+                return rpc_unreachable("node not attached");
+            };
+            if sender.send(build(tx)).is_err() {
+                return rpc_unreachable("node gone");
+            }
+        }
+        match rx.await {
+            Ok(Ok(v)) => Ok(v),
+            // 远端错误简化为 Unreachable（测试网只关心通/断与数据面正确性）
+            Ok(Err(e)) => rpc_unreachable(&e),
+            Err(_) => rpc_unreachable("node dropped"),
+        }
+    }
+}
+
+impl openraft::RaftNetworkFactory<TypeConfig> for TestNetworkFactory {
+    type Network = TestNetworkClient;
+
+    async fn new_client(&mut self, target: u64, _node: &BasicNode) -> Self::Network {
+        TestNetworkClient {
+            net: self.net.clone(),
+            target,
+        }
+    }
+}
+
+impl openraft::RaftNetwork<TypeConfig> for TestNetworkClient {
+    async fn append_entries(
+        &mut self,
+        rpc: AppendEntriesRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+        self.net
+            .request(self.target, |reply| TestMsg::Append(rpc, reply))
+            .await
+    }
+
+    async fn vote(
+        &mut self,
+        rpc: VoteRequest<u64>,
+        _option: RPCOption,
+    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+        self.net
+            .request(self.target, |reply| TestMsg::Vote(rpc, reply))
+            .await
+    }
+
+    async fn full_snapshot(
+        &mut self,
+        vote: openraft::Vote<u64>,
+        snapshot: openraft::Snapshot<TypeConfig>,
+        _cancel: impl std::future::Future<Output = ReplicationClosed> + Send + 'static,
+        _option: RPCOption,
+    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, Fatal<u64>>> {
+        self.net
+            .request(self.target, |reply| {
+                TestMsg::FullSnapshot(vote, snapshot, reply)
+            })
+            .await
+            .map_err(|_| {
+                StreamingError::Unreachable(Unreachable::new(&TestRpcError(
+                    "snapshot rpc failed".into(),
+                )))
+            })
+    }
+}
+
+struct ClusterNode {
+    id: u64,
+    raft: Raft<TypeConfig>,
+    machine: SharedStateMachine,
+}
+
+/// 起一个集群成员（静态成员 id；复用已存路径 = 重启/回归场景）
+async fn spawn_cluster_node(
+    net: &TestNetwork,
+    id: u64,
+    log_path: &Path,
+    state_path: &Path,
+    configure: impl FnOnce(&mut Coordinator),
+) -> ClusterNode {
+    let log_store = RaftLogStore::open(log_path).unwrap();
+    let machine = SharedStateMachine::open(machine_config(), state_path).unwrap();
+    machine.with_coordinator_mut(configure);
+    let factory = TestNetworkFactory { net: net.clone() };
+    let raft = Raft::new(id, raft_config(), factory, log_store, machine.clone())
+        .await
+        .unwrap();
+    net.attach(id, raft.clone());
+    ClusterNode { id, raft, machine }
+}
+
+fn cluster_paths(tag: &str, id: u64) -> (PathBuf, PathBuf) {
+    (
+        tmp_file(&format!("cluster-{tag}-{id}-log")),
+        tmp_file(&format!("cluster-{tag}-{id}-state")),
+    )
+}
+
+async fn await_any_leader(nodes: &[&ClusterNode], exclude: &[u64]) -> u64 {
+    for _ in 0..1000 {
+        for n in nodes {
+            if exclude.contains(&n.id) {
+                continue;
+            }
+            if matches!(
+                n.raft.metrics().borrow().state,
+                openraft::ServerState::Leader
+            ) {
+                return n.id;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("10s 内未选出 leader");
+}
+
+/// 等全部成员状态机收敛到同一持久状态（applied 对齐 + 状态快照相等）
+async fn await_converged(nodes: &[&ClusterNode]) -> CoordState {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let states: Vec<Vec<u8>> = nodes
+            .iter()
+            .map(|n| serde_json::to_vec(&machine_state(&n.machine)).unwrap())
+            .collect();
+        let applied: Vec<Option<u64>> = nodes
+            .iter()
+            .map(|n| n.machine.with(|m| m.last_applied().map(|l| l.index)))
+            .collect();
+        let converged = states.windows(2).all(|w| w[0] == w[1])
+            && applied.windows(2).all(|w| w[0] == w[1])
+            && applied.iter().all(|a| a.is_some());
+        if converged {
+            return serde_json::from_slice(&states[0]).unwrap();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "10s 内未收敛: applied={applied:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn auth_config(ak: &str) -> impl FnOnce(&mut Coordinator) + '_ {
+    move |c: &mut Coordinator| {
+        c.add_auth_key(ak, AuthKeyPolicy::Reusable);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_node_cluster_replicates_writes_and_rejects_follower_writes() {
+    let net = TestNetwork::new();
+    let ak = lrk("lab", 86_400);
+    let paths: Vec<_> = (0..3).map(|id| cluster_paths("repl", id)).collect();
+    let mut nodes = Vec::new();
+    for id in 0..3u64 {
+        nodes.push(
+            spawn_cluster_node(
+                &net,
+                id,
+                &paths[id as usize].0,
+                &paths[id as usize].1,
+                auth_config(&ak),
+            )
+            .await,
+        );
+    }
+    // 单点 initialize 3 成员（静态成员集）
+    nodes[0]
+        .raft
+        .initialize(BTreeMap::from([
+            (0, BasicNode::default()),
+            (1, BasicNode::default()),
+            (2, BasicNode::default()),
+        ]))
+        .await
+        .unwrap();
+    let leader = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
+    let leader_node = &nodes[leader as usize];
+
+    // leader 写入 → 多数派复制 → 全员 apply
+    let node_id = match leader_node
+        .raft
+        .client_write(register_cmd(&ak, 7, 0x01, vec![]))
+        .await
+        .unwrap()
+        .data
+    {
+        CoordCommandResult::Register(Ok(d)) => d.node_id,
+        other => panic!("cluster register failed: {other:?}"),
+    };
+    assert_eq!(node_id, 1);
+    let refs: Vec<_> = nodes.iter().collect();
+    let state = await_converged(&refs).await;
+    assert_eq!(state.nodes.len(), 1, "全部副本都应 apply 注册");
+
+    // follower 写 → ForwardToLeader（带 leader id，LeaderRedirect 依据）
+    let follower = &nodes[(if leader == 0 { 1 } else { 0 }) as usize];
+    let err = follower
+        .raft
+        .client_write(register_cmd(&ak, 8, 0x01, vec![]))
+        .await
+        .unwrap_err();
+    match err {
+        openraft::error::RaftError::APIError(ClientWriteError::ForwardToLeader(ftl)) => {
+            assert_eq!(ftl.leader_id, Some(leader), "转发目标必须是当前 leader");
+        }
+        other => panic!("follower write should forward, got: {other:?}"),
+    }
+
+    for n in &nodes {
+        n.raft.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leader_failover_then_old_leader_rejoins_as_follower() {
+    let net = TestNetwork::new();
+    let ak = lrk("lab", 86_400);
+    let paths: Vec<_> = (0..3).map(|id| cluster_paths("failover", id)).collect();
+    let mut nodes = Vec::new();
+    for id in 0..3u64 {
+        nodes.push(
+            spawn_cluster_node(
+                &net,
+                id,
+                &paths[id as usize].0,
+                &paths[id as usize].1,
+                auth_config(&ak),
+            )
+            .await,
+        );
+    }
+    nodes[0]
+        .raft
+        .initialize(BTreeMap::from([
+            (0, BasicNode::default()),
+            (1, BasicNode::default()),
+            (2, BasicNode::default()),
+        ]))
+        .await
+        .unwrap();
+    let leader1 = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
+    // 写入 node_id=1
+    write(
+        &nodes[leader1 as usize].raft,
+        register_cmd(&ak, 1, 0, vec![]),
+    )
+    .await;
+    let refs: Vec<_> = nodes.iter().collect();
+    await_converged(&refs).await;
+
+    // kill leader（shutdown 模拟宕机；句柄全释放）
+    nodes[leader1 as usize].raft.shutdown().await.unwrap();
+    let killed = nodes.swap_remove(nodes.iter().position(|n| n.id == leader1).unwrap());
+    drop(killed); // 释放 redb 句柄（回归场景复用路径）
+    let remaining: Vec<&ClusterNode> = nodes.iter().collect();
+    let leader2 = await_any_leader(&remaining, &[]).await;
+    assert_ne!(leader2, leader1, "新 leader 必须是另一个成员");
+
+    // 故障转移后可写（注册 b → node_id=2，node_id 分配器经日志复制不回退）
+    let leader2_node = remaining.iter().find(|n| n.id == leader2).unwrap();
+    match write(&leader2_node.raft, register_cmd(&ak, 2, 0, vec![])).await {
+        CoordCommandResult::Register(Ok(d)) => assert_eq!(d.node_id, 2),
+        other => panic!("write after failover failed: {other:?}"),
+    }
+    let state = await_converged(&remaining).await;
+    assert_eq!(state.nodes.len(), 2);
+
+    // 旧 leader 回归：复用原路径重启 → 追日志 → 以 follower 身份收敛
+    let rejoined = spawn_cluster_node(
+        &net,
+        leader1,
+        &paths[leader1 as usize].0,
+        &paths[leader1 as usize].1,
+        auth_config(&ak),
+    )
+    .await;
+    assert!(
+        !matches!(
+            rejoined.raft.metrics().borrow().state,
+            openraft::ServerState::Leader
+        ),
+        "回归节点不得立刻自认 leader"
+    );
+    nodes.push(rejoined);
+    let refs: Vec<_> = nodes.iter().collect();
+    let state = await_converged(&refs).await;
+    assert_eq!(state.nodes.len(), 2, "回归副本追平两条注册");
+    let rejoined_ref = nodes.iter().find(|n| n.id == leader1).unwrap();
+    assert!(
+        !matches!(
+            rejoined_ref.raft.metrics().borrow().state,
+            openraft::ServerState::Leader
+        ),
+        "回归节点应保持 follower"
+    );
+
+    for n in &nodes {
+        let _ = n.raft.shutdown().await;
+    }
+}
+
+// ============================================================================
+// CoordBackend 门面（阶段二）：leadership 视图 + 写分派（leader 直提/Forward 提示）
+// ============================================================================
+
+use crate::raft::backend::{CoordBackend, Leadership, WriteError};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backend_leadership_view_and_write_dispatch() {
+    let net = TestNetwork::new();
+    let ak = lrk("lab", 86_400);
+    let paths: Vec<_> = (0..3).map(|id| cluster_paths("backend", id)).collect();
+    let mut nodes = Vec::new();
+    for id in 0..3u64 {
+        nodes.push(
+            spawn_cluster_node(
+                &net,
+                id,
+                &paths[id as usize].0,
+                &paths[id as usize].1,
+                auth_config(&ak),
+            )
+            .await,
+        );
+    }
+    nodes[0]
+        .raft
+        .initialize(BTreeMap::from([
+            (0, BasicNode::default()),
+            (1, BasicNode::default()),
+            (2, BasicNode::default()),
+        ]))
+        .await
+        .unwrap();
+    let leader = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
+    let follower_id = (leader + 1) % 3;
+
+    // advertise 表（id → 节点面地址占位）
+    let advertise: std::collections::HashMap<u64, String> = (0..3)
+        .map(|id| (id, format!("127.0.0.1:{}", 9000 + id)))
+        .collect();
+    let backend_of = |n: &ClusterNode| CoordBackend::Cluster {
+        raft: n.raft.clone(),
+        machine: n.machine.clone(),
+        members: Arc::new(advertise.clone()),
+        self_id: n.id,
+    };
+
+    let leader_node = nodes.iter().find(|n| n.id == leader).unwrap();
+    let follower_node = nodes.iter().find(|n| n.id == follower_id).unwrap();
+    let leader_backend = backend_of(leader_node);
+    let follower_backend = backend_of(follower_node);
+
+    // leadership 视图（follower 的 current_leader 经 metrics watch 传播，
+    // 晚于 leader 自身状态——轮询至 follower 视图收敛）
+    assert_eq!(leader_backend.leadership(), Leadership::Leader);
+    let expected = format!("127.0.0.1:{}", 9000 + leader);
+    let mut follower_view = None;
+    for _ in 0..500 {
+        follower_view = Some(follower_backend.leadership());
+        if matches!(
+            &follower_view,
+            Some(Leadership::Follower { leader_endpoint: Some(ep), .. }) if *ep == expected
+        ) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        follower_view,
+        Some(Leadership::Follower {
+            leader_endpoint: Some(expected),
+            term: follower_node.raft.metrics().borrow().current_term,
+        }),
+        "follower 视图应收敛到 leader 节点面地址"
+    );
+
+    // leader 写 → 直提成功；单机等价读（with_coord 看到已 apply 条目）
+    let data = leader_backend
+        .register(&ak, &pubkey(1), 0x00, vec![], 0)
+        .await
+        .unwrap();
+    assert_eq!(data.node_id, 1);
+    assert!(leader_backend.with_coord(|c| c.node_id_by_pubkey(&pubkey(1)).is_some()));
+
+    // follower 写 → Forward（携 leader 节点面地址；LeaderRedirect 依据）
+    match follower_backend
+        .register(&ak, &pubkey(2), 0x00, vec![], 0)
+        .await
+    {
+        Err(WriteError::Forward { leader_endpoint }) => {
+            assert_eq!(
+                leader_endpoint,
+                Some(format!("127.0.0.1:{}", 9000 + leader))
+            );
+        }
+        other => panic!("follower write should forward, got: {other:?}"),
+    }
+    match follower_backend.revoke(1, 0).await {
+        Err(WriteError::Forward { .. }) => {}
+        other => panic!("follower revoke should forward, got: {other:?}"),
+    }
+
+    // Single 形态回归：leadership 恒 Leader、写直调等价
+    let mut single_coord = Coordinator::new([0x5a; 32]);
+    single_coord.add_network("lab", [0x77; 32]);
+    single_coord.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+    single_coord.set_announce_whitelist("lab", vec![Prefix::parse("10.41.0.0/24").unwrap()]);
+    let single = CoordBackend::single(single_coord);
+    assert_eq!(single.leadership(), Leadership::Leader);
+    let d = single
+        .register(&ak, &pubkey(3), 0x00, vec![], 0)
+        .await
+        .unwrap();
+    assert_eq!(d.node_id, 1);
+    assert!(single.revoke(1, 0).await.unwrap(), "Single 吊销命中");
+
+    for n in &nodes {
+        let _ = n.raft.shutdown().await;
+    }
 }

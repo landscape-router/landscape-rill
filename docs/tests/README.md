@@ -35,7 +35,7 @@
 | 域 | 文件 | 场景 ID |
 |---|---|---|
 | mesh 帧头/握手/广播 | [mesh/frame.md](./mesh/frame.md) | `FRM-01` ~ `FRM-11` |
-| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-17` |
+| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-23` |
 | mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-10` |
 | ts2021 接入 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-11` |
 | dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
@@ -105,7 +105,7 @@
 | REQ-050 | — | 📌 proposed（无验收场景） | — |
 | REQ-051 | ADM-07 | 已覆盖 | rill-coord/src/status.rs、rilld/src/coord_run.rs、e2e/mesh/status/、e2e/scenarios/status.sh |
 | REQ-069 | ADM-08 | 已覆盖 | rilld/src/status_http.rs、e2e/scenarios/status.sh |
-| REQ-070 | CTL-22 | 部分覆盖（阶段一单机过日志已覆盖；阶段二/三待验收） | rill-coord/src/raft/ |
+| REQ-070 | CTL-12 / CTL-22 / CTL-23 | 部分覆盖（阶段一单机过日志 + 阶段二 3 副本 e2e 已覆盖；阶段三 REQ-049② 待验收） | rill-coord/src/raft/、e2e/scenarios/ha.sh、e2e/mesh/ha/ |
 | REQ-052 | CTL-21 | 已覆盖 | rill-mesh/src/data/、rill-coord/src/coordinator/、rill-coord/src/status.rs、e2e/scenarios/status.sh |
 | REQ-053 | FRM-12 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/tests.rs |
 | REQ-054 | CON-11 | 已覆盖 | rill-mesh/src/data/、rill-node/src/runtime/、e2e/run_e2e.sh（MESH_E2E_TRANSPORT=tcp） |
