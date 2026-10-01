@@ -83,18 +83,89 @@ fn key_dist_unknown_node_none() {
     assert!(c.key_dist(99).is_none());
 }
 
+/// REQ-048：吊销即时语义不变，轮换延后到窗口末一次生效
 #[test]
-fn revoke_removes_and_bumps_versions() {
+fn revoke_immediate_removal_rotation_deferred() {
     let (mut c, ak) = setup();
     let id = register_node(&mut c, &ak, 1);
     let nid = c.network_id_of(id).unwrap();
     let nv = c.netmap_version();
     let kv = c.key_version_for("lab");
-    c.revoke(id);
+    c.revoke(id, 100);
     assert_eq!(c.netmap_snapshot(nid).len(), 0);
-    assert_eq!(c.netmap_version(), nv + 1);
-    assert_eq!(c.key_version_for("lab"), kv + 1);
+    assert_eq!(c.netmap_version(), nv + 1); // 即时：条目移除
+    assert_eq!(c.key_version_for("lab"), kv); // REQ-048：轮换入窗口
     assert!(c.key_dist(id).is_none());
+    assert!(!c.flush_revoke_rotations(100 + REVOKE_ROTATION_WINDOW_SECS - 1));
+    assert_eq!(c.key_version_for("lab"), kv);
+    assert!(c.flush_revoke_rotations(100 + REVOKE_ROTATION_WINDOW_SECS));
+    assert_eq!(c.key_version_for("lab"), kv + 1);
+    assert!(!c.flush_revoke_rotations(1000), "清窗后幂等");
+    assert_eq!(c.key_version_for("lab"), kv + 1);
+}
+
+/// REQ-048：窗口内 N 次吊销共享一次轮换
+#[test]
+fn revoke_batch_shares_single_rotation() {
+    let (mut c, ak) = setup();
+    let a = register_node(&mut c, &ak, 1);
+    let b = register_node(&mut c, &ak, 2);
+    let d = register_node(&mut c, &ak, 3);
+    let kv = c.key_version_for("lab");
+    c.revoke(a, 100);
+    c.revoke(b, 130);
+    c.revoke(d, 159);
+    assert_eq!(c.key_version_for("lab"), kv);
+    assert!(c.flush_revoke_rotations(160));
+    assert_eq!(c.key_version_for("lab"), kv + 1, "3 次吊销 → 1 次轮换");
+}
+
+/// REQ-048：窗口外的吊销各自触发轮换
+#[test]
+fn revoke_outside_window_rotates_separately() {
+    let (mut c, ak) = setup();
+    let a = register_node(&mut c, &ak, 1);
+    let b = register_node(&mut c, &ak, 2);
+    let kv = c.key_version_for("lab");
+    c.revoke(a, 100);
+    assert!(c.flush_revoke_rotations(100 + REVOKE_ROTATION_WINDOW_SECS));
+    c.revoke(b, 200);
+    assert_eq!(c.key_version_for("lab"), kv + 1);
+    assert!(c.flush_revoke_rotations(200 + REVOKE_ROTATION_WINDOW_SECS));
+    assert_eq!(c.key_version_for("lab"), kv + 2);
+}
+
+/// REQ-048：显式 rotate_master_key 不走合并窗口——立即轮换并吸收挂起窗口
+#[test]
+fn rotate_master_key_bypasses_and_absorbs_window() {
+    let (mut c, ak) = setup();
+    let id = register_node(&mut c, &ak, 1);
+    let kv = c.key_version_for("lab");
+    c.revoke(id, 100); // 挂起窗口
+    c.rotate_master_key("lab", [0x99; 32]);
+    assert_eq!(c.key_version_for("lab"), kv + 1, "立即生效");
+    assert!(!c.flush_revoke_rotations(1000), "挂起窗口被吸收");
+    assert_eq!(c.key_version_for("lab"), kv + 1);
+}
+
+/// REQ-048：合并窗口 deadline 落盘，重启后到期自愈（下一事件驱动点生效）
+#[test]
+fn revoke_rotation_window_survives_restore() {
+    let ak = lrk("lab", 86_400);
+    let path = tmp_db("req048-window");
+    {
+        let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
+        c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+        let a = c.register(&ak, &pubkey(1), 0x01, vec![]).unwrap().node_id;
+        c.revoke(a, 100);
+        drop(c);
+    }
+    let mut c = Coordinator::open(&path, &networks_arg(), [0x5a; 32]).unwrap();
+    assert_eq!(c.key_version_for("lab"), 1, "重启不提前生效");
+    assert!(c.flush_revoke_rotations(1000), "deadline 已过 → 到期轮换");
+    assert_eq!(c.key_version_for("lab"), 2);
+    drop(c);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -724,7 +795,7 @@ fn telemetry_cleared_on_revoke() {
     let (mut c, ak) = setup();
     let id = register_node(&mut c, &ak, 0x11);
     c.store_telemetry(id, view(id, 1));
-    c.revoke(id);
+    c.revoke(id, 0);
     assert!(c.telemetry_all().is_empty());
 }
 

@@ -94,13 +94,22 @@
 - 证据：rill-core/src/control/registry.rs
 - 说明：单测 identity_lookup_uses_raw_pubkey_bytes（pubkey 单字节翻转查无，binding 锚定原始字节）+ binding_bytes_not_a_registry_key（换 signer 重签 binding 不影响身份解析与幂等判定；吊销按 node_id 生效，原/重编码绑定一律查无）——吊销键 = node_id，与编码无关
 
+## SEC-32 批量吊销合并轮换（REQ-048）
+
+- 关联 REQ：REQ-048 / REQ-022
+- 测试层：单测
+- 状态：`已覆盖`
+- 证据：rill-coord/src/keys.rs、rill-coord/src/coordinator/tests.rs
+- 说明：窗口内 N 次吊销 → 1 次 key_version++（首条定窗不延期）；吊销即时性不回退（条目移除/netmap bump/路径 Withdraw 即时，轮换批次末生效）；窗口外吊销各自轮换；显式 rotate_master_key 立即生效并吸收挂起窗口；deadline 落盘重启自愈（事件驱动点评估，无后台任务）
+
 ## 验收断言
 
 - [ ] SEC-12：伪 coordinator 拒绝连接、auth key 不泄露、日志明确报信任锚失败（容器级）
 - [x] SEC-13：一次性 key 二次使用被拒、吊销联动
 - [x] SEC-14：DH 挑战闭环、无私钥者无法构造 tag
 - [ ] SEC-15：重放旧 challenge 被拒（时间窗口 + 一次性临时密钥，容器级复验待补）
-- [x] SEC-16：吊销立即生效（重连失败、旧会话作废、条目移除）
+- [x] SEC-16：吊销立即生效（重连失败、旧会话作废、条目移除；轮换合并窗口不回退即时性，REQ-048）
+- [x] SEC-32：批量吊销合并轮换（N 吊销 → 1 轮换；即时语义不变；手动轮换旁路；重启自愈，REQ-048）
 - [ ] SEC-17：版本不兼容明确报错（控制面首消息协商待实现）
 - [ ] SEC-18：伪造心跳无法延长在线状态（容器级）
 - [ ] SEC-19：畸形消息不 panic、单连接隔离（fuzz 待补；限速断连已闭环）

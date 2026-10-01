@@ -41,6 +41,10 @@ pub struct CoordState {
     pub path_maps: Vec<NetworkPathMap>,
     /// (network_id, relay_list)：RTT 排序结果落盘（CONNECTIVITY §5）
     pub relay_lists: Vec<(u32, Vec<String>)>,
+    /// (network_id, deadline)：吊销合并轮换窗口落盘（REQ-048），重启后自愈；
+    /// 旧 schema v2 快照无此字段 → 视为无挂起窗口
+    #[serde(default)]
+    pub pending_revoke_rotations: Vec<(u32, u64)>,
 }
 
 impl From<redb::CommitError> for StoreError {

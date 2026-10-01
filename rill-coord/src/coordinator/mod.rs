@@ -24,12 +24,14 @@ use landscape_rill_core::route::Prefix;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
 pub const CAPABILITY_RELAY: u32 = 0x01;
 /// 能力位：broadcast（L2 广播/组播泛洪 opt-in，CONTROL_PLANE §3.1 / FRAME_HEADER §2.6）
 pub const CAPABILITY_BROADCAST: u32 = 0x20;
+/// 吊销合并轮换窗口（REQ-048，CONTROL_PLANE §5.5）：窗口内多次吊销共享一次全网轮换
+pub const REVOKE_ROTATION_WINDOW_SECS: u64 = 60;
 pub use landscape_rill_core::control::acl::CAPABILITY_ACL;
 
 fn unix_seconds() -> u64 {
@@ -250,6 +252,13 @@ impl Coordinator {
             {
                 domain.relay_list = list.clone();
             }
+            if let Some((_, deadline)) = state
+                .pending_revoke_rotations
+                .iter()
+                .find(|(id, _)| *id == domain.network_id)
+            {
+                domain.keys.restore_revoke_rotation(*deadline);
+            }
         }
         self.directory.restore(
             state.netmap_version,
@@ -295,6 +304,16 @@ impl Coordinator {
             .map(|d| (d.network_id, d.relay_list.clone()))
             .collect();
         relay_lists.sort_by_key(|(id, _)| *id);
+        let mut pending_revoke_rotations: Vec<(u32, u64)> = self
+            .domains
+            .iter()
+            .filter_map(|d| {
+                d.keys
+                    .pending_revoke_rotation()
+                    .map(|deadline| (d.network_id, deadline))
+            })
+            .collect();
+        pending_revoke_rotations.sort_by_key(|(id, _)| *id);
         let mut consumed: Vec<String> = self
             .domains
             .iter()
@@ -311,6 +330,7 @@ impl Coordinator {
             endpoints,
             path_maps,
             relay_lists,
+            pending_revoke_rotations,
         }
     }
 
@@ -698,6 +718,8 @@ impl Coordinator {
     }
 
     pub fn heartbeat(&mut self, node_id: u32, now: u64) -> bool {
+        // 吊销合并轮换到期评估（REQ-048）：先于快照推送——本周期推送即带新版本
+        self.flush_revoke_rotations(now);
         // 离线扫描（CTL-11）：挂在本调用（每次心跳/注册完成处理）上——事件驱动，
         // 无后台任务。租约超时者标记离线、恢复者清除，转移发生即递增 netmap
         // 版本（下一次心跳推送即携带撤销/恢复后的路由）。返回是否发生该节点的
@@ -726,7 +748,8 @@ impl Coordinator {
         self.liveness.offline_nodes()
     }
 
-    pub fn revoke(&mut self, node_id: u32) {
+    pub fn revoke(&mut self, node_id: u32, now: u64) {
+        self.flush_revoke_rotations(now);
         let revoked = self
             .domains
             .iter_mut()
@@ -738,7 +761,10 @@ impl Coordinator {
                 self.telemetry.remove(&node_id);
                 // 路径联动：撤销所有涉及该节点的路径（源/目的/中继）
                 d.paths.withdraw_node(node_id);
-                d.keys.bump_version();
+                // REQ-048：吊销即时语义不变（移除/Withdraw/netmap 即时），
+                // 轮换进合并窗口，批次末一次生效
+                d.keys
+                    .arm_revoke_rotation(now + REVOKE_ROTATION_WINDOW_SECS);
                 self.directory.bump_netmap();
                 d.sync_relays();
             })
@@ -748,10 +774,32 @@ impl Coordinator {
         }
     }
 
-    /// 主密钥轮换（按网络；SIGHUP/管理面入口）
+    /// 到期的吊销合并轮换统一生效（REQ-048，CONTROL_PLANE §5.5）。评估点 =
+    /// 事件驱动（心跳/注册后心跳/吊销入口），与租约扫描同模式，无后台任务。
+    pub fn flush_revoke_rotations(&mut self, now: u64) -> bool {
+        let mut rotated = false;
+        for d in &mut self.domains {
+            if d.keys.take_revoke_rotation(now) {
+                info!(
+                    "[coord] revoke batch rotation applied: network={} key_version={}",
+                    d.name,
+                    d.keys.version()
+                );
+                rotated = true;
+            }
+        }
+        if rotated {
+            self.persist();
+        }
+        rotated
+    }
+
+    /// 主密钥轮换（按网络；SIGHUP/管理面入口）。REQ-048：显式轮换立即生效，
+    /// 并吸收挂起的合并窗口（轮换已发生，批次不再额外 bump）
     pub fn rotate_master_key(&mut self, network: &str, new_master_key: [u8; 32]) {
         if let Some(domain) = self.domain_by_name_mut(network) {
             domain.keys.rotate(new_master_key);
+            domain.keys.clear_revoke_rotation();
             self.persist();
         }
     }

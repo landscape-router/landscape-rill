@@ -100,7 +100,7 @@
 | REQ-045 | SEC-28 / SEC-31 | 已覆盖 | rill-core/src/control/acl.rs、rill-coord/src/config/、rill-coord/src/coordinator/、rill-mesh/src/control/、rill-node/src/runtime/、e2e/scenarios/acl.sh |
 | REQ-046 | SEC-07 / SEC-26 / CON-10 | 已覆盖 | rill-node/src/runtime/、rill-mesh/src/data/、rill-core/src/rate.rs、rill-core/src/probe.rs、e2e/run_e2e.sh（probe 场景） |
 | REQ-047 | SEC-20 / SEC-29 | 已覆盖 | rill-mesh/src/control/server.rs、rill-node/src/runtime/、rill-coord/src/path_service.rs、rilld/src/coord_run.rs |
-| REQ-048 | — | 📌 proposed（无验收场景） | — |
+| REQ-048 | SEC-32 | 已覆盖 | rill-coord/src/keys.rs、rill-coord/src/coordinator/ |
 | REQ-049 | — | 📌 proposed（无验收场景） | — |
 | REQ-050 | — | 📌 proposed（无验收场景） | — |
 | REQ-051 | ADM-07 | 已覆盖 | rill-coord/src/status.rs、rilld/src/coord_run.rs、e2e/mesh/status/、e2e/scenarios/status.sh |
