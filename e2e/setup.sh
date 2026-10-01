@@ -159,6 +159,16 @@ print(base64.b64encode(seed).decode())
   NODE_WG_PUB=$(printf '%s' "$SEED_B64" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
   PEER_R2_PRIV=$(docker run --rm mesh-dn42-peer-img wg genkey)
   PEER_R2_PUB=$(printf '%s' "$PEER_R2_PRIV" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
+  # REQ-065（DNL-16）双 ext：node-c 的 WG 公钥（同 clamp 派生）+ peer-r3 密钥
+  SEED_C_B64=$(printf '%s' "$NODE_C_KEY" | python3 -c '
+import base64, sys
+seed = bytes.fromhex(sys.stdin.read().strip())
+seed = bytes([seed[0] & 248]) + seed[1:31] + bytes([seed[31] & 127 | 64])
+print(base64.b64encode(seed).decode())
+')
+  NODE_C_WG_PUB=$(printf '%s' "$SEED_C_B64" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
+  PEER_R3_PRIV=$(docker run --rm mesh-dn42-peer-img wg genkey)
+  PEER_R3_PUB=$(printf '%s' "$PEER_R3_PRIV" | docker run --rm -i mesh-dn42-peer-img wg pubkey)
 
   cat > "$BUILD_DIR/dn42/wg0.conf" <<WGEOF
 [Interface]
@@ -232,6 +242,41 @@ protocol bgp peer_r {
 }
 BIRDEOF
 
+  # REQ-065（DNL-16）peer-r3：node-c 的 Bird peer（隧道 172.20.103.0/30），
+  # 公告 172.20.201.0/24（与 peer-r 的 live network 同前缀 → 双 ext 同前缀分流）
+  cat > "$BUILD_DIR/dn42/wg0-r3.conf" <<WGEOF3
+[Interface]
+PrivateKey = $PEER_R3_PRIV
+Address = 172.20.103.2/30
+Address = fd00:103::2/126
+ListenPort = 51822
+
+[Peer]
+PublicKey = $NODE_C_WG_PUB
+AllowedIPs = 172.20.103.1/32, fd00:103::1/128, 10.44.0.0/24, fd00:4::/64, 10.88.0.0/24, fd00:88::/64
+WGEOF3
+
+  cat > "$BUILD_DIR/dn42/bird-r3.conf" <<BIRDEOF3
+log syslog all;
+router id 172.20.103.2;
+
+protocol device { }
+
+protocol static announce {
+    ipv4;
+    route 172.20.201.0/24 blackhole;
+}
+
+protocol bgp peer_c {
+    local as 4242420005;
+    neighbor 172.20.103.1 as 4242420001;
+    ipv4 {
+        import all;
+        export all;
+    };
+}
+BIRDEOF3
+
   cat > "$BUILD_DIR/dn42/zebra.conf" <<ZEBEOF
 hostname peer-r
 log syslog
@@ -289,6 +334,44 @@ ZEBEOF
   }
 }
 NODEEOF
+
+  # REQ-065（DNL-16）node-c：第二 ext（独立 dn42 leg：peer-r3 Bird 隧道 172.20.103.0/30）
+  cat > "$BUILD_DIR/node-c.json" <<NODECEOF
+{
+  "coordinator_url": "https://coord:8443",
+  "auth_key": "$NODE_C_AUTHKEY",
+  "static_key_seed": "$NODE_C_KEY",
+  "capabilities": 0,
+  "announce_routes": ["10.44.0.0/24", "fd00:4::/64"],
+  "coord_signing_pubkey": "$COORD_PUBKEY",
+  "ca_cert_path": "/etc/landscape/ca.pem",
+  "data_transport": "udp",
+  "tun": { "name": "land0", "mtu": 1420, "address4": "10.44.0.1/24", "address6": "fd00:4::1/64" },
+  "dn42": {
+    "local_as": 4242420001,
+    "bgp_id": "172.20.103.1",
+    "hold_time": 15,
+    "own_prefixes": ["172.20.3.0/24"],
+    "announce_to_mesh": true,
+    "peers": [
+      {
+        "name": "peer-r3",
+        "endpoint": "192.168.243.16:51822",
+        "public_key": "$PEER_R3_PUB",
+        "local_v4": "172.20.103.1",
+        "local_v6": "fd00:103::1",
+        "peer_v4": "172.20.103.2",
+        "peer_v6": "fd00:103::2",
+        "peer_as": 4242420005,
+        "bgp_port": 179,
+        "local_bgp_port": 179,
+        "whitelist": ["172.20.0.0/14"],
+        "max_prefixes": 100
+      }
+    ]
+  }
+}
+NODECEOF
 
   # node-b（M2，DNL-14/15）：mesh 第二节点；172.21.5.0/24 = 仲裁目标
   # （node-b lo 承载 172.21.5.1，mesh 路径回包、dn42 路径 peer 黑洞）
@@ -657,6 +740,10 @@ if [ "$SCENARIO" = "persist" ] || [ "$SCENARIO" = "reload" ] || [ "$SCENARIO" = 
   # compose build 默认跳过 profile 门控服务（persist/reload/tenancy 的 late 节点）——
   # 须显式带 profile 构建，否则后续 up 会复用旧镜像（证书/二进制陈旧导致 BadSignature）
   $COMPOSE --profile late build -q
+fi
+if [ "$SCENARIO" = "dn42" ]; then
+  # dn42 的 dual 门控同坑（node-c，REQ-065）：不重建则复用旧 CA → BadSignature
+  $COMPOSE --profile dual build -q
 fi
 $COMPOSE up -d --force-recreate
 

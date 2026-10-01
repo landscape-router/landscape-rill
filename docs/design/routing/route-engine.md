@@ -1,7 +1,7 @@
 # 路由策略引擎（ROUTE_ENGINE）
 
 > landscape-rill 的转发决策核心：单 TUN 汇合点，统一裁决流量走哪条接入。
-> 版本：v0.5（2026-09-29 修订：§6.3 MTU 实现级决定落档（RTE-07））｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023
+> 版本：v0.7（2026-10-01 修订：§3/§6.3 来源优先级链插入 dyn-dn42（REQ-065 RouteMap 派生路由）：LAN > mesh > dn42 > dyn-dn42 > tailnet——本地 BGP 学习与静态 mesh 公告均压动态路由，动态又压 tailnet；v0.5 为 §6.3 MTU 实现级决定落档）｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023 / REQ-065
 
 ## 1. 定位
 
@@ -49,7 +49,7 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 
 **tun0 信任边界（LAN 侧设备视为可信）**：tun0 是物理 LAN 的延伸，LAN 内设备可无认证直入 overlay——信任边界在物理/管理面（LAN 是可信网络）；mesh 成员侧逐身份认证 + 吊销；v2 候选：tun0 源白名单（管理面配置允许的源地址）。
 
-**冲突消解（定稿，REQ-021）**：固定来源优先级 `LAN > mesh > dn42 > tailnet`——等长前缀时按此顺序取。依据：各接入地址空间天然不重叠（dn42 172.20/14、tailnet 100.64/10、mesh 自定义段），实际冲突 = 同源多 via（多 rill ext 出口公告同一前缀），已由 §2 多网关冗余机制处理；逐条配置 metric 挂 v2（需要管理语义）。
+**冲突消解（定稿，REQ-021；REQ-065 增补 dyn-dn42）**：固定来源优先级 `LAN > mesh > dn42 > dyn-dn42 > tailnet`——等长前缀时按此顺序取。依据：各接入地址空间天然不重叠（dn42 172.20/14、tailnet 100.64/10、mesh 自定义段），实际冲突 = 同源多 via（多 rill ext 出口公告同一前缀），已由 §2 多网关冗余机制处理；逐条配置 metric 挂 v2（需要管理语义）。`dyn-dn42`（RouteMap 派生，CONTROL_PLANE §3.17）插在中间：**本地 BGP 学习 > 远端 ext 动态路由**（ext 自身本地路径优先）、**静态 mesh 公告（注册 routes[]）> 动态路由**（coordinator 权威静态信息优先，同 DNL-15 跨腿仲裁语义）、动态 > tailnet。
 
 ## 4. Fallback 链
 
@@ -125,14 +125,14 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 
 - mesh exit 与 ts2021 exit 的默认路由竞争优先级——v1 静态配置
 
-（冲突消解已定稿：固定优先级 `LAN > mesh > dn42 > tailnet`，见 §3）
+（冲突消解已定稿：固定优先级 `LAN > mesh > dyn-dn42 > dn42 > tailnet`，见 §3）
 
 （tailnet 路由传播已定稿：rill ext 节点公告 tailnet 前缀进 mesh，见 §3 回程）
 
 ## 9. 实现级决定（2026-08-15，core/route 落档，47 单测）
 
 - **LPM 实现 = 线性扫描**（v1 条目规模小，正确性优先；P4 XDP 快速路径时换 eBPF，用户态表语义不变）
-- **lookup 排序语义**：`len 降序（最长前缀优先）→ source 优先级升序（LAN > mesh > dn42 > tailnet）`；同前缀同源多 via 全部返回（多网关冗余，按插入序）
+- **lookup 排序语义**：`len 降序（最长前缀优先）→ source 优先级升序（LAN > mesh > dn42 > dyn-dn42 > tailnet）`；同前缀同源多 via 全部返回（多网关冗余，按插入序；dyn-dn42 多 ext 同前缀多条 = RouteMap 快照序）
 - **fallback 链 = lookup_best(addr, reachable 谓词)**：按上述排序逐个询问可达性，第一个可达即选；全部不可达 → None（丢弃）——v1 可达性由调用方（接入会话状态）喂入，静态链语义
 - **策略检查点**：`lookup → 调用方 policy 谓词过滤 → 封装`（v1 恒放行 = 全端口可达语义；ACL v2 在此接入，见 §2 策略裁决点）
 - **Prefix 归一化**：parse 时按 len 掩码 host 位（存储即规范形态）；`0.0.0.0/0` 合法（WAN 默认路由），禁止过短前缀的校验属于公告流程（coordinator 白名单，CONTROL_PLANE §3.8）而非查表层

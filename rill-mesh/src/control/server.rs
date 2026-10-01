@@ -13,6 +13,7 @@ use landscape_rill_coord::status::{
     PeerTrafficView as PeerTrafficDst, TelemetryView,
 };
 use landscape_rill_core::rate::{RateCounter, SourceRateLimiter, TokenBucket, RATE_SUMMARY_PERIOD};
+use landscape_rill_core::route::Prefix;
 use landscape_rill_proto::wire::control::*;
 use quick_protobuf::{BytesReader, MessageRead};
 use std::borrow::Cow;
@@ -874,6 +875,8 @@ impl CoordinatorServer {
                     self.push_snapshot(stream, network_id).await?;
                     // 路径事件推送（v1.5，CONTROL_PLANE §3.11）：PathUpdate/PathWithdraw
                     self.push_path_events(stream, node_id).await?;
+                    // RouteMap 版本推送（REQ-065，§3.17）：版本变化才全量下发
+                    self.push_route_map(stream, node_id).await?;
                     let lease = Lease {
                         granted: true,
                         expires_at: unix_seconds() + 60,
@@ -942,9 +945,10 @@ impl CoordinatorServer {
             MsgType::PATH_PROBE
             | MsgType::PATH_PROBE_RESPONSE
             | MsgType::PATH_UPDATE
-            | MsgType::PATH_WITHDRAW => {
+            | MsgType::PATH_WITHDRAW
+            | MsgType::ROUTE_MAP => {
                 // 节点↔节点 PathProbe 走数据面语义（活性由数据面心跳承担，v1.5）；
-                // PathUpdate/PathWithdraw 为 coordinator → 节点单向推送，不收
+                // PathUpdate/PathWithdraw/RouteMap 为 coordinator → 节点单向推送，不收
                 let _ = body;
             }
             MsgType::ENDPOINT_REPORT => {
@@ -965,6 +969,42 @@ impl CoordinatorServer {
                         }
                     }
                 }
+            }
+            MsgType::ROUTE_SYNC => {
+                // BGP 动态路由上报（REQ-065，CONTROL_PLANE §3.17）：增量合并进
+                // leader 本地 RouteMap 软状态（可由节点重报重建，不进 raft 日志）
+                let mut reader = BytesReader::from_bytes(body);
+                let sync = RouteSync::from_reader(&mut reader, body)?;
+                let Some(node_id) = state.registered else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "route sync before registration",
+                    )
+                    .into());
+                };
+                let leadership = self.coordinator.leadership();
+                if matches!(leadership, Leadership::Follower { .. }) {
+                    self.write_leader_redirect(stream, &leadership).await?;
+                    return Ok(());
+                }
+                let parse = |s: &str| {
+                    Prefix::parse(s).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("bad route prefix {s:?}: {e}"),
+                        )
+                    })
+                };
+                let mut announced = Vec::with_capacity(sync.announced.len());
+                for r in &sync.announced {
+                    announced.push((parse(&r.prefix)?, r.next_hop.to_string()));
+                }
+                let mut withdrawn = Vec::with_capacity(sync.withdrawn.len());
+                for p in &sync.withdrawn {
+                    withdrawn.push(parse(p)?);
+                }
+                self.coordinator
+                    .with_coord_mut(|c| c.apply_route_sync(node_id, announced, withdrawn));
             }
             _ => {}
         }
@@ -1019,6 +1059,32 @@ impl CoordinatorServer {
                     write_msg(stream, MsgType::PATH_WITHDRAW, &envelope_body(&msg)).await?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// 心跳推送（REQ-065，CONTROL_PLANE §3.17）：RouteMap 版本变化才全量下发
+    async fn push_route_map<W: AsyncWriteExt + Unpin>(
+        &mut self,
+        stream: &mut W,
+        node: u32,
+    ) -> BoxResult<()> {
+        if let Some((version, entries)) = self
+            .coordinator
+            .with_coord_mut(|c| c.take_route_map_push(node))
+        {
+            let msg = RouteMap {
+                version,
+                entries: entries
+                    .into_iter()
+                    .map(|e| RouteMapEntry {
+                        prefix: Cow::Owned(e.prefix.to_cidr()),
+                        node_id: e.node_id,
+                        next_hop: Cow::Owned(e.next_hop),
+                    })
+                    .collect(),
+            };
+            write_msg(stream, MsgType::ROUTE_MAP, &envelope_body(&msg)).await?;
         }
         Ok(())
     }

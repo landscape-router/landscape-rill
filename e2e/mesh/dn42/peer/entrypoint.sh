@@ -12,6 +12,12 @@ ip route add blackhole 10.99.0.0/16 2>/dev/null || true
 # 172.20.200.0/24 = peer-r2 的第二条公告（DNL-09 max-prefix 触发用）
 ip route add blackhole 172.20.200.0/24 2>/dev/null || true
 
+# 172.20.201.0/24 = REQ-065（DNL-16）双 ext 分流前缀：peer-r（live network 注入，
+# RIB 由 lo 连接路由支撑）与 peer-r3（Bird static 公告）各承载 .1 供回包
+if [ "$(hostname)" = "peer-r" ] || [ "$(hostname)" = "peer-r3" ]; then
+  ip addr add 172.20.201.1/24 dev lo 2>/dev/null || true
+fi
+
 if [ "$(hostname)" = "peer-r" ]; then
   # DNL-12 规模公告的 RIB 支撑路由（bgpd network 依赖 RIB 命中）
   for i in $(seq 0 399); do
@@ -23,8 +29,8 @@ if [ "$(hostname)" = "peer-r" ]; then
   done
 fi
 
-# BGP 守护：peer-r = FRR（zebra + bgpd），peer-r2 = Bird（双实现互操作，DN42_LEG §7）
-if [ "$(hostname)" = "peer-r2" ]; then
+# BGP 守护：peer-r = FRR（zebra + bgpd），peer-r2/peer-r3 = Bird（双实现互操作，DN42_LEG §7）
+if [ "$(hostname)" = "peer-r2" ] || [ "$(hostname)" = "peer-r3" ]; then
   mkdir -p /run/bird
   bird -c /etc/bird/bird.conf
   for _ in $(seq 1 20); do

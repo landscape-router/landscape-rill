@@ -123,6 +123,22 @@ impl MeshClient {
         };
         envelope_bytes(MsgType::PATH_REQUEST, &msg)
     }
+
+    /// BGP 动态路由上报（REQ-065，CONTROL_PLANE §3.17）：增量
+    /// announced = (prefix, next_hop)；坐标端做覆盖域/数量/抖动门控
+    pub fn route_sync(&self, announced: Vec<(String, String)>, withdrawn: Vec<String>) -> Vec<u8> {
+        let msg = RouteSync {
+            announced: announced
+                .into_iter()
+                .map(|(prefix, next_hop)| RouteDyn {
+                    prefix: Cow::Owned(prefix),
+                    next_hop: Cow::Owned(next_hop),
+                })
+                .collect(),
+            withdrawn: withdrawn.into_iter().map(Cow::Owned).collect(),
+        };
+        envelope_bytes(MsgType::ROUTE_SYNC, &msg)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +272,12 @@ pub enum ControlEvent {
         leader_endpoint: String,
         raft_term: u64,
     },
+    /// 全网动态路由表（RouteMap，REQ-065 CONTROL_PLANE §3.17）：版本变化时全量下发
+    RouteMap {
+        version: u64,
+        /// (prefix, 源 node_id, next_hop)
+        entries: Vec<(String, u32, String)>,
+    },
 }
 
 /// 路径候选（control 层消息载体 → runtime 注入 MeshData）
@@ -331,6 +353,16 @@ impl ControlSession {
             seen: seen.into_iter().map(Cow::Owned).collect(),
         };
         envelope_bytes(MsgType::ENDPOINT_REPORT, &msg)
+    }
+
+    /// BGP 动态路由上报（REQ-065，CONTROL_PLANE §3.17）：增量
+    /// announced = (prefix, next_hop)；坐标端做覆盖域/数量/抖动门控
+    pub fn route_sync_envelope(
+        &self,
+        announced: Vec<(String, String)>,
+        withdrawn: Vec<String>,
+    ) -> Vec<u8> {
+        self.client.route_sync(announced, withdrawn)
     }
 
     /// 读取一个控制面事件（阻塞读；io 错误 = 断线，调用方重连）。
@@ -475,6 +507,19 @@ impl ControlSession {
                 Ok(ControlEvent::LeaderRedirect {
                     leader_endpoint: r.leader_endpoint.into_owned(),
                     raft_term: r.raft_term,
+                })
+            }
+            MsgType::ROUTE_MAP => {
+                let owned = RouteMapOwned::try_from(body).map_err(decoding_err)?;
+                let entries = owned
+                    .proto()
+                    .entries
+                    .iter()
+                    .map(|e| (e.prefix.to_string(), e.node_id, e.next_hop.to_string()))
+                    .collect();
+                Ok(ControlEvent::RouteMap {
+                    version: owned.proto().version,
+                    entries,
                 })
             }
             other => Err(std::io::Error::new(

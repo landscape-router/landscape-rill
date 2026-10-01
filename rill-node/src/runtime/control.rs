@@ -46,6 +46,9 @@ impl Node {
                 }
                 // 端点上报：数据面 UDP 地址（本机各接口 IP + echo seen 地址）→ coordinator 并入 netmap
                 self.report_endpoints().await;
+                // RouteMap 为 leader 本地软状态（REQ-065，§3.17）：重注册即
+                // 全量重报已上报视图（新主/failover 后协调端视图为空）
+                self.route_report.resync_on_registered(Instant::now());
             }
             ControlEvent::Netmap(netmap) => {
                 // 挑战通过后服务端重推 netmap：Reconnecting → ChallengeOk
@@ -135,6 +138,7 @@ impl Node {
                 self.mesh.remove_peer_capabilities(node_id);
                 self.mesh.remove_paths_for(node_id);
                 self.engine.remove_mesh_node(node_id);
+                self.engine.remove_dyn_dn42_node(node_id);
                 self.netmap_peers.remove(&node_id);
                 self.peer_heartbeats.remove(&node_id);
                 if let Some(control) = self.control.as_mut() {
@@ -228,6 +232,33 @@ impl Node {
                 }
                 self.control = None;
             }
+            ControlEvent::RouteMap { version, entries } => {
+                // 全网动态路由表（REQ-065，§3.17）：DynDn42 整表重建（与 netmap
+                // 独立版本空间——路由抖动不污染拓扑版本）。自身贡献跳过：本地
+                // BGP 学习（source=Dn42）优先级更高且 via 直指隧道
+                self.engine.reset_dyn_dn42_routes();
+                let me = self.node_id.unwrap_or(u32::MAX);
+                let mut applied = 0usize;
+                for (cidr, node_id, _next_hop) in &entries {
+                    if *node_id == me {
+                        continue;
+                    }
+                    if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(cidr) {
+                        self.engine.insert(RouteEntry {
+                            prefix,
+                            source: RouteSource::DynDn42,
+                            via: RouteVia::Mesh(*node_id),
+                            metric: None,
+                        });
+                        applied += 1;
+                    }
+                }
+                info!(
+                    "[node] route map v{version}: {}/{} entries applied (dyn-dn42)",
+                    applied,
+                    entries.len()
+                );
+            }
         }
         Ok(())
     }
@@ -262,7 +293,11 @@ impl Node {
             self.mesh.set_endpoints(entry.node_id, addrs);
             // 离线条目（CTL-11）：路由不进路由表（可达性撤销）——对端身份/端点/
             // 密钥照常维护，节点回在线后随 netmap 刷新自动恢复路由
-            if !entry.offline {
+            if entry.offline {
+                // 动态路由联动（REQ-065）：ext 离线即撤其动态路由（服务端随
+                // withdraw_node 推新 RouteMap 版本，这里即时清理不等推送）
+                self.engine.remove_dyn_dn42_node(entry.node_id);
+            } else {
                 for route in &entry.routes {
                     if let Ok(prefix) = landscape_rill_core::route::Prefix::parse(route) {
                         if !mesh_routes.contains(route) {
@@ -289,6 +324,7 @@ impl Node {
             self.mesh.drop_session(*stale);
             self.mesh.remove_paths_for(*stale);
             self.engine.remove_mesh_node(*stale);
+            self.engine.remove_dyn_dn42_node(*stale);
         }
         self.netmap_peers = fresh;
         self.peer_endpoints = peer_endpoints;

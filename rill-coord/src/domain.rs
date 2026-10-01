@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::keys::KeyManager;
 use crate::path_service::PathService;
+use crate::route_map::RouteMapService;
 
 /// network_id 保留值：0 = 未分配（合法网络名散列值不得为 0）
 pub const NETWORK_ID_UNSET: u32 = 0;
@@ -56,6 +57,11 @@ pub struct NetworkDomain {
     /// ACL 策略（REQ-045，CONTROL_PLANE §3.10）：coordinator 权威，随 netmap 原子下发；
     /// 配置是唯一来源（apply_to 应用），不持久化
     pub acl: AclPolicy,
+    /// RouteMap（REQ-065，§3.17）：动态"前缀 → ext 节点"聚合表。leader 视角
+    /// 软状态（不进 raft/不落盘）——派生数据，节点注册后全量补报可重建
+    pub route_map: RouteMapService,
+    /// 每节点最近已推送的 RouteMap 版本（版本变化才随心跳全量推送）
+    pub route_map_pushed: HashMap<u32, u64>,
 }
 
 impl NetworkDomain {
@@ -71,6 +77,8 @@ impl NetworkDomain {
             relay_rtt: HashMap::new(),
             relay_miss: HashMap::new(),
             acl: AclPolicy::default(),
+            route_map: RouteMapService::new(),
+            route_map_pushed: HashMap::new(),
         }
     }
 

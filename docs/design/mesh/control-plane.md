@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-064 / REQ-066
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-064 / REQ-065 / REQ-066
 
-**版本：v0.22（2026-10-01 修订：REQ-064 逐路径统计与 PathProbe 激活——§3.11 新增统计与探活段（接收侧 (peer, path_id) 分桶 / PATH_PROBE 数据面帧 / advisory 择优）；§3.15 新增逐路径质量桶上报；v0.21 为 REQ-062 relay 池策划）**
+**版本：v0.23（2026-10-01 修订：REQ-065 dn42 逐条路由动态上报——新增 §3.17 RouteSync/RouteMap 消息族（防抖上报 / 服务端聚合与三道闸 / 独立版本空间）；v0.22 为 REQ-064 逐路径统计与 PathProbe 激活）**
 
 **最后修改：2026-10-01**
 
@@ -456,6 +456,32 @@ coordinator 权威地知道"注册了谁"，遥测补齐"数据面实际怎么�
 - 单机形态：replica_endpoints 为空 → 无审计目标，审计静默关闭
 
 **已知限制（v1）**：replica 列表由当前连接的 coordinator 下发，恶意 leader 可下发不完整列表缩窄审计面（列举自身以外的诚实副本仍会暴露 Conflict）；锚定的是注册表核心（绑定）而非 netmap 全文（netmap 版本含软状态——liveness/接管重置本地 bump，非日志纯度，不适合作审计锚）。
+
+### 3.17 RouteSync / RouteMap（dn42 逐条路由动态上报，REQ-065）
+
+动态"怎么到"与 netmap"谁存在"分离（§3.11 PathMap 同哲学）：ext 节点把 BGP LocRib 真实可达性上报控制面，coordinator 聚合为全网 RouteMap 下发——前缀级故障收敛与多 ext 真分流的数据源。聚合公告（DN42_LEG §7 ③）保留为兜底（双轨）。
+
+**消息族**（组空间按 §3.10 Policy 同模式预留）：
+- `RouteSync { announced[], withdrawn[] }`（节点 → coordinator，增量）：announced 每条 = `RouteDyn { prefix, next_hop }`（next_hop = BGP NEXT_HOP，隧道地址）；withdrawn = prefix 列表。需注册后发送（未注册拒绝）；follower 副本按 §3.6 重定向
+- `RouteMap { version, entries[] }`（coordinator → 节点，全量）：entries 每条 = `RouteMapEntry { prefix, node_id, next_hop }`——**源 ext 节点**视角；版本变化才推送，**不 bump netmap version**（路由抖动不污染拓扑版本，独立版本空间）
+
+**客户端（ext 节点）防抖**：BGP 路由事件进 **5s 批处理窗口**（同前缀 latest-wins 合并）后一次上报；控制面不可用期间保留待报增量，注册完成即**全量重报**已上报视图（服务端是 leader 本地软状态，failover 后为空——重注册收敛）。会话断：该 peer 归因的已上报前缀转撤销；多 peer 同前缀仍有其他会话供应则保留（仅换归因，不报撤销）。
+
+**服务端三道闸**（apply 顺序）：
+1. **覆盖域**：每条必须被该节点注册聚合公告覆盖（⊆ routes[]，节点侧 import policy 之外的协调者强制）
+2. **per-node 条数上限**：2000（缺省镜像节点侧 max_prefixes 量级，REQ-047 语义）
+3. **震荡阻尼**：同 (prefix, node) **状态翻转**（缺席↔在场）10min 内 3 次 → 阻尼当次变更 + 期内忽略后续；稳态刷新（next_hop 不变重报）不算翻转
+
+**聚合**：多 ext 同前缀 = 多条并存（不做 best-path——消费端路由引擎多 via 语义裁决，ROUTE_ENGINE §2）；latest-wins（同 (prefix, node) 重报覆盖）。
+
+**生命周期**：BGP 会话断 → 该节点全部动态路由随下一窗口撤销（客户端）；节点离线（租约超时扫描）/ 吊销 → coordinator 同步 `withdraw_node`（全部移除 + 版本 bump + 推送游标重置）。
+
+**消费端**：RouteMap 到达 = **DynDn42 来源整表重建**（先清后插；自身贡献跳过——本地 BGP 学习 source=Dn42 优先级更高且直指隧道）；同前缀更长匹配天然优先于聚合公告（ROUTE_ENGINE §2），逐条缺失/撤销时回落聚合语义（§4 链）。netmap 离线/吊销/消失条目即时清理该节点 DynDn42 路由（不等下一次 RouteMap 推送）。
+
+**状态边界**：RouteMap 为 **leader 本地软状态**（不进 raft 日志、不落盘）——派生数据可由节点重上报重建：注册后全量首发 + 重定向重注册全量补报。与 liveness/遥测同族（§4.1），与 registry/netmap（raft 态）严格分离。
+
+**与 §3.4 心跳的关系**：RouteMap 推送搭载心跳响应批次（netmap 快照 → 路径事件 → RouteMap → Lease 顺序写入），无独立推送通道；RouteSync 上行独立于心跳节奏（防抖窗口驱动）。
+
 
 ## 4. 状态模型（Raft 兼容核心）
 

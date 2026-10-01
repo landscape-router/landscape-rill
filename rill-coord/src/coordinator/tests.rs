@@ -1211,3 +1211,162 @@ fn status_view_multi_network_offline_consumed() {
     let json = serde_json::to_string(&snap).unwrap();
     assert!(!json.contains(&"5a".repeat(8)));
 }
+
+/// REQ-065：RouteSync 覆盖域 = 该节点注册 routes[]；RouteMap 推送按版本变化门控
+#[test]
+fn route_sync_coverage_gate_and_versioned_push() {
+    let ak = lrk("lab", 86_400);
+    let mut c = Coordinator::new([0x5a; 32]);
+    c.add_network("lab", [0x77; 32]);
+    c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+    c.set_announce_whitelist(
+        "lab",
+        vec![
+            Prefix::parse("172.20.0.0/14").unwrap(),
+            Prefix::parse("fd00::/8").unwrap(),
+        ],
+    );
+    let ext = c
+        .register(
+            &ak,
+            &pubkey(1),
+            0x01,
+            vec!["172.20.0.0/14".into(), "fd00::/8".into()],
+            0,
+            (0, 0),
+        )
+        .unwrap()
+        .node_id;
+    let consumer = c
+        .register(&ak, &pubkey(2), 0x01, vec![], 0, (0, 0))
+        .unwrap()
+        .node_id;
+
+    // 覆盖域内采纳；域外拒绝（协调者侧 import policy 之外的强制）
+    let out = c
+        .apply_route_sync(
+            ext,
+            vec![
+                (
+                    Prefix::parse("172.20.100.0/24").unwrap(),
+                    "172.20.100.2".into(),
+                ),
+                (
+                    Prefix::parse("10.99.0.0/16").unwrap(),
+                    "172.20.100.2".into(),
+                ),
+            ],
+            vec![],
+        )
+        .unwrap();
+    assert_eq!((out.accepted, out.rejected_coverage), (1, 1));
+
+    // 版本门控：首次推送带表，无变化不重复推
+    let (v1, entries) = c.take_route_map_push(consumer).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].node_id, ext);
+    assert_eq!(entries[0].prefix.to_cidr(), "172.20.100.0/24");
+    assert_eq!(entries[0].next_hop, "172.20.100.2");
+    assert!(c.take_route_map_push(consumer).is_none(), "版本未变不推");
+
+    // 增量撤销 → 版本变化 → 再推（空表也是有效状态）
+    c.apply_route_sync(ext, vec![], vec![Prefix::parse("172.20.100.0/24").unwrap()])
+        .unwrap();
+    let (v2, entries) = c.take_route_map_push(consumer).unwrap();
+    assert!(v2 > v1);
+    assert!(entries.is_empty());
+
+    // 未注册节点上报 → None（无域可归）
+    assert!(c.apply_route_sync(99, vec![], vec![]).is_none());
+}
+
+/// REQ-065 生命周期：ext 离线（租约超时扫描）→ 动态路由随 RouteMap 撤销
+#[test]
+fn offline_sweep_withdraws_route_map_entries() {
+    let ak = lrk("lab", 86_400);
+    let mut c = Coordinator::new([0x5a; 32]);
+    c.add_network("lab", [0x77; 32]);
+    c.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+    c.set_announce_whitelist(
+        "lab",
+        vec![
+            Prefix::parse("172.20.0.0/14").unwrap(),
+            Prefix::parse("fd00::/8").unwrap(),
+        ],
+    );
+    let ext = c
+        .register(
+            &ak,
+            &pubkey(1),
+            0x01,
+            vec!["172.20.0.0/14".into()],
+            0,
+            (0, 0),
+        )
+        .unwrap()
+        .node_id;
+    let consumer = c
+        .register(&ak, &pubkey(2), 0x01, vec![], 0, (0, 0))
+        .unwrap()
+        .node_id;
+    c.heartbeat(ext, 100);
+    c.heartbeat(consumer, 101);
+    c.apply_route_sync(
+        ext,
+        vec![
+            (
+                Prefix::parse("172.20.100.0/24").unwrap(),
+                "172.20.100.2".into(),
+            ),
+            (Prefix::parse("fd42:1::/48").unwrap(), "fd00:100::2".into()),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let _ = c.take_route_map_push(consumer).unwrap();
+
+    // ext 租约超时（consumer 心跳触发扫描）→ withdraw_node → 版本变化
+    c.heartbeat(consumer, 101 + LEASE_EXPIRY_SECS + 1);
+    let (_, entries) = c.take_route_map_push(consumer).unwrap();
+    assert!(
+        entries.is_empty(),
+        "离线 ext 的动态路由全部撤销: {entries:?}"
+    );
+
+    // ext 回在线重报 → 恢复
+    c.heartbeat(ext, 101 + LEASE_EXPIRY_SECS + 2);
+    c.apply_route_sync(
+        ext,
+        vec![(
+            Prefix::parse("172.20.100.0/24").unwrap(),
+            "172.20.100.2".into(),
+        )],
+        vec![],
+    )
+    .unwrap();
+    let (_, entries) = c.take_route_map_push(consumer).unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+/// REQ-065 生命周期：吊销 → 该节点动态路由撤销 + 推送游标全清
+#[test]
+fn revoke_withdraws_route_map_entries() {
+    let (mut c, ak) = setup();
+    c.set_announce_whitelist("lab", vec![Prefix::parse("fd00::/8").unwrap()]);
+    let ext = c
+        .register(&ak, &pubkey(1), 0x01, vec!["fd00::/8".into()], 0, (0, 0))
+        .unwrap()
+        .node_id;
+    let consumer = register_node(&mut c, &ak, 2);
+    c.apply_route_sync(
+        ext,
+        vec![(Prefix::parse("fd42:1::/48").unwrap(), "fd00:100::2".into())],
+        vec![],
+    )
+    .unwrap();
+    let _ = c.take_route_map_push(consumer).unwrap();
+
+    c.revoke(ext, 200, (7, 1));
+    let (_, entries) = c.take_route_map_push(consumer).unwrap();
+    assert!(entries.is_empty());
+}

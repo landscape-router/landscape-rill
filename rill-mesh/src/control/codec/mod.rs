@@ -106,6 +106,69 @@ mod tests {
         assert_eq!(parsed.capabilities, 0x01);
     }
 
+    // ---- REQ-065：RouteSync/RouteMap 编解码（批量/增量/空）----
+
+    #[test]
+    fn route_sync_roundtrip_batch_incremental_empty() {
+        use crate::control::client::MeshClient;
+        use landscape_rill_proto::wire::control::RouteSync;
+        let client = MeshClient::new([1; 32]);
+        // 批量公告
+        let bytes = client.route_sync(
+            vec![
+                ("172.20.100.0/24".into(), "172.20.100.2".into()),
+                ("fd42:1::/48".into(), "fd00:100::2".into()),
+            ],
+            vec![],
+        );
+        let (mt, inner) = parse_envelope(&bytes).unwrap();
+        assert_eq!(mt, MsgType::ROUTE_SYNC);
+        let mut reader = BytesReader::from_bytes(&inner);
+        let sync = RouteSync::from_reader(&mut reader, &inner).unwrap();
+        assert_eq!(sync.announced.len(), 2);
+        assert_eq!(sync.announced[0].prefix, "172.20.100.0/24");
+        assert_eq!(sync.announced[1].next_hop, "fd00:100::2");
+        assert!(sync.withdrawn.is_empty());
+        // 增量（公告 + 撤销并存）
+        let bytes = client.route_sync(
+            vec![("10.1.0.0/24".into(), "10.1.0.1".into())],
+            vec!["172.20.100.0/24".into()],
+        );
+        let (_, inner) = parse_envelope(&bytes).unwrap();
+        let mut reader = BytesReader::from_bytes(&inner);
+        let sync = RouteSync::from_reader(&mut reader, &inner).unwrap();
+        assert_eq!(sync.announced.len(), 1);
+        assert_eq!(sync.withdrawn, vec![Cow::Borrowed("172.20.100.0/24")]);
+        // 空载荷（合法：窗口冲刷无可报）
+        let bytes = client.route_sync(vec![], vec![]);
+        let (_, inner) = parse_envelope(&bytes).unwrap();
+        let mut reader = BytesReader::from_bytes(&inner);
+        let sync = RouteSync::from_reader(&mut reader, &inner).unwrap();
+        assert!(sync.announced.is_empty() && sync.withdrawn.is_empty());
+    }
+
+    #[test]
+    fn route_map_roundtrip() {
+        use landscape_rill_proto::wire::control::{RouteMap, RouteMapEntry, RouteMapOwned};
+        let msg = RouteMap {
+            version: 7,
+            entries: vec![RouteMapEntry {
+                prefix: Cow::Borrowed("172.20.100.0/24"),
+                node_id: 3,
+                next_hop: Cow::Borrowed("172.20.100.2"),
+            }],
+        };
+        let bytes = envelope_bytes(MsgType::ROUTE_MAP, &msg);
+        let (mt, inner) = parse_envelope(&bytes).unwrap();
+        assert_eq!(mt, MsgType::ROUTE_MAP);
+        let owned = RouteMapOwned::try_from(inner).unwrap();
+        assert_eq!(owned.proto().version, 7);
+        assert_eq!(owned.proto().entries.len(), 1);
+        assert_eq!(owned.proto().entries[0].node_id, 3);
+        assert_eq!(owned.proto().entries[0].prefix, "172.20.100.0/24");
+        assert_eq!(owned.proto().entries[0].next_hop, "172.20.100.2");
+    }
+
     // ---- 预认证解析语料（REQ-059 / SEC-08，CONTROL_PLANE §3.13）----
     // 定头两级解析（长度前缀 + Envelope 定头）对随机/变形输入只经 Result 返回
 

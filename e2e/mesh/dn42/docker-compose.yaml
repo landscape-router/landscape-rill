@@ -65,6 +65,48 @@ services:
       dn42net:
         ipv4_address: 192.168.243.12
 
+  # REQ-065 双 ext 拓扑（DNL-16）：node-c = 第二 ext（独立 dn42 leg + Bird peer-r3）
+  node-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-c
+    environment:
+      RUST_LOG: debug
+    profiles: ["dual"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-c.json:/etc/landscape/overlay.json
+    networks:
+      dn42net:
+        ipv4_address: 192.168.243.15
+
+  peer-r3:
+    image: mesh-dn42-peer-img
+    container_name: mesh-dn42-peer3
+    hostname: peer-r3
+    profiles: ["dual"]
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - ./peer/entrypoint.sh:/entrypoint.sh
+      - ../../build/dn42/wg0-r3.conf:/etc/wireguard/wg0.conf
+      - ../../build/dn42/bird-r3.conf:/etc/bird/bird.conf
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    networks:
+      dn42net:
+        ipv4_address: 192.168.243.16
+
   coord:
     build:
       context: ../..

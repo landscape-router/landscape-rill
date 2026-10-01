@@ -17,12 +17,12 @@ pub struct Dn42PeerLeg {
     pub name: String,
     /// 对端隧道地址（内核 WG 的 connected /30 等价物：SessionUp 时注入 LPM，
     /// 使内核发往对端隧道地址的应答可裁决进本 leg）
-    peer_v4: Ipv4Addr,
-    peer_v6: Ipv6Addr,
-    outbound: mpsc::Sender<Vec<u8>>,
-    events: mpsc::Receiver<Dn42RouteEvent>,
-    plaintext: mpsc::Receiver<Vec<u8>>,
-    established: bool,
+    pub(crate) peer_v4: Ipv4Addr,
+    pub(crate) peer_v6: Ipv6Addr,
+    pub(crate) outbound: mpsc::Sender<Vec<u8>>,
+    pub(crate) events: mpsc::Receiver<Dn42RouteEvent>,
+    pub(crate) plaintext: mpsc::Receiver<Vec<u8>>,
+    pub(crate) established: bool,
 }
 
 impl Dn42PeerLeg {
@@ -158,11 +158,13 @@ impl Node {
                             info!("[node] dn42 session down: {}", leg.name);
                             leg.established = false;
                             self.engine.remove_dn42_peer(&leg.name);
+                            // 上报联动（REQ-065）：该 peer 归因的已上报前缀转撤销
+                            self.route_report.session_down(&leg.name, Instant::now());
                         }
                         Dn42RouteEvent::Changes(changes) => {
                             for change in changes {
                                 match change {
-                                    RouteChange::Learned { prefix, .. } => {
+                                    RouteChange::Learned { prefix, path } => {
                                         info!(
                                             "[node] dn42 learned {} via {}",
                                             prefix.to_cidr(),
@@ -174,9 +176,19 @@ impl Node {
                                             via: RouteVia::Dn42(leg.name.clone()),
                                             metric: None,
                                         });
+                                        // 上报（REQ-065）：NEXT_HOP 作 RouteSync 载荷
+                                        if let Some(nh) = path.next_hop {
+                                            self.route_report.learned(
+                                                prefix,
+                                                nh.to_string(),
+                                                &leg.name,
+                                                Instant::now(),
+                                            );
+                                        }
                                     }
                                     RouteChange::Withdrawn(prefix) => {
                                         self.engine.remove_dn42_route(&prefix, &leg.name);
+                                        self.route_report.withdrawn(prefix, Instant::now());
                                     }
                                 }
                             }

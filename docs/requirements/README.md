@@ -48,7 +48,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-069](./REQ-069-web-admin-api.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §3.14 |
 | [REQ-070](./REQ-070-raft-ha.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §1.2/§3.6/§5.6/§3.16 |
 | [REQ-049](./REQ-049-coordinator-transparency.md) | 需求 | 📌 proposed | P3 | 09-01 | — |
-| [REQ-065](./REQ-065-dn42-route-update.md) | 需求 | 📌 proposed | P3 | 09-03 | — |
+| [REQ-065](./REQ-065-dn42-route-update.md) | 需求 | ✅ merged | — | 09-03 | CONTROL_PLANE §3.17 · ROUTE_ENGINE §3 · DN42_LEG §3 |
 | [REQ-064](./REQ-064-path-stats.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §3.11/§3.15 · FRAME_HEADER §2.7 |
 | [REQ-055](./REQ-055-faketcp-xdp.md) | 决策 | 📌 proposed | P4 | 09-01 | — |
 | [REQ-061](./REQ-061-multihop-relay-chain.md) | 需求 | 📌 proposed | P5 | 09-02 | — |

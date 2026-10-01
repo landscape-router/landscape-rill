@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::DataTransport;
 use landscape_rill_core::control::registry::AuthKeyPolicy;
+use landscape_rill_mesh::control::NetmapNode;
 use landscape_rill_mesh::control::{server_tls_stream, CoordinatorServer};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -868,4 +869,152 @@ async fn data_plane_alive_while_control_connect_stalls() {
         slow_hit.load(std::sync::atomic::Ordering::Relaxed),
         "前置失效：连接未真正悬挂在慢协调者上"
     );
+}
+
+/// REQ-065：RouteMap 全量替换 → DynDn42 整表重建；自身贡献跳过（本地 BGP 优先）
+#[tokio::test]
+async fn route_map_event_applies_dyn_dn42() {
+    let mut a = bare_node(1).await;
+    a.handle_control_event(ControlEvent::RouteMap {
+        version: 1,
+        entries: vec![
+            ("172.20.100.0/24".into(), 2, "172.20.100.2".into()),
+            ("fd42:1::/48".into(), 3, "fd00:100::2".into()),
+            // 自身贡献（node_id=1）：不进表——本地经 source=Dn42 直指隧道
+            ("172.20.99.0/24".into(), 1, "172.20.99.2".into()),
+        ],
+    })
+    .await
+    .unwrap();
+    let via = |node: &Node, dst: &str| {
+        node.engine
+            .lookup(&dst.parse().unwrap())
+            .into_iter()
+            .map(|(e, _)| (e.source, e.via.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        via(&a, "172.20.100.5"),
+        vec![(RouteSource::DynDn42, RouteVia::Mesh(2))]
+    );
+    assert_eq!(
+        via(&a, "fd42:1::1"),
+        vec![(RouteSource::DynDn42, RouteVia::Mesh(3))]
+    );
+    assert!(via(&a, "172.20.99.5").is_empty(), "自身贡献跳过");
+
+    // 新版本整表替换：2 号条目让位、旧前缀消失
+    a.handle_control_event(ControlEvent::RouteMap {
+        version: 2,
+        entries: vec![("172.20.100.0/24".into(), 3, "172.20.100.9".into())],
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        via(&a, "172.20.100.5"),
+        vec![(RouteSource::DynDn42, RouteVia::Mesh(3))]
+    );
+    assert!(via(&a, "fd42:1::1").is_empty(), "整表替换语义");
+
+    // LPM 优先级：逐条命中优先于聚合公告（同前缀更长匹配）
+    a.handle_control_event(ControlEvent::Netmap(NetmapData {
+        version: 3,
+        entries: vec![NetmapNode {
+            node_id: 9,
+            network_id: 1,
+            static_pubkey: [9; 32],
+            endpoints: vec![],
+            capabilities: 0,
+            routes: vec!["172.20.0.0/14".into()],
+            protocol_version: 1,
+            offline: false,
+            identity_binding: vec![],
+            binding_log_id: (0, 0),
+        }],
+        relay_roster: vec![],
+        acl: None,
+        replica_endpoints: vec![],
+    }))
+    .await
+    .unwrap();
+    let best = a
+        .engine
+        .lookup_best(&"172.20.100.5".parse().unwrap(), &|_| true)
+        .unwrap();
+    assert_eq!(
+        (best.source, &best.via),
+        (RouteSource::DynDn42, &RouteVia::Mesh(3)),
+        "逐条（/24）命中优先于聚合（/14）"
+    );
+    // 聚合兜底仍在：无逐条覆盖的地址落到 Mesh(9)
+    let best = a
+        .engine
+        .lookup_best(&"172.20.50.5".parse().unwrap(), &|_| true)
+        .unwrap();
+    assert_eq!(
+        (best.source, &best.via),
+        (RouteSource::Mesh, &RouteVia::Mesh(9))
+    );
+}
+
+/// REQ-065：BGP 事件 → 防抖窗口合并（pump_dn42 → RouteReporter pending）
+#[tokio::test]
+async fn dn42_events_enter_report_window() {
+    use crate::config::Config as NodeConfig;
+    use crate::runtime::dn42::Dn42PeerLeg;
+    use landscape_rill_core::route::Prefix;
+    use landscape_rill_dn42::rib::{BgpPath, RouteChange};
+    use landscape_rill_dn42::session::RouteEvent as Dn42RouteEvent;
+    let mut node = Node::new(
+        NodeConfig {
+            coordinator_url: "https://coord.test:8443".into(),
+            auth_key: "lrk-lab-1735689600-deadbeef".into(),
+            static_key_seed: [1; 32],
+            capabilities: 0,
+            announce_routes: vec![],
+            coord_signing_pubkey: [7; 32],
+            ca_cert_path: "/nonexistent".into(),
+            udp_echo_addr: None,
+            data_transport: Default::default(),
+            coord: None,
+            dn42: None,
+            ts2021: None,
+        },
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(64);
+    let (_pt_tx, pt_rx) = tokio::sync::mpsc::channel(64);
+    node.dn42_peers.push(Dn42PeerLeg {
+        name: "peer-t".into(),
+        peer_v4: std::net::Ipv4Addr::new(172, 20, 101, 2),
+        peer_v6: "fd00:101::2".parse().unwrap(),
+        outbound: out_tx,
+        events: ev_rx,
+        plaintext: pt_rx,
+        established: false,
+    });
+    ev_tx
+        .send(Dn42RouteEvent::Changes(vec![RouteChange::Learned {
+            prefix: Prefix::parse("172.20.100.0/24").unwrap(),
+            path: BgpPath {
+                as_path: vec![4242420002],
+                next_hop: Some("172.20.100.2".parse().unwrap()),
+                origin: 0,
+                communities: vec![],
+            },
+        }]))
+        .await
+        .unwrap();
+    node.pump_dn42().await;
+    assert!(node.route_report.has_pending(), "Learned 事件进入上报窗口");
+    // flush 产出 wire 载荷（next_hop = BGP NEXT_HOP）
+    let (announced, withdrawn) = node.route_report.flush(&node.engine).expect("有待报变更");
+    assert_eq!(
+        announced,
+        vec![("172.20.100.0/24".to_string(), "172.20.100.2".to_string())]
+    );
+    assert!(withdrawn.is_empty());
 }

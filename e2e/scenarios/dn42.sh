@@ -464,4 +464,187 @@ else
   exit 1
 fi
 
-echo "PASS: dn42 e2e 全部断言通过（DNL-01~15）"
+# ---- REQ-065（DNL-16）：RouteMap 双 ext 前缀级分流 ----
+# 拓扑：node-c（第二 ext，独立 dn42 leg ⇄ peer-r3 Bird）经 RouteMap 向全网广播
+# 172.20.201.0/24；peer-r 以 live network 注入同前缀 → 双 ext 同前缀。
+# 验证：动态路由进 RouteMap → node-b 前缀级分流；一端撤销 → 窗口内切换另一 ext；
+# BGP 会话断 → 该 ext 动态路由全撤（聚合兜底黑洞）；第三次翻转 → 阻尼 + 聚合兜底回归
+count_log_node() { # $1=容器 $2=模式
+  local n
+  n=$(docker logs "$1" 2>&1 | grep -c "$2" || true)
+  echo "${n:-0}"
+}
+wait_log_node() { # $1=容器 $2=模式 $3=快照 $4=超时秒
+  for i in $(seq 1 "$4"); do
+    N=$(count_log_node "$1" "$2")
+    [ "${N:-0}" -gt "$3" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+dump_dual_evidence() { # DNL-16 失败现场取证（trap 清理容器前先抓关键日志）
+  local c
+  for c in mesh-coord mesh-node-a mesh-node-b mesh-node-c; do
+    echo "--- DUAL-EVIDENCE $c ---"
+    docker logs "$c" 2>&1 | grep -E "route map|route sync|gated|172\.20\.201|handshake|no route for|endpoint report" | tail -20 || true
+  done
+}
+
+echo "==> DNL-16a: 双 ext 拓扑上线（node-c + peer-r3）"
+# 快照先于 up（容器可能不存在/残留：docker logs 报错按 0 计）
+C_LEARN=$(count_log_node mesh-node-c "dn42 learned 172.20.201.0/24")
+C_DOWN=$(count_log_node mesh-node-c "dn42 session down: peer-r3")
+C_FLUSH_W=$(count_log_node mesh-node-c "route sync flush: 0 announced, 1 withdrawn")
+$COMPOSE_DN42 --profile dual up -d node-c peer-r3 >/dev/null
+for i in $(seq 1 30); do
+  docker exec mesh-node-c ip link show land0 >/dev/null 2>&1 && break
+  sleep 1
+done
+# node-c 隧道 /30 经 land0 裁决（同 node-a 惯例）
+docker exec mesh-node-c ip route replace 172.20.103.0/24 dev land0
+R3_ESTAB=0
+for i in $(seq 1 45); do
+  if docker exec mesh-dn42-peer3 birdc show protocols 2>/dev/null | grep -q "Established"; then
+    R3_ESTAB=1
+    break
+  fi
+  sleep 1
+done
+if [ "$R3_ESTAB" = "1" ] && wait_log_node mesh-node-c "dn42 learned 172.20.201.0/24" "$C_LEARN" 30; then
+  echo "PASS: DNL-16a node-c ⇄ peer-r3 会话建立并学习 172.20.201.0/24"
+else
+  echo "FAIL: DNL-16a (estab=$R3_ESTAB)"
+  dump_dual_evidence
+  exit 1
+fi
+
+echo "==> DNL-16b: RouteMap 下发 + node-b 经 node-c 前缀级可达"
+B_MAP=$(count_log_node mesh-node-b "route map v")
+B_PING=0
+for i in $(seq 1 60); do
+  if docker exec mesh-node-b ping -c1 -W1 172.20.201.1 >/dev/null 2>&1; then
+    B_PING=1
+    break
+  fi
+  sleep 2
+done
+C_TRANSIT=$(count_log_node mesh-node-c "transit mesh->dn42: 172.20.201.1")
+# 此时 peer-r 未公告该前缀：聚合路径在 node-a 黑洞——ping 通即逐条路由（/24 压
+# 聚合 /14）经 node-c 转发，且 node-a 不承载该前缀流量
+A_TRANSIT_B=$(count_log_node mesh-node-a "transit mesh->dn42: 172.20.201.1")
+if [ "$B_PING" = "1" ] \
+   && wait_log_node mesh-node-b "route map v" "$B_MAP" 60 \
+   && [ "$C_TRANSIT" -ge 1 ] \
+   && [ "$A_TRANSIT_B" -eq 0 ]; then
+  echo "PASS: DNL-16b RouteMap 推送到达 node-b，172.20.201.1 逐条路由经 node-c 可达（聚合路径此时为黑洞）"
+else
+  echo "FAIL: DNL-16b (ping=$B_PING transit_c=$C_TRANSIT transit_a=$A_TRANSIT_B)"
+  dump_dual_evidence
+  exit 1
+fi
+
+echo "==> DNL-16c: peer-r 注入同前缀 → 双 ext 同前缀（node-b 出口切到 node-a）"
+A_LEARN=$(count_log_node mesh-node-a "dn42 learned 172.20.201.0/24")
+B_MAP2=$(count_log_node mesh-node-b "route map v")
+A_TRANSIT=$(count_log_node mesh-node-a "transit mesh->dn42: 172.20.201.1")
+docker exec mesh-dn42-peer vtysh -c "configure terminal" -c "router bgp 4242420002" \
+  -c "network 172.20.201.0/24" -c "end" >/dev/null
+SWITCH_C=0
+for i in $(seq 1 60); do
+  docker exec mesh-node-b ping -c1 -W1 172.20.201.1 >/dev/null 2>&1 || true
+  T=$(count_log_node mesh-node-a "transit mesh->dn42: 172.20.201.1")
+  if [ "${T:-0}" -gt "$A_TRANSIT" ]; then
+    SWITCH_C=1
+    break
+  fi
+  sleep 2
+done
+if wait_log_node mesh-node-a "dn42 learned 172.20.201.0/24" "$A_LEARN" 30 \
+   && [ "$SWITCH_C" = "1" ] \
+   && wait_log_node mesh-node-b "route map v" "$B_MAP2" 60; then
+  echo "PASS: DNL-16c 双 ext 同前缀公告（node-b 出口 node-c → node-a，逐条状态驱动）"
+else
+  echo "FAIL: DNL-16c (switch=$SWITCH_C)"
+  dump_dual_evidence
+  exit 1
+fi
+
+echo "==> DNL-16d: peer-r 撤销 → node-b 窗口内切回 node-c（前缀级真分流）"
+C_T2=$(count_log_node mesh-node-c "transit mesh->dn42: 172.20.201.1")
+A_FLUSH=$(count_log_node mesh-node-a "route sync flush: 0 announced, 1 withdrawn")
+docker exec mesh-dn42-peer vtysh -c "configure terminal" -c "router bgp 4242420002" \
+  -c "no network 172.20.201.0/24" -c "end" >/dev/null
+FLUSH_D=1
+wait_log_node mesh-node-a "route sync flush: 0 announced, 1 withdrawn" "$A_FLUSH" 30 || FLUSH_D=0
+SWITCH=0
+for i in $(seq 1 60); do
+  if docker exec mesh-node-b ping -c1 -W1 172.20.201.1 >/dev/null 2>&1; then
+    SWITCH=1
+    break
+  fi
+  sleep 2
+done
+C_T3=$(count_log_node mesh-node-c "transit mesh->dn42: 172.20.201.1")
+if [ "$FLUSH_D" = "1" ] && [ "$SWITCH" = "1" ] && [ "$C_T3" -gt "$C_T2" ]; then
+  echo "PASS: DNL-16d node-a 撤销上报（防抖窗口）→ node-b 切回 node-c，流量不断"
+else
+  echo "FAIL: DNL-16d (flush=$FLUSH_D switch=$SWITCH transit $C_T2->$C_T3)"
+  dump_dual_evidence
+  exit 1
+fi
+
+echo "==> DNL-16e: peer-r3 停机 → node-c 动态路由全撤 → 聚合兜底黑洞"
+B_MAP3=$(count_log_node mesh-node-b "route map v")
+docker stop mesh-dn42-peer3 >/dev/null
+DOWN_E=1
+wait_log_node mesh-node-c "dn42 session down: peer-r3" "$C_DOWN" 30 || DOWN_E=0
+WITHDRAW_E=1
+wait_log_node mesh-node-c "route sync flush: 0 announced, 1 withdrawn" "$C_FLUSH_W" 30 || WITHDRAW_E=0
+MAP_E=1
+wait_log_node mesh-node-b "route map v" "$B_MAP3" 60 || MAP_E=0
+BLACKHOLE=1
+for i in $(seq 1 10); do
+  if docker exec mesh-node-b ping -c1 -W2 172.20.201.1 >/dev/null 2>&1; then
+    BLACKHOLE=0
+    break
+  fi
+  sleep 2
+done
+if [ "$DOWN_E" = "1" ] && [ "$WITHDRAW_E" = "1" ] && [ "$MAP_E" = "1" ] && [ "$BLACKHOLE" = "1" ]; then
+  echo "PASS: DNL-16e 会话断 → 全撤 → RouteMap 更新 → 无逐条路由时聚合兜底黑洞（不可达）"
+else
+  echo "FAIL: DNL-16e (down=$DOWN_E withdraw=$WITHDRAW_E map=$MAP_E blackhole=$BLACKHOLE)"
+  dump_dual_evidence
+  exit 1
+fi
+
+echo "==> DNL-16f: 第三次翻转 → 阻尼（服务端闸）+ 聚合兜底回归"
+GATED=$(count_log_node mesh-coord "route sync gated")
+A_LEARN2=$(count_log_node mesh-node-a "dn42 learned 172.20.201.0/24")
+A_T2=$(count_log_node mesh-node-a "transit mesh->dn42: 172.20.201.1")
+docker exec mesh-dn42-peer vtysh -c "configure terminal" -c "router bgp 4242420002" \
+  -c "network 172.20.201.0/24" -c "end" >/dev/null
+RELEARN=1
+wait_log_node mesh-node-a "dn42 learned 172.20.201.0/24" "$A_LEARN2" 30 || RELEARN=0
+DAMPED=1
+wait_log_node mesh-coord "route sync gated" "$GATED" 30 || DAMPED=0
+# 阻尼期 RouteMap 不含该前缀 → node-b 走聚合兜底 → node-a 本地 BGP 路由承载
+FALLBACK=0
+for i in $(seq 1 45); do
+  docker exec mesh-node-b ping -c1 -W1 172.20.201.1 >/dev/null 2>&1 || true
+  T=$(count_log_node mesh-node-a "transit mesh->dn42: 172.20.201.1")
+  if [ "${T:-0}" -gt "$A_T2" ]; then
+    FALLBACK=1
+    break
+  fi
+  sleep 2
+done
+if [ "$RELEARN" = "1" ] && [ "$DAMPED" = "1" ] && [ "$FALLBACK" = "1" ]; then
+  echo "PASS: DNL-16f 翻转阻尼（coord 拒收）+ 聚合兜底路径回归可达（REQ-065 回归条款）"
+else
+  echo "FAIL: DNL-16f (relearn=$RELEARN damped=$DAMPED fallback=$FALLBACK)"
+  dump_dual_evidence
+  exit 1
+fi
+
+echo "PASS: dn42 e2e 全部断言通过（DNL-01~16）"

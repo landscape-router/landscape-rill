@@ -11,6 +11,7 @@ use crate::directory::Directory;
 use crate::domain::{network_id_for, NetworkDomain};
 use crate::liveness::Liveness;
 use crate::path_service::{PathCandidate, PathEvent, PathSet};
+use crate::route_map::{RouteMapSnapshotEntry, RouteSyncOutcome, ROUTE_MAP_MAX_PER_NODE};
 use crate::signer::Ed25519Signer;
 use crate::status::TelemetryView;
 use crate::store::{CoordState, CoordStore, StoreError, STATE_SCHEMA};
@@ -856,6 +857,14 @@ impl Coordinator {
         let was_offline = self.liveness.is_offline(node_id);
         self.liveness.heartbeat(node_id, now);
         let newly_offline = self.liveness.sweep(now);
+        for id in &newly_offline {
+            // RouteMap 联动（REQ-065）：离线节点动态路由全部撤销（版本 bump
+            // 顺带推送清理），与 netmap 路由撤销同语义
+            if let Some(d) = self.domain_of_node_mut(*id) {
+                d.route_map.withdraw_node(*id);
+                d.route_map_pushed.remove(id);
+            }
+        }
         let transitioned = was_offline || !newly_offline.is_empty();
         if transitioned {
             self.directory.bump_netmap();
@@ -869,8 +878,64 @@ impl Coordinator {
             .iter()
             .any(|d| d.registry.entry(node_id).is_some());
         if known && self.liveness.mark_offline(node_id) {
+            if let Some(d) = self.domain_of_node_mut(node_id) {
+                d.route_map.withdraw_node(node_id);
+                d.route_map_pushed.remove(&node_id);
+            }
             self.directory.bump_netmap();
         }
+    }
+
+    /// 动态路由增量上报（REQ-065，§3.17）：软状态（不进 raft——派生数据可由
+    /// 节点注册后全量补报重建，主切换由重定向重注册触发补报）。
+    /// 覆盖域 = 该节点注册公告 routes[]（白名单已准入的聚合域）；
+    /// 第二道闸（覆盖域/per-node 上限/震荡阻尼）在 RouteMapService
+    pub fn apply_route_sync(
+        &mut self,
+        node_id: u32,
+        announced: Vec<(Prefix, String)>,
+        withdrawn: Vec<Prefix>,
+    ) -> Option<RouteSyncOutcome> {
+        let d = self.domain_of_node_mut(node_id)?;
+        let coverage: Vec<Prefix> = d
+            .registry
+            .entry(node_id)
+            .map(|e| {
+                e.routes
+                    .iter()
+                    .filter_map(|r| Prefix::parse(r).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let out = d.route_map.apply_sync(
+            node_id,
+            &announced,
+            &withdrawn,
+            &coverage,
+            ROUTE_MAP_MAX_PER_NODE,
+            unix_seconds(),
+        );
+        if out.rejected_coverage + out.rejected_cap + out.damped > 0 {
+            warn!(
+                "[coord] route sync gated: node={} accepted={} coverage={} cap={} damped={}",
+                node_id, out.accepted, out.rejected_coverage, out.rejected_cap, out.damped
+            );
+        }
+        Some(out)
+    }
+
+    /// 该节点待推送的 RouteMap 快照（版本变化才有；随心跳取走全量推送）
+    pub fn take_route_map_push(
+        &mut self,
+        node_id: u32,
+    ) -> Option<(u64, Vec<RouteMapSnapshotEntry>)> {
+        let d = self.domain_of_node_mut(node_id)?;
+        let version = d.route_map.version();
+        if d.route_map_pushed.get(&node_id).copied() == Some(version) {
+            return None;
+        }
+        d.route_map_pushed.insert(node_id, version);
+        Some((version, d.route_map.snapshot()))
     }
 
     /// 领导权接管时重置活性软状态（REQ-070 阶段二，§5.2）：last_seen/offline
@@ -902,6 +967,9 @@ impl Coordinator {
                 self.telemetry.remove(&node_id);
                 // 路径联动：撤销所有涉及该节点的路径（源/目的/中继）
                 d.paths.withdraw_node(node_id);
+                // RouteMap 联动（REQ-065）：吊销节点动态路由全部撤销
+                d.route_map.withdraw_node(node_id);
+                d.route_map_pushed.clear();
                 // roster 联动（REQ-062）：吊销节点移出 roster（registry/roster 皆
                 // raft 态，apply 侧确定性收口）；PathService relay 集同步
                 if d.roster.contains(&node_id) {

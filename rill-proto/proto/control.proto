@@ -27,6 +27,8 @@ enum MsgType {
   PATH_PROBE_RESPONSE = 16;
   AUDIT_REQUEST = 17;           // §3.16 签发溯源交叉验证（REQ-049②/REQ-070 阶段三）
   AUDIT_RESPONSE = 18;
+  ROUTE_SYNC = 19;              // §3.17 动态路由上报（REQ-065，dn42 ext → coord）
+  ROUTE_MAP = 20;               // §3.17 RouteMap 快照（coord → 节点，独立版本空间）
 }
 
 message Envelope {
@@ -254,4 +256,29 @@ message AuditRequest {
 message AuditResponse {
   uint32 verdict = 1;           // 0=verified 1=conflict 2=behind 3=unknown(已吊销/无法判定)
   fixed64 applied_index = 2;    // 副本已 apply 日志位（behind 时节点可择机重试）
+}
+
+// §3.17 动态路由上报与 RouteMap（REQ-065）：dn42 ext 节点把 BGP LocRib 真实
+// 可达性逐条带进控制面（聚合公告保留为兜底）。RouteSync = 增量（防抖窗口合并），
+// 注册完成后全量首发；RouteMap = 服务端聚合"前缀 → ext 节点"表全量快照，
+// 独立版本空间（不 bump netmap version），随心跳按版本变化推送
+message RouteSync {
+  repeated RouteDyn announced = 1;   // 新学/变更（前缀 + NEXT_HOP）
+  repeated string withdrawn = 2;     // 撤销前缀（CIDR）
+}
+
+message RouteDyn {
+  string prefix = 1;                 // CIDR，如 "172.20.1.0/24"
+  string next_hop = 2;               // BGP NEXT_HOP（观测用）
+}
+
+message RouteMap {
+  uint64 version = 1;                // RouteMap 版本（变更 +1，独立于 netmap）
+  repeated RouteMapEntry entries = 2; // 全量：前缀 → ext 节点（多 ext 同前缀 = 多条）
+}
+
+message RouteMapEntry {
+  string prefix = 1;
+  fixed32 node_id = 2;               // 上报该前缀的 ext 节点
+  string next_hop = 3;               // 最近上报的 NEXT_HOP（观测用）
 }

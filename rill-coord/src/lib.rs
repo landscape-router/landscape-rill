@@ -10,6 +10,7 @@ pub mod keys;
 pub mod liveness;
 pub mod path_service;
 pub mod raft;
+pub mod route_map;
 pub mod signer;
 pub mod status;
 pub mod store;

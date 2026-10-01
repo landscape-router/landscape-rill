@@ -4,6 +4,9 @@ use std::net::IpAddr;
 pub enum RouteSource {
     Lan,
     Mesh,
+    /// 动态 dn42 路由（REQ-065 RouteMap 派生）：低于本地 BGP 学习（ext 自身
+    /// 本地路径优先），高于 Tailnet；静态 mesh 公告（注册 routes[]）仍压它一头
+    DynDn42,
     Dn42,
     Tailnet,
 }
@@ -14,7 +17,8 @@ impl RouteSource {
             RouteSource::Lan => 0,
             RouteSource::Mesh => 1,
             RouteSource::Dn42 => 2,
-            RouteSource::Tailnet => 3,
+            RouteSource::DynDn42 => 3,
+            RouteSource::Tailnet => 4,
         }
     }
 }
@@ -36,7 +40,7 @@ pub struct RouteEntry {
 }
 
 /// 存储即规范形态：len 位之外全零（含 v4 第 4 字节之后），由 [`Prefix::new`] 保证
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Prefix {
     bits: [u8; 16],
     len: u8,
@@ -183,6 +187,10 @@ impl LpmTable {
         matched.sort_by_key(|e| e.prefix.len);
         matched
     }
+
+    pub fn entries(&self) -> &[RouteEntry] {
+        &self.entries
+    }
 }
 
 pub struct RouteEngine {
@@ -261,6 +269,31 @@ impl RouteEngine {
     /// 重建 mesh 来源路由（netmap 全量替换语义）
     pub fn reset_mesh_routes(&mut self) {
         self.table.remove_where(|e| e.source == RouteSource::Mesh);
+    }
+
+    /// 重建动态 dn42 路由（RouteMap 全量替换语义，REQ-065）
+    pub fn reset_dyn_dn42_routes(&mut self) {
+        self.table
+            .remove_where(|e| e.source == RouteSource::DynDn42);
+    }
+
+    /// 移除某 ext 节点的全部动态路由（netmap 离线/吊销，REQ-065）
+    pub fn remove_dyn_dn42_node(&mut self, node_id: u32) {
+        self.table
+            .remove_where(|e| e.source == RouteSource::DynDn42 && e.via == RouteVia::Mesh(node_id));
+    }
+
+    /// 前缀仍由哪个 dn42 peer 供应（REQ-065 会话断撤销：多 peer 同前缀时
+    /// 查存活归因——仍有供应则不上报撤销）
+    pub fn dn42_via(&self, prefix: &Prefix) -> Option<String> {
+        self.table
+            .entries()
+            .iter()
+            .find(|e| e.prefix == *prefix && e.source == RouteSource::Dn42)
+            .and_then(|e| match &e.via {
+                RouteVia::Dn42(peer) => Some(peer.clone()),
+                _ => None,
+            })
     }
 }
 
@@ -562,5 +595,49 @@ mod tests {
         assert_eq!(best.source, RouteSource::Lan);
         let via_exit = engine.lookup_best(&ip, &|e| e.source != RouteSource::Lan);
         assert_eq!(via_exit.unwrap().source, RouteSource::Tailnet);
+    }
+
+    /// REQ-065 源优先序：同前缀下本地 BGP 学习（Dn42）与静态 mesh 公告
+    /// 均压 RouteMap 派生路由（DynDn42）一头，DynDn42 又高于 Tailnet——
+    /// 双 ext 节点（本地腿 + 对端 map 条目并存）靠此裁决走自身腿
+    #[test]
+    fn source_priority_dn42_and_mesh_beat_dyn_dn42() {
+        let cidr = "172.20.201.0/24";
+        let entry = |source| RouteEntry {
+            prefix: Prefix::parse(cidr).unwrap(),
+            source,
+            via: match source {
+                RouteSource::Dn42 => RouteVia::Dn42("peer-r".into()),
+                RouteSource::DynDn42 => RouteVia::Mesh(3),
+                RouteSource::Mesh => RouteVia::Mesh(2),
+                _ => RouteVia::Tailnet("t".into()),
+            },
+            metric: None,
+        };
+        let ip: IpAddr = "172.20.201.1".parse().unwrap();
+
+        let mut engine = RouteEngine::new();
+        engine.insert(entry(RouteSource::DynDn42));
+        engine.insert(entry(RouteSource::Dn42));
+        assert_eq!(
+            engine.lookup_best(&ip, &|_| true).unwrap().source,
+            RouteSource::Dn42
+        );
+
+        let mut engine = RouteEngine::new();
+        engine.insert(entry(RouteSource::DynDn42));
+        engine.insert(entry(RouteSource::Mesh));
+        assert_eq!(
+            engine.lookup_best(&ip, &|_| true).unwrap().source,
+            RouteSource::Mesh
+        );
+
+        let mut engine = RouteEngine::new();
+        engine.insert(entry(RouteSource::DynDn42));
+        engine.insert(entry(RouteSource::Tailnet));
+        assert_eq!(
+            engine.lookup_best(&ip, &|_| true).unwrap().source,
+            RouteSource::DynDn42
+        );
     }
 }

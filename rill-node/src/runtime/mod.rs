@@ -37,6 +37,7 @@ pub mod dn42;
 pub mod lan;
 pub mod probe;
 pub mod reconnect;
+pub mod route_report;
 pub mod ts2021;
 pub(crate) use lan::TransitFrom;
 pub const DATA_HEARTBEAT_MISSES: u32 = 3;
@@ -200,6 +201,8 @@ pub struct Node {
     echoed_endpoints: Vec<SocketAddr>,
     /// dn42 leg 运行态（DN42_LEG，None = 未启用）
     dn42_peers: Vec<dn42::Dn42PeerLeg>,
+    /// RouteSync 上报防抖状态（REQ-065，CONTROL_PLANE §3.17）
+    route_report: route_report::RouteReporter,
     /// ts2021 leg 运行态（TS2021_LEG §3.3.2，None = 未启用）
     pub(crate) ts2021: Option<ts2021::Ts2021Leg>,
     /// 网络级 ACL 策略（REQ-045，CONTROL_PLANE §3.10）：随 netmap 原子切换；
@@ -300,6 +303,7 @@ impl Node {
             audit_tx: Some(tx.clone()),
             audit_rx: Some(rx),
             ca_pem: None,
+            route_report: route_report::RouteReporter::default(),
         };
         // dn42 接入（DN42_LEG）：配置启用即 spawn peer 会话任务
         if let Some(dn42_cfg) = node.cfg.dn42.clone() {
@@ -670,6 +674,26 @@ impl Node {
             self.next_rekey = now + self.opts.rekey_interval;
             for session in self.mesh.sessions_mut() {
                 session.rekey(now);
+            }
+        }
+        // RouteSync 防抖窗口冲刷（REQ-065，§3.17）：窗口到期合并上报。
+        // 控制面不可用（dn42-only/退避期）不冲刷——保留待报增量，注册后随
+        // resync 重放收敛，避免上报丢失造成协调端视图漂移
+        if self.control.is_some() && self.route_report.is_due(now) {
+            if let Some((announced, withdrawn)) = self.route_report.flush(&self.engine) {
+                if !announced.is_empty() || !withdrawn.is_empty() {
+                    debug!(
+                        "[node] route sync flush: {} announced, {} withdrawn",
+                        announced.len(),
+                        withdrawn.len()
+                    );
+                    if let Some(control) = self.control.as_mut() {
+                        let env = control.route_sync_envelope(announced, withdrawn);
+                        if control.send_envelope(&env).await.is_err() {
+                            self.control = None;
+                        }
+                    }
+                }
             }
         }
         self.pump_probes(now).await;

@@ -14,6 +14,7 @@ pub mod tls;
 
 pub use client::{
     audit_binding, ControlEvent, ControlSession, MeshClient, MeshEvent, MeshLegConfig, NetmapData,
+    NetmapNode,
 };
 pub use codec::{
     envelope_body, envelope_bytes, parse_envelope, read_envelope, write_msg, EnvelopeError,
