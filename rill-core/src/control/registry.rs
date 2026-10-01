@@ -38,7 +38,16 @@ pub struct NodeEntry {
     pub identity_binding: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    thiserror::Error,
+    landscape_rill_macro::ErrorId,
+)]
 #[error_id(crate_path = "crate")]
 pub enum RegisterError {
     #[error("invalid auth key")]

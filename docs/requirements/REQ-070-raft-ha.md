@@ -17,14 +17,15 @@ coordinator 是单点：进程重启丢软状态（v1 自愈：节点重连/心�
 
 ## 开放问题（各阶段立项评审拍板）
 
-1. openraft 版本与 storage trait 对接细节（redb 实现 Adaptor；快照 = 现有 CoordState 整快照复用）
+1. ~~openraft 版本与 storage trait 对接细节~~ **已定（阶段一落地）**：openraft 0.9.25（features：serde/storage-v2/generic-snapshot-data），RaftLogStorage/RaftStateMachine v2 trait；日志/vote 独立 redb 文件（键 = log index），快照数据 = CoordState 序列化字节（与状态文件同格式）；状态快照 + last_applied + last_membership 在状态文件**同事务**原子写（恰好一次 apply）；~~
 2. 成员变更（静态 vs 动态 add/remove learner）——v1 建议：静态配置 + 重启变更
 3. 拓扑探测/echo（RTT 排序 relay_list）在副本间是否复制（软状态倾向：各副本本地跑）
 4. status/admin 端点（REQ-051/069）在 follower 上的语义：只读代理到 leader or 本地陈旧快照
+5. （阶段二遗留）register/request_paths 内部取墙钟（auth key 过期判定 / PathSet TTL expires_at）——跨副本确定性需线程化 now 参数（单机重放按同秒粒度收敛，测试已按归一化比较）
 
 ## 验收标准（草案）
 
-- 阶段一：全部现有测试语义等价通过；写操作产生日志条目（apply 顺序 = 提交顺序）
+- 阶段一：全部现有测试语义等价通过；写操作产生日志条目（apply 顺序 = 提交顺序）——**✅ 已覆盖（CTL-22，rill-coord/src/raft/tests.rs：等价/重启/崩溃重放恰好一次/REQ-048 窗口/日志边界/手动快照）**
 - 阶段二 e2e：3 副本——follower 直连返回 LeaderRedirect；kill leader 后 ≤ 选主超时内新主可写；旧 leader 回归为 follower；节点全程数据面不中断（§4.3）、重连后软状态重建
 - 阶段二：持久状态经多数派复制（任一副本单独存活可恢复全量注册表）
 - 阶段三：伪造 netmap（未进日志的签名）交叉验证被拒

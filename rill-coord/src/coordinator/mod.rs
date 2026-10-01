@@ -21,6 +21,7 @@ use landscape_rill_core::control::registry::{
 use landscape_rill_core::crypto::KEY_DST_LEN;
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::route::Prefix;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -41,7 +42,7 @@ fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterData {
     pub node_id: u32,
     pub network_id: u32,
@@ -168,7 +169,7 @@ impl Coordinator {
     }
 
     /// 恢复持久状态（语义校验 fail-closed：不猜测重建）
-    fn restore_state(&mut self, state: &CoordState) -> Result<(), StoreError> {
+    pub(crate) fn restore_state(&mut self, state: &CoordState) -> Result<(), StoreError> {
         let max_node = state.nodes.iter().map(|n| n.node_id).max().unwrap_or(0);
         if state.next_node_id == 0 || state.next_node_id <= max_node {
             return Err(StoreError::Inconsistent(format!(
@@ -268,7 +269,7 @@ impl Coordinator {
     }
 
     /// 持久状态快照（确定性排序）
-    fn snapshot(&self) -> CoordState {
+    pub(crate) fn snapshot(&self) -> CoordState {
         let mut nodes: Vec<NodeEntry> = self
             .domains
             .iter()

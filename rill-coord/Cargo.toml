@@ -16,3 +16,9 @@ redb.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 landscape-rill-macro = { path = "../rill-macro" }
+# REQ-070：serde = 数据类型可序列化；storage-v2 = RaftLogStorage/RaftStateMachine
+# v2 trait；generic-snapshot-data = SnapshotData 可用 Vec<u8>（整快照字节）
+openraft = { version = "0.9.25", features = ["serde", "storage-v2", "generic-snapshot-data"] }
+
+[dev-dependencies]
+tokio.workspace = true

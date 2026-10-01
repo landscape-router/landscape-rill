@@ -9,6 +9,7 @@ pub mod echo;
 pub mod keys;
 pub mod liveness;
 pub mod path_service;
+pub mod raft;
 pub mod signer;
 pub mod status;
 pub mod store;

@@ -20,6 +20,9 @@ pub const STATE_SCHEMA: u32 = 2;
 
 const STATE_TABLE: TableDefinition<&'static str, &[u8]> = TableDefinition::new("coord_state");
 const STATE_KEY: &str = "state";
+/// 扩展键值表（REQ-070）：raft 应用指针（last_applied/last_membership）等，
+/// 与状态快照同事务原子写；store 层不感知具体键语义
+const EXTRAS_TABLE: TableDefinition<&'static str, &[u8]> = TableDefinition::new("coord_extras");
 
 /// 每网络 PathMap 持久化条目：(network_id, PathMap, path_seq)
 pub type NetworkPathMap = (u32, Vec<(u32, u32, PathSet)>, u64);
@@ -103,5 +106,38 @@ impl CoordStore {
             )));
         }
         Ok(Some(state))
+    }
+
+    /// 状态快照 + 扩展键同事务原子写（REQ-070：apply 恰好一次语义——
+    /// 状态与应用指针要么同时落盘要么同时回退，重启重放无双重 apply 窗口）
+    pub fn save_with_extras(
+        &self,
+        state: &CoordState,
+        extras: &[(&'static str, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        let json = serde_json::to_vec(state)
+            .map_err(|e| StoreError::Corrupt(format!("state serialize failed: {e}")))?;
+        let wtx = self.db.begin_write()?;
+        {
+            let mut state_table = wtx.open_table(STATE_TABLE)?;
+            state_table.insert(STATE_KEY, json.as_slice())?;
+            let mut extras_table = wtx.open_table(EXTRAS_TABLE)?;
+            for (key, value) in extras {
+                extras_table.insert(*key, value.as_slice())?;
+            }
+        }
+        wtx.commit()?;
+        Ok(())
+    }
+
+    /// 读取扩展键；表未建或键不存在 = None
+    pub fn load_extra(&self, key: &'static str) -> Result<Option<Vec<u8>>, StoreError> {
+        let rtx = self.db.begin_read()?;
+        let table = match rtx.open_table(EXTRAS_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(table.get(key)?.map(|g| g.value().to_vec()))
     }
 }

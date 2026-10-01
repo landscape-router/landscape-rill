@@ -138,6 +138,14 @@
 - 证据：rill-coord/src/config/、rill-coord/src/coordinator/、rilld/src/main.rs
 - 说明：过期时间嵌入 key 自身（advisory），admission 时 coordinator 校验；节点侧仅告警不阻断（挑战恢复路径不受影响）
 
+## CTL-22 Raft 单机过日志（REQ-070 阶段一）
+
+- 关联 REQ：REQ-070
+- 测试层：单测（in-process openraft 单节点集群）
+- 状态：`已覆盖`（阶段一；阶段二 3 副本 / 阶段三 REQ-049② 另行验收）
+- 证据：rill-coord/src/raft/mod.rs、rill-coord/src/raft/log_store.rs、rill-coord/src/raft/machine.rs、rill-coord/src/raft/tests.rs、rill-coord/src/store/mod.rs
+- 说明：写操作（register/revoke/set_endpoints/request_paths/rotate_master_key/flush_revoke_rotations）经 client_write → 日志条目 → 按提交顺序 apply；等价性（同命令序列下 raft 路径与直接调用 Coordinator 的持久状态快照相等 + 响应逐字段相等）；重启恢复（状态文件 + 日志，node_id 分配器不回退）；崩溃窗口重放（日志已提交而检查点未落盘 → 重启按 applied 指针恰好一次重放，不重复分配 node_id）；REQ-048 合并轮换窗口经日志语义不变；日志存储边界（无空洞/truncate/purge/空日志回退 purged/vote 持久）；手动快照（CoordState 字节 = 快照数据，meta 覆盖到 applied）。状态 + applied 指针 + membership 同事务原子写（恰好一次 apply）
+
 ## 验收断言
 
 - [x] CTL-01：注册幂等、身份绑定签名可验证
@@ -166,3 +174,4 @@
 - [x] CTL-21：节点遥测上报（REQ-052，状态：`已覆盖`）——单测：Heartbeat 遥测载荷编解码向后兼容（rill-proto，空载荷=telemetry None）；区间计数语义（rill-mesh data：上报即清零、下区间不含旧值、tx 归终点/rx 归发送方、丢帧归因+全局桶、probe RTT 直连对）；coord 聚合 latest-wins + 吊销清理 + build_version 空值兼容（rill-coord）；服务端入库（heartbeat_telemetry_stored）。e2e status：双节点互 ping 后 per-peer 计数 > 0、直连对非空
   - 证据：rill-proto/src/lib.rs（heartbeat_telemetry_roundtrip_and_backward_compat）、rill-mesh/src/data/tests.rs（telemetry_* 三测）、rill-mesh/src/control/server_tests.rs、rill-coord/src/coordinator/tests.rs（telemetry_latest_wins_aggregation 等）、e2e/scenarios/status.sh、CI e2e-mesh status（run 33697089991）
   - 证据：rill-mesh/src/control/server.rs（resume_with_valid_key_still_requires_pop / one_time_key_consumed_only_after_pop / resume_caps_mismatch_rejected_after_pop 三单测）、CI e2e-mesh run 33679179273
+- [x] CTL-22：Raft 单机过日志——等价/重启/崩溃重放（恰好一次）/REQ-048 窗口语义/日志边界/手动快照，全部现有测试语义等价通过（458 → 464，rill-coord/src/raft/tests.rs 六测）
