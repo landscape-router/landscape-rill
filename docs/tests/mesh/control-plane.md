@@ -152,7 +152,7 @@
 - 测试层：docker e2e
 - 状态：`已覆盖`
 - 证据：e2e/scenarios/ha.sh、e2e/mesh/ha/、e2e/setup.sh
-- 说明：coord 3 副本 raft 集群（node-a→coord1、node-b→coord2，至少一节点初始必连 follower，重定向证据前置；setup.sh 生成 cluster 配置段与多域名证书）。断言：选主收敛（唯一 Leader，raft state 日志尾行）；follower 重定向注册（节点日志 `leader redirect:` ≥1 + 双节点注册完成）；**停 leader 容器窗口 5×双栈 ping 无一丢失**（数据面不经 coord，§4.3/§5.6——节点重连退避分片持续服务 mesh 输入）；存活副本选出新 Leader（term 严格递增）；节点经重定向链幂等重注册（node_id 全程唯一）；旧 leader 重启以 Follower 回归（`state=Follower leader=Some(新主 id)`）；终态 a↔b 双栈通；CI e2e-mesh ha
+- 说明：coord 3 副本 raft 集群（node-a→coord1、node-b→coord2，至少一节点初始必连 follower，重定向证据前置；setup.sh 生成 cluster 配置段与多域名证书）。断言：选主收敛（唯一 Leader，raft state 日志尾行）；follower 重定向注册（节点日志 `leader redirect:` ≥1 + 双节点注册完成）；**停 leader 容器窗口 5×双栈 ping 无一丢失**（数据面不经 coord，§4.3/§5.6——节点重连退避分片持续服务 mesh 输入）；存活副本选出新 Leader（term 严格递增）；节点经重定向链幂等重注册（node_id 全程唯一）；旧 leader 重启以 Follower 回归（`state=Follower leader=Some(新主 id)`）；终态 a↔b 双栈通；CI e2e-mesh run 36865122523（含 ha job）
 - 缺口：节点侧死 coordinator 看门狗（lease 到期主动重连探测）与多 coordinator_url 配置为 docs-silent 待确认项（REQ-070 开放问题 6/7），当前靠既有退避重连 + 重定向链收敛
 
 ## 验收断言
