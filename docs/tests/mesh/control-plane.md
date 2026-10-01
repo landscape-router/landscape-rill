@@ -167,9 +167,9 @@
 
 - 关联 REQ：REQ-062
 - 测试层：单测 + docker e2e
-- 状态：`待补充`
+- 状态：`已覆盖`
 - 证据：rill-coord/src/coordinator/tests.rs、rill-coord/src/path_service.rs、rill-coord/src/directory.rs、rilld/src/coord_run.rs、e2e/scenarios/relay.sh、e2e/scenarios/probe.sh
-- 说明：roster = node_id 有序激活名单（能力位 ∩ roster 双资格）。单测：交集语义（include 不豁免能力位、exclude 优先、include 兜底 NAT'd、RTT 升序终序）；公网判定（seen IP ∈ 本地接口集合 → 直连公网；NAT 后排除；无 seen 排除）；sync_relays 修正（注册能力位节点不自动进 PathService；roster 空 = 仅 direct；roster 落位 = 中继候选出现；清空 = 收窄回 direct）；退出口迟滞（连续 3 轮 miss 退出、命中恢复）；离线剔除（include 不豁免）；netmap 集合变化才 bump（顺序变化不 bump）；吊销联动出 roster；生命周期事件全参与者扇出（withdraw_node / roster 收窄 → source/dest/hops 全收 Withdraw/Update）；roster 扩充对幂等命中路径集显式补员（保既有 path_id）。e2e：relay 场景（roster 落位日志含 relay + node-b 中继 ping 通）+ probe 场景阶段 5/6（SIGHUP exclude node-d → roster 即时收窄到 b、c→a 仍通；exclude 移除恢复 b+d；stop node-b → 经 d 故障切换）
+- 说明：roster = node_id 有序激活名单（能力位 ∩ roster 双资格）。单测：交集语义（include 不豁免能力位、exclude 优先、include 兜底 NAT'd、RTT 升序终序）；公网判定（seen IP ∈ 本地接口集合 → 直连公网；NAT 后排除；无 seen 排除）；sync_relays 修正（注册能力位节点不自动进 PathService；roster 空 = 仅 direct；roster 落位 = 中继候选出现；清空 = 收窄回 direct）；退出口迟滞（连续 3 轮 miss 退出、命中恢复）；离线剔除（include 不豁免）；netmap 集合变化才 bump（顺序变化不 bump）；吊销联动出 roster；生命周期事件全参与者扇出（withdraw_node / roster 收窄 → source/dest/hops 全收 Withdraw/Update）；roster 扩充对幂等命中路径集显式补员（保既有 path_id）。e2e：relay 场景（roster 落位日志含 relay + node-b 中继 ping 通）+ probe 场景阶段 5/6（SIGHUP exclude node-d → roster 即时收窄到 b、c→a 仍通；exclude 移除恢复 b+d；stop node-b → 经 d 故障切换）。CI：e2e-mesh run 36920747030（含 relay/probe）
 
 ## 验收断言
 
@@ -202,4 +202,4 @@
 - [x] CTL-22：Raft 单机过日志——等价/重启/崩溃重放（恰好一次）/REQ-048 窗口语义/日志边界/手动快照，全部现有测试语义等价通过（458 → 464，rill-coord/src/raft/tests.rs 六测）
 - [x] CTL-23：Raft 3 副本 failover e2e——选主收敛/follower 重定向/停 leader 窗口 5×双栈 ping 无丢失（数据面不中断）/停 leader 优雅退出（exit 0）/term 递增选新主/重定向链幂等重注册（node_id 唯一）/旧 leader Follower 回归/终态双栈通（e2e/scenarios/ha.sh，全五阶段断言）
 - [x] CTL-24：绑定交叉审计（REQ-049②）——伪造绑定（签名有效但未进日志）任意已 apply 副本 Conflict 被拒；真实绑定 Verified；超前锚点 Behind；吊销墓碑 Unknown；TLS 线格式往返；e2e ha 阶段 1.5 双节点 audit verified 背书
-- [ ] CTL-25：relay roster 策划与收窄（REQ-062）——单测：交集/公网判定/sync_relays 修正/迟滞/离线剔除/bump 联动/全参与者扇出/补员；e2e：relay roster 落位断言 + probe 收窄/恢复/故障切换（CI 后置 `[x]`）
+- [x] CTL-25：relay roster 策划与收窄（REQ-062）——单测：交集/公网判定/sync_relays 修正/迟滞/离线剔除/bump 联动/全参与者扇出/补员；e2e：relay roster 落位断言 + probe 收窄/恢复/故障切换（CI e2e-mesh run 36920747030 全绿）

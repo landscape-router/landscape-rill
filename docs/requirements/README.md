@@ -46,7 +46,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-067](./REQ-067-mapresponse-incremental-peers.md) | 需求 | ✅ merged | — | 09-30 | TS2021_LEG §3.3.2 |
 | [REQ-068](./REQ-068-ts2021-server.md) | 需求 | ✅ merged（TS2021_LEG §4，TSL-12） | P3 | 09-30 | REQ-067 |
 | [REQ-069](./REQ-069-web-admin-api.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §3.14 |
-| [REQ-070](./REQ-070-raft-ha.md) | 需求 | 📌 proposed | P3 | 10-01 | — |
+| [REQ-070](./REQ-070-raft-ha.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §1.2/§3.6/§5.6/§3.16 |
 | [REQ-049](./REQ-049-coordinator-transparency.md) | 需求 | 📌 proposed | P3 | 09-01 | — |
 | [REQ-065](./REQ-065-dn42-route-update.md) | 需求 | 📌 proposed | P3 | 09-03 | — |
 | [REQ-064](./REQ-064-path-stats.md) | 需求 | 📌 proposed | P3 | 09-02 | — |

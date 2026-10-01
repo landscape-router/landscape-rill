@@ -105,13 +105,13 @@
 | REQ-050 | — | 📌 proposed（无验收场景） | — |
 | REQ-051 | ADM-07 | 已覆盖 | rill-coord/src/status.rs、rilld/src/coord_run.rs、e2e/mesh/status/、e2e/scenarios/status.sh |
 | REQ-069 | ADM-08 | 已覆盖 | rilld/src/status_http.rs、e2e/scenarios/status.sh |
-| REQ-070 | CTL-12 / CTL-22 / CTL-23 | 部分覆盖（阶段一单机过日志 + 阶段二 3 副本 e2e 已覆盖；阶段三 REQ-049② 待验收） | rill-coord/src/raft/、e2e/scenarios/ha.sh、e2e/mesh/ha/ |
+| REQ-070 | CTL-12 / CTL-22 / CTL-23 / CTL-24 | 已覆盖（三阶段：单机过日志 + 3 副本集群 + binding v2 交叉审计） | rill-coord/src/raft/、e2e/scenarios/ha.sh、e2e/mesh/ha/ |
 | REQ-052 | CTL-21 | 已覆盖 | rill-mesh/src/data/、rill-coord/src/coordinator/、rill-coord/src/status.rs、e2e/scenarios/status.sh |
 | REQ-053 | FRM-12 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/tests.rs |
 | REQ-054 | CON-11 | 已覆盖 | rill-mesh/src/data/、rill-node/src/runtime/、e2e/run_e2e.sh（MESH_E2E_TRANSPORT=tcp） |
 | REQ-055 | — | 📌 proposed（无验收场景） | — |
 | REQ-061 | — | 📌 proposed（无验收场景） | — |
-| REQ-062 | CTL-25 | 待补充（单测 + e2e 本地绿，CI 后置已覆盖） | rill-coord/src/coordinator/、rill-coord/src/path_service.rs、rill-coord/src/directory.rs、rilld/src/coord_run.rs、e2e/scenarios/relay.sh、e2e/scenarios/probe.sh |
+| REQ-062 | CTL-25 | 已覆盖 | rill-coord/src/coordinator/、rill-coord/src/path_service.rs、rill-coord/src/directory.rs、rilld/src/coord_run.rs、e2e/scenarios/relay.sh、e2e/scenarios/probe.sh |
 | REQ-063 | — | 📌 proposed（无验收场景） | — |
 | REQ-064 | — | 📌 proposed（无验收场景） | — |
 | REQ-065 | — | 📌 proposed（无验收场景） | — |
