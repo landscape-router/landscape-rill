@@ -1,3 +1,6 @@
 /target
 e2e/build/
 .zcode/
+
+# REQ-050 构建产物（verify-repro.sh 生成）
+dist/
