@@ -17,6 +17,7 @@ fn ctx(id: u8) -> HandshakeContext {
         version: VERSION,
         local_static: [id; SESSION_KEY_LEN],
         identity_binding: [0x5a; BINDING_LEN].to_vec(),
+        binding_issuance: (0, 0),
     }
 }
 
@@ -26,7 +27,13 @@ fn peer_static(id: u8) -> [u8; 32] {
     PublicKey::from(&StaticSecret::from([id; 32])).to_bytes()
 }
 
-fn verifier(node_id: u32, static_pubkey: &[u8; 32], _binding: &[u8]) -> bool {
+fn verifier(
+    node_id: u32,
+    static_pubkey: &[u8; 32],
+    _binding: &[u8],
+    _log_index: u64,
+    _term: u64,
+) -> bool {
     static_pubkey == &peer_static(node_id as u8)
 }
 
@@ -188,7 +195,7 @@ async fn handshake_redirect_rejected() {
 #[tokio::test]
 async fn bad_binding_rejected_over_wire() {
     let (mut a, mut b) = setup_pair().await;
-    b.set_binding_verifier(|_, _, _| false);
+    b.set_binding_verifier(|_, _, _, _, _| false);
     let msg1 = a.initiate_handshake(2).unwrap().unwrap();
     a.send_to_node(2, &msg1).await.unwrap();
     assert_eq!(

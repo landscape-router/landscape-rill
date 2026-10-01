@@ -66,8 +66,17 @@ fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-/// coordinator 公钥持有者注入的身份绑定校验器（与签名算法解耦）
-pub type BindingVerifier = dyn Fn(u32, &[u8; 32], &[u8]) -> bool + Send + Sync;
+/// coordinator 公钥持有者注入的身份绑定校验器（与签名算法解耦）；
+/// (node_id, static_pubkey, binding, log_index, term) —— binding v2（REQ-049②）
+pub type BindingVerifier = dyn Fn(u32, &[u8; 32], &[u8], u64, u64) -> bool + Send + Sync;
+
+/// 会话建立时记录的对端绑定声明（REQ-049②）：运行时交叉审计的输入
+#[derive(Debug, Clone)]
+pub struct BindingClaim {
+    pub static_pubkey: [u8; 32],
+    pub binding: Vec<u8>,
+    pub anchor: (u64, u64),
+}
 
 /// 候选路径条目（CONTROL_PLANE §3.11）：hops 显式（direct = [dest]，relay = [relay, dest]）
 #[derive(Debug, Clone)]
@@ -98,6 +107,8 @@ pub struct MeshData {
     ctx: Option<HandshakeContext>,
     peer_statics: HashMap<u32, [u8; 32]>,
     binding_verifier: Option<Box<BindingVerifier>>,
+    /// 会话对端绑定声明（REQ-049②）：peer → 握手时验证通过的绑定三元组
+    binding_claims: HashMap<u32, BindingClaim>,
     initiators: HashMap<u32, HandshakeInitiator>,
     responders: HashMap<u32, HandshakeResponder>,
     sessions: HashMap<u32, Session>,
@@ -262,6 +273,7 @@ impl MeshData {
             ctx: None,
             peer_statics: HashMap::new(),
             binding_verifier: None,
+            binding_claims: HashMap::new(),
             initiators: HashMap::new(),
             responders: HashMap::new(),
             sessions: HashMap::new(),
@@ -376,13 +388,32 @@ impl MeshData {
         self.endpoint_table.remove(&peer);
     }
 
-    /// coordinator 公钥持有者注入：`verify(node_id, static_pubkey, binding)`，
-    /// 与签名算法解耦（coord/ 的 verify_binding 是标准实现）。
+    /// coordinator 公钥持有者注入：`verify(node_id, static_pubkey, binding, log_index, term)`，
+    /// 与签名算法解耦（coord/ 的 verify_binding 是标准实现，binding v2 含签发锚点）
     pub fn set_binding_verifier<F>(&mut self, verify: F)
     where
-        F: Fn(u32, &[u8; 32], &[u8]) -> bool + Send + Sync + 'static,
+        F: Fn(u32, &[u8; 32], &[u8], u64, u64) -> bool + Send + Sync + 'static,
     {
         self.binding_verifier = Some(Box::new(verify));
+    }
+
+    /// 对端绑定声明只读（REQ-049②）：运行时交叉审计取输入
+    pub fn binding_claim(&self, peer: u32) -> Option<&BindingClaim> {
+        self.binding_claims.get(&peer)
+    }
+
+    /// 本节点绑定三元组（审计自身绑定用，REQ-049②）：
+    /// X25519 静态公钥 + coordinator 签名 + 签发锚点
+    pub fn local_binding_claim(&self) -> Option<BindingClaim> {
+        let ctx = self.ctx.as_ref()?;
+        let static_pubkey =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(ctx.local_static))
+                .to_bytes();
+        Some(BindingClaim {
+            static_pubkey,
+            binding: ctx.identity_binding.clone(),
+            anchor: ctx.binding_issuance,
+        })
     }
 
     /// 广播密钥注入（keydist 下发，FRAME_HEADER §2.6）。轮换时重置广播重放窗口与去重集。

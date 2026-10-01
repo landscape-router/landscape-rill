@@ -21,8 +21,16 @@ fn binding() -> Vec<u8> {
     [0x5a; BINDING_LEN].to_vec()
 }
 
-fn verify(claimed: u32, static_pubkey: &[u8; 32], _binding: &[u8]) -> bool {
-    claimed == 1 && static_pubkey == &peer_static(1)
+const ISSUANCE: (u64, u64) = (11, 3);
+
+fn verify(
+    claimed: u32,
+    static_pubkey: &[u8; 32],
+    _binding: &[u8],
+    log_index: u64,
+    term: u64,
+) -> bool {
+    claimed == 1 && static_pubkey == &peer_static(1) && (log_index, term) == ISSUANCE
 }
 
 /// 完整三方流程（A 发起 → B 响应），返回双方会话密钥
@@ -34,6 +42,7 @@ fn run_handshake() -> (SessionKeys, SessionKeys) {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         salt,
         &peer_static(2),
     )
@@ -76,6 +85,59 @@ fn keys_symmetric_and_salt_shared() {
 }
 
 #[test]
+fn msg3_carries_issuance_anchor() {
+    // binding v2（REQ-049②）：msg3 = 绑定(64B) + 锚点(16B) + 盐(4B) + Noise 体
+    let mut initiator = HandshakeInitiator::new(
+        &keys(1),
+        NETWORK_ID,
+        VERSION,
+        2,
+        &binding(),
+        (7, 9),
+        1,
+        &peer_static(2),
+    )
+    .unwrap();
+    let mut responder = HandshakeResponder::new(&keys(2), NETWORK_ID, VERSION, 2).unwrap();
+    let msg1 = initiator.write_msg1().unwrap();
+    responder.read_msg1(&msg1).unwrap();
+    let msg2 = responder.write_msg2().unwrap();
+    let msg3 = initiator.read_msg2(&msg2).unwrap();
+    assert_eq!(msg3.len(), MSG3_PAYLOAD_LEN);
+    let anchor = &msg3[BINDING_LEN..BINDING_LEN + ISSUANCE_LEN];
+    assert_eq!(anchor[..8], 7u64.to_be_bytes());
+    assert_eq!(anchor[8..], 9u64.to_be_bytes());
+}
+
+#[test]
+fn msg3_wrong_anchor_rejected() {
+    // 验证闭包可见锚点：声称的 (log_index, term) 与预期不符 → BadBinding
+    let mut initiator = HandshakeInitiator::new(
+        &keys(1),
+        NETWORK_ID,
+        VERSION,
+        2,
+        &binding(),
+        (7, 9),
+        1,
+        &peer_static(2),
+    )
+    .unwrap();
+    let mut responder = HandshakeResponder::new(&keys(2), NETWORK_ID, VERSION, 2).unwrap();
+    let msg1 = initiator.write_msg1().unwrap();
+    responder.read_msg1(&msg1).unwrap();
+    let msg2 = responder.write_msg2().unwrap();
+    let msg3 = initiator.read_msg2(&msg2).unwrap();
+    assert_eq!(
+        responder
+            .read_msg3(&msg3, 1, |_, _, _, log_index, term| (log_index, term)
+                == (0, 0))
+            .unwrap_err(),
+        HandshakeError::BadBinding
+    );
+}
+
+#[test]
 fn msg1_wrong_target_rejected() {
     let mut initiator = HandshakeInitiator::new(
         &keys(1),
@@ -83,6 +145,7 @@ fn msg1_wrong_target_rejected() {
         VERSION,
         3,
         &binding(),
+        ISSUANCE,
         1,
         &peer_static(2),
     )
@@ -104,6 +167,7 @@ fn msg1_tampered_rejected() {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         1,
         &peer_static(2),
     )
@@ -131,16 +195,26 @@ fn malformed_msg1_rejected() {
 #[test]
 fn bad_binding_rejected() {
     let salt = 1u32;
-    let mut initiator =
-        HandshakeInitiator::new(&keys(1), NETWORK_ID, VERSION, 2, &binding(), salt, &keys(2))
-            .unwrap();
+    let mut initiator = HandshakeInitiator::new(
+        &keys(1),
+        NETWORK_ID,
+        VERSION,
+        2,
+        &binding(),
+        ISSUANCE,
+        salt,
+        &keys(2),
+    )
+    .unwrap();
     let mut responder = HandshakeResponder::new(&keys(2), NETWORK_ID, VERSION, 2).unwrap();
     let msg1 = initiator.write_msg1().unwrap();
     responder.read_msg1(&msg1).unwrap();
     let msg2 = responder.write_msg2().unwrap();
     let msg3 = initiator.read_msg2(&msg2).unwrap();
     assert_eq!(
-        responder.read_msg3(&msg3, 1, |_, _, _| false).unwrap_err(),
+        responder
+            .read_msg3(&msg3, 1, |_, _, _, _, _| false)
+            .unwrap_err(),
         HandshakeError::BadBinding
     );
 }
@@ -154,6 +228,7 @@ fn binding_static_must_match_noise_static() {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         salt,
         &peer_static(2),
     )
@@ -165,7 +240,7 @@ fn binding_static_must_match_noise_static() {
     let msg3 = initiator.read_msg2(&msg2).unwrap();
     assert_eq!(
         responder
-            .read_msg3(&msg3, 1, |claimed, static_pubkey, _| {
+            .read_msg3(&msg3, 1, |claimed, static_pubkey, _, _, _| {
                 claimed == 1 && static_pubkey == &peer_static(9)
             })
             .unwrap_err(),
@@ -182,6 +257,7 @@ fn initiator_peer_static_mismatch_rejected() {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         salt,
         &peer_static(9),
     )
@@ -207,11 +283,12 @@ fn prologue_mismatch_rejected() {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         salt,
         &peer_static(2),
     )
     .unwrap();
-    let mut responder = HandshakeResponder::new(&keys(2), 0x0000_0002, VERSION, 2).unwrap();
+    let mut responder = HandshakeResponder::new(&keys(2), NETWORK_ID, 0x0000_0002, 2).unwrap();
     let msg1 = initiator.write_msg1().unwrap();
     responder.read_msg1(&msg1).unwrap();
     let msg2 = responder.write_msg2().unwrap();
@@ -229,6 +306,7 @@ fn wrong_step_rejected() {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         1,
         &peer_static(2),
     )
@@ -249,6 +327,7 @@ fn msg3_tampered_rejected() {
         VERSION,
         2,
         &binding(),
+        ISSUANCE,
         1,
         &peer_static(2),
     )
@@ -261,7 +340,9 @@ fn msg3_tampered_rejected() {
     let n = msg3.len();
     msg3[n - 1] ^= 0xff;
     assert!(matches!(
-        responder.read_msg3(&msg3, 1, |_, _, _| true).unwrap_err(),
+        responder
+            .read_msg3(&msg3, 1, |_, _, _, _, _| true)
+            .unwrap_err(),
         HandshakeError::Noise(_)
     ));
 }

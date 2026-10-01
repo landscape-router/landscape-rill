@@ -1,10 +1,13 @@
 //! 控制面服务端（coordinator 线格式胶水）：TLS accept + 信封分派 + 快照/路径推送
 
 use crate::control::codec::{envelope_body, read_envelope, write_msg};
-use crate::control::BoxResult;
+use crate::control::{
+    BoxResult, AUDIT_VERDICT_BEHIND, AUDIT_VERDICT_CONFLICT, AUDIT_VERDICT_UNKNOWN,
+    AUDIT_VERDICT_VERIFIED,
+};
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
-use landscape_rill_coord::raft::backend::{CoordBackend, Leadership, WriteError};
+use landscape_rill_coord::raft::backend::{AuditVerdict, CoordBackend, Leadership, WriteError};
 use landscape_rill_coord::status::{
     DirectPairView as DirectPairDst, DropView, PeerTrafficView as PeerTrafficDst, TelemetryView,
 };
@@ -118,8 +121,13 @@ pub fn unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
-/// 网络隔离（SEC-21/CTL-09）：只推指定网络的条目与 relay 列表
-pub fn netmap_push_message(coordinator: &Coordinator, network_id: u32) -> NetmapPush<'static> {
+/// 网络隔离（SEC-21/CTL-09）：只推指定网络的条目与 relay 列表。
+/// replica_endpoints = raft 成员端点（绑定审计目标，REQ-049②；单机 = 空）
+pub fn netmap_push_message(
+    coordinator: &Coordinator,
+    network_id: u32,
+    replica_endpoints: Vec<String>,
+) -> NetmapPush<'static> {
     let entries = coordinator
         .netmap_snapshot(network_id)
         .into_iter()
@@ -132,6 +140,9 @@ pub fn netmap_push_message(coordinator: &Coordinator, network_id: u32) -> Netmap
             routes: info.routes.into_iter().map(Cow::Owned).collect(),
             protocol_version: info.protocol_version,
             offline: info.offline,
+            identity_binding: Cow::Owned(info.identity_binding),
+            raft_log_index: info.binding_log_id.0,
+            raft_term: info.binding_log_id.1,
         })
         .collect();
     NetmapPush {
@@ -144,6 +155,7 @@ pub fn netmap_push_message(coordinator: &Coordinator, network_id: u32) -> Netmap
             .collect(),
         // ACL 策略随 netmap 原子下发（REQ-045，CONTROL_PLANE §3.10；None = 未启用）
         acl: Some(acl_policy_message(&coordinator.acl_policy_of(network_id))),
+        replica_endpoints: replica_endpoints.into_iter().map(Cow::Owned).collect(),
     }
 }
 
@@ -445,9 +457,10 @@ impl CoordinatorServer {
         stream: &mut W,
         network_id: u32,
     ) -> BoxResult<()> {
+        let replicas = self.coordinator.replica_endpoints();
         let push = self
             .coordinator
-            .with_coord(|c| netmap_push_message(c, network_id));
+            .with_coord(|c| netmap_push_message(c, network_id, replicas));
         write_msg(stream, MsgType::NETMAP_PUSH, &envelope_body(&push)).await?;
         let node_ids: Vec<u32> = self.coordinator.with_coord(|c| {
             c.netmap_snapshot(network_id)
@@ -714,9 +727,11 @@ impl CoordinatorServer {
                         .with_coord(|c| c.network_id_of(ch_node))
                         .unwrap_or(0);
                     // binding 缺失属不变量破坏——fail-closed 而非空绑定静默降级
-                    let Some(identity_binding) = self
-                        .coordinator
-                        .with_coord(|c| c.identity_binding_of(ch_node))
+                    let Some((identity_binding, binding_log_id)) =
+                        self.coordinator.with_coord(|c| {
+                            c.identity_binding_of(ch_node)
+                                .zip(c.binding_log_id_of(ch_node))
+                        })
                     else {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
@@ -728,6 +743,8 @@ impl CoordinatorServer {
                         node_id: ch_node,
                         network_id,
                         identity_binding: Cow::Owned(identity_binding),
+                        raft_log_index: binding_log_id.0,
+                        raft_term: binding_log_id.1,
                     };
                     write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp)).await?;
                     self.push_snapshot(stream, network_id).await?;
@@ -772,6 +789,8 @@ impl CoordinatorServer {
                                 node_id: data.node_id,
                                 network_id: data.network_id,
                                 identity_binding: Cow::Owned(data.identity_binding),
+                                raft_log_index: data.binding_log_id.0,
+                                raft_term: data.binding_log_id.1,
                             };
                             write_msg(stream, MsgType::REGISTER_RESPONSE, &envelope_body(&resp))
                                 .await?;
@@ -852,6 +871,38 @@ impl CoordinatorServer {
                     };
                     write_msg(stream, MsgType::LEASE, &envelope_body(&lease)).await?;
                 }
+            }
+            MsgType::AUDIT_REQUEST => {
+                // 绑定审计（REQ-049②，CONTROL_PLANE §3.16）：任意副本以本地已
+                // apply 状态裁决——不重定向（交叉验证正是用多数派状态制衡 leader）
+                let mut reader = BytesReader::from_bytes(body);
+                let req = AuditRequest::from_reader(&mut reader, body)?;
+                let mut pubkey = [0u8; 32];
+                if req.static_pubkey.len() != pubkey.len() || req.binding.len() != 64 {
+                    let resp = AuditResponse {
+                        verdict: AUDIT_VERDICT_UNKNOWN,
+                        applied_index: self.coordinator.applied_index(),
+                    };
+                    write_msg(stream, MsgType::AUDIT_RESPONSE, &envelope_body(&resp)).await?;
+                    return Ok(());
+                }
+                pubkey.copy_from_slice(&req.static_pubkey);
+                let (verdict, applied_index) = self.coordinator.audit_binding(
+                    req.node_id,
+                    &pubkey,
+                    &req.binding,
+                    (req.raft_log_index, req.raft_term),
+                );
+                let resp = AuditResponse {
+                    verdict: match verdict {
+                        AuditVerdict::Verified => AUDIT_VERDICT_VERIFIED,
+                        AuditVerdict::Conflict => AUDIT_VERDICT_CONFLICT,
+                        AuditVerdict::Behind => AUDIT_VERDICT_BEHIND,
+                        AuditVerdict::Unknown => AUDIT_VERDICT_UNKNOWN,
+                    },
+                    applied_index,
+                };
+                write_msg(stream, MsgType::AUDIT_RESPONSE, &envelope_body(&resp)).await?;
             }
             MsgType::PATH_REQUEST => {
                 let mut reader = BytesReader::from_bytes(body);

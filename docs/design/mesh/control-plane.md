@@ -3,9 +3,11 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
 
-**版本：v0.19（2026-10-01 修订：REQ-070——§5.2 节点侧租约看门狗 + SIGTERM 优雅退出 + §5.6 重连全程分片（连接建立后台化，数据面零停摆）；v0.17 为 REQ-070 阶段二：§1.2 静态成员集群/§3.6 LeaderRedirect/§5.6 接管软状态重置 + 数据面不中断/§6 mTLS）**
+**版本：v0.20（2026-10-01 修订：REQ-049②/REQ-070 阶段三——binding v2 签发锚点进 §3.1/§3.2，新增 §3.16 绑定交叉审计（AuditRequest/AuditResponse + 吊销墓碑 + 节点侧审计行为）；v0.19 为 REQ-070——§5.2 节点侧租约看门狗 + SIGTERM 优雅退出 + §5.6 重连全程分片（连接建立后台化，数据面零停摆）；v0.17 为 REQ-070 阶段二：§1.2 静态成员集群/§3.6 LeaderRedirect/§5.6 接管软状态重置 + 数据面不中断/§6 mTLS）**
+
+**最后修改：2026-10-01**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -107,7 +109,8 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 **RegisterResponse**
 - `node_id`：4B，coordinator 唯一分配
 - `network_id`：本网络标识（联邦钩子，v1 恒为本地网络）
-- `identity_binding`：coordinator 签名 `(node_id || static_pubkey)`——节点持久化，供数据面握手交叉验证（防中继 MITM）
+- `identity_binding`：coordinator 签名 binding v2（§3.16）——节点持久化，供数据面握手交叉验证（防中继 MITM）
+- `raft_log_index / raft_term`：签发锚点 `(log_index, term)`（binding v2，REQ-049②；单机恒 `(0, 0)`）——msg3 随绑定携带，交叉审计输入
 - 非主 coordinator（Raft 期）：以 `LeaderRedirect`（§3.6）替代
 
 **幂等**：相同 `auth_key + static_pubkey` 重复注册返回相同 `node_id` 与绑定。
@@ -128,7 +131,9 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
   - `routes[]`：**前缀公告**（节点背后 LAN/前缀，见 §3.8 前缀公告流程）——注册时携带初始公告 + 变更时更新；`routes` 汇总 = rill ext 节点 subnet router 广播进自建 tailnet 的数据源（TS2021_LEG §3.3）
   - 条目签名：本地条目由本 coordinator 签名；联邦条目经过滤后用本 coordinator 私钥**重签**（§7）
 - `relay_list`：候选中继列表（DERP map 等价物）——coordinator 兜底 + 自愿节点（可达性验证 + RTT 测量后纳入），随 netmap 下发，见 CONNECTIVITY §5
-- `acl`：**网络级 ACL 策略**（REQ-045，前缀级）——AclPolicy{enabled, rules[], groups[]}，随 netmap 原子下发；缺省/未启用 = v1 全放行
+- `acl`：**网络级 ACL 策略**（REQ-045，前缀级）——AclPolicy{enabled, rules[], groups{}}，随 netmap 原子下发；缺省/未启用 = v1 全放行
+- `replica_endpoints[]`：raft 成员端点（绑定审计目标，REQ-049② §3.16；单机 = 空）
+- `entries[].identity_binding + raft_log_index/raft_term`：条目绑定 + 签发锚点随 netmap 下发（REQ-049②）——节点对 netmap 条目做交叉审计的输入
 - 下发时机：注册后全量、拓扑变更后全量、断线重连后补偿全量
 
 ### 3.3 KeyDist（转发密钥下发）
@@ -397,6 +402,34 @@ coordinator 权威地知道"注册了谁"，遥测补齐"数据面实际怎么�
 - **coord 侧**：聚合为最新快照（latest-wins，只保留最新，不承诺时序存储），经 §3.14 状态端点展示
 - **边界**：尽力而为——不重传、不确认；coord 视图允许短暂陈旧（与 netmap 一致性无关，不影响控制面行为）；不上报负载内容、路由表全量；tun 状态等扩展字段留待按需追加（proto optional）
 
+### 3.16 绑定交叉审计 AuditRequest / AuditResponse（REQ-049②，Raft 期）
+
+签发溯源闭环：身份绑定签名（§3.1）只证明"coordinator 私钥签过"，不证明"签过且进过 raft 日志"——被攻陷/脑裂的 leader 可以**不提交日志就签发**绑定（split-view 定向伪造）。binding v2 把签发锚进日志位置，节点可向**任意副本**交叉验证。
+
+**binding v2 签名域**：`"rill-binding-v2" || node_id(4B) || static_pubkey(32B) || log_index(8B) || term(8B)`——锚点 = 该注册条目在 raft 日志的提交位置 `(log_index, term)`，同一日志在所有副本/重启重放下得到相同锚点（确定性），未进日志的签发**无法伪造出匹配锚点**。单机直连形态锚点恒 `(0, 0)`。
+
+**锚点携带**：
+- `RegisterResponse.raft_log_index/raft_term`：注册/挑战恢复响应携带本节点绑定的锚点
+- `NetmapEntry.identity_binding + raft_log_index/raft_term`：绑定随 netmap 条目下发（节点侧伪造 netmap 防线——MITM 篡改条目时本地验签即失败；审计捕获"签了但未进日志"）
+- `NetmapPush.replica_endpoints[]`：raft 成员端点（审计目标，权威下发；单机 = 空）
+- 数据面 msg3（FRAME_HEADER §2.4）：`绑定(64B) || 锚点(16B) || 盐(4B) || Noise 体`——响应方验证闭包可见锚点
+
+**AuditRequest / AuditResponse**：
+- `AuditRequest { node_id, static_pubkey, binding, raft_log_index, raft_term }`——声称的绑定三元组
+- `AuditResponse { verdict, applied_index }`——`applied_index` = 本副本 apply 进度（单机 = `u64::MAX`）
+- verdict：`0=Verified`（与本副本已 apply 状态一致）/ `1=Conflict`（本副本已 apply 越过声称锚点且状态不符——**确定未进日志，伪造**）/ `2=Behind`（本副本进度落后于声称锚点，无法判定，换副本重试）/ `3=Unknown`（签名非法或节点已吊销）
+
+**服务语义**：任意副本以**本地已 apply 状态**应答，**不重定向**（§3.6 的例外——交叉验证的意义正在于用多数派状态制衡单个 leader 的未提交签发）。裁决顺序：签名先验（非法 → Unknown）→ 吊销墓碑（曾合法签发现已吊销 → Unknown，不误判 conflict；墓碑 `node_id → (log_index, term)` 随吊销进 CoordState，schema v3）→ 进度比较（锚点超前 → Behind）→ 状态比对（锚点/公钥/签名全一致 → Verified；否则 Conflict）。
+
+**节点侧行为**（fire-and-forget，独立 TLS 单连接单请求，5s 超时）：
+- 触发点：注册完成（自身绑定）+ 每次收到 netmap（自身 + 全部条目绑定）+ 数据面会话建立（对端 msg3 声明）
+- 去重：锚点已出终态（Verified/Conflict）不重审；Behind/Unknown 不记账，下个触发点重试
+- 目标选择：replica_endpoints 轮转（不固定审计当前连接的 coordinator）
+- Conflict 处置：peer 绑定 → 拆会话 + 移除对端静态公钥（身份不可信）；自身绑定 → 告警（不自断数据面，v1 语义）
+- 单机形态：replica_endpoints 为空 → 无审计目标，审计静默关闭
+
+**已知限制（v1）**：replica 列表由当前连接的 coordinator 下发，恶意 leader 可下发不完整列表缩窄审计面（列举自身以外的诚实副本仍会暴露 Conflict）；锚定的是注册表核心（绑定）而非 netmap 全文（netmap 版本含软状态——liveness/接管重置本地 bump，非日志纯度，不适合作审计锚）。
+
 ## 4. 状态模型（Raft 兼容核心）
 
 ### 4.1 三分类
@@ -527,7 +560,7 @@ coordinator Revoke(node_id)
 
 - **auth key 生命周期**：一次性（单次注册即失效）/ 可复用（带 tag）；吊销联动（Revoke 使相关 auth key 失效）
 - **auth key 格式（REQ-036 定稿，REQ-043 修订）**：`lrk-<network>-<expiry>-<secret>`——`lrk` 固定前缀（类型标识 + 配置校验拒绝非 `lrk` 开头的键）；`<network>` 为配置声明的网络标识（小写字母数字，**不含连字符**——段分隔符冲突，归域绑定 §1.5）；`<expiry>` = 十进制 unix 秒（**0 = 永不过期**），**解析即知过期**；`<secret>` = 32B CSPRNG → base32（RFC 4648 无填充，52 字符）。格式非法 → 配置加载即拒绝启动；network 段与配置不匹配 → 注册拒绝；**过期在注册时（admission）校验**（嵌入时间仅 advisory，防篡改 key 改长有效期——coordinator 是最终裁决），节点侧启动对过期 key 仅告警不阻断（已注册节点仍可经挑战恢复）。**生成不依赖 master_key**（auth key 是注册凭据非 KDF 派生），`lrill authkey --network <slug> --ttl <dur>` 纯本地生成（默认 24h，`0` = 永不过期），输出仅 stdout（不落日志，教训 AO-01/AO-02）
-- **身份绑定签名**：防成员冒充/中继 MITM 的关键——数据面握手双保险：msg1 携带目标 node_id + 接收方校验（FRAME_HEADER §2.3），握手后双方交叉验证 coordinator 签发的绑定
+- **身份绑定签名（binding v2，REQ-049②）**：防成员冒充/中继 MITM 的关键——数据面握手双保险：msg1 携带目标 node_id + 接收方校验（FRAME_HEADER §2.3），握手后双方交叉验证 coordinator 签发的绑定；**签名域含签发锚点 `(log_index, term)`**（§3.16）——绑定与 raft 日志位置一一锚定，节点可向任意副本交叉验证，"签了但未进日志"的 split-view 定向伪造在已 apply 副本上得到 Conflict（终局证据）；吊销墓碑防旧绑定误判
 - **边界划分**：控制面管"谁有资格"（身份/密钥），数据面管"包是否合法"（route_mac / AEAD 双层认证）
 - **传输安全**：TLS 1.3；coordinator 间 mTLS（P2，REQ-070 阶段二已落地：副本复制/投票 RPC 双向证书认证）
 - **TLS 信任锚**：**公网证书为主**（标准 PKI，coordinator 需公网可解析域名 + 有效证书，与 headscale 过渡部署的反代 + Let's Encrypt 形态一致）；内网部署可选**自签 CA 预置**（节点配置预置 coordinator CA 证书，rustls 原生支持）——伪 coordinator 钓鱼 auth key 的防护基础，实现时必配

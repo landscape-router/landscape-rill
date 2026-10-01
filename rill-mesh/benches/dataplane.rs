@@ -25,6 +25,7 @@ fn ctx(id: u8) -> HandshakeContext {
         version: landscape_rill_core::frame::VERSION,
         local_static: [id; SESSION_KEY_LEN],
         identity_binding: [0x5a; BINDING_LEN].to_vec(),
+        binding_issuance: (0, 0),
     }
 }
 
@@ -33,7 +34,13 @@ fn peer_static(id: u8) -> [u8; 32] {
     PublicKey::from(&StaticSecret::from([id; 32])).to_bytes()
 }
 
-fn verifier(node_id: u32, static_pubkey: &[u8; 32], _binding: &[u8]) -> bool {
+fn verifier(
+    node_id: u32,
+    static_pubkey: &[u8; 32],
+    _binding: &[u8],
+    _log_index: u64,
+    _term: u64,
+) -> bool {
     static_pubkey == &peer_static(node_id as u8)
 }
 

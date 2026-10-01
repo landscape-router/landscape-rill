@@ -17,10 +17,14 @@ use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::rate::{RateCounter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
-use landscape_rill_mesh::control::{ControlEvent, ControlSession, MeshLegConfig, NetmapData};
+use landscape_rill_mesh::control::{
+    audit_binding, ControlEvent, ControlSession, MeshLegConfig, NetmapData, AUDIT_VERDICT_BEHIND,
+    AUDIT_VERDICT_CONFLICT, AUDIT_VERDICT_UNKNOWN, AUDIT_VERDICT_VERIFIED,
+};
 use landscape_rill_mesh::data::is_emsgsize;
 use landscape_rill_mesh::data::{
-    IncomingEvent, MeshData, PathEntry, TcpTransport, UdpTransport, Underlay, UnderlayKind,
+    BindingClaim, IncomingEvent, MeshData, PathEntry, TcpTransport, UdpTransport, Underlay,
+    UnderlayKind,
 };
 use probe::RelayEntry;
 use std::collections::{HashMap, HashSet};
@@ -202,6 +206,24 @@ pub struct Node {
     /// default = 未启用（v1 全放行）。裁决点 = 解密后（Data 臂），
     /// AEAD 会话即源认证，直连/中继/多跳全覆盖（CN-04）
     acl: AclPolicy,
+    /// 绑定交叉审计（REQ-049②）：replica 端点（netmap 权威下发）+ 轮转游标
+    audit_endpoints: Vec<String>,
+    audit_cursor: usize,
+    /// 已审终态的声明：peer → 锚点（Verified/Conflict 后记录；Behind/Unknown
+    /// 不记录——下个 netmap/会话建立重试，replica 追上后返回终态）
+    audited_claims: HashMap<u32, (u64, u64)>,
+    /// 审计结果回投（后台任务 → pump_timers 100ms 节奏收账，不进 select!）
+    audit_tx: Option<tokio::sync::mpsc::UnboundedSender<AuditOutcome>>,
+    audit_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AuditOutcome>>,
+    /// CA 证书缓存（审计连接用，lazy 读取）
+    ca_pem: Option<Vec<u8>>,
+}
+
+/// 绑定交叉审计结果（REQ-049②）：node_id = 0 表示自身绑定
+struct AuditOutcome {
+    node_id: u32,
+    anchor: (u64, u64),
+    verdict: u32,
 }
 
 impl Node {
@@ -231,6 +253,7 @@ impl Node {
             let (host, port) = s.rsplit_once(':')?;
             Some((host.to_string(), port.parse::<u16>().ok()?))
         });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut node = Self {
             cfg,
             opts,
@@ -271,6 +294,12 @@ impl Node {
             dn42_peers: Vec::new(),
             ts2021: None,
             acl: AclPolicy::default(),
+            audit_endpoints: Vec::new(),
+            audit_cursor: 0,
+            audited_claims: HashMap::new(),
+            audit_tx: Some(tx.clone()),
+            audit_rx: Some(rx),
+            ca_pem: None,
         };
         // dn42 接入（DN42_LEG）：配置启用即 spawn peer 会话任务
         if let Some(dn42_cfg) = node.cfg.dn42.clone() {
@@ -419,6 +448,9 @@ impl Node {
             IncomingEvent::Established { peer } => {
                 info!("[node] session established with {}", peer);
                 self.peer_heartbeats.insert(peer, 0);
+                if let Some(claim) = self.mesh.binding_claim(peer).cloned() {
+                    self.queue_binding_audit(peer, &claim);
+                }
                 None
             }
             IncomingEvent::Rejected { peer, .. } => {
@@ -449,12 +481,113 @@ impl Node {
         }
     }
 
+    /// 排队一次绑定交叉审计（REQ-049②，CONTROL_PLANE §3.16）：轮转选 replica
+    /// 目标（多副本时逐次轮换——任意副本的 Conflict 都是终局证据）；
+    /// 该锚点已出终态 → 跳过；单机（无 replica 列表）→ 无审计目标
+    fn queue_binding_audit(&mut self, node_id: u32, claim: &BindingClaim) {
+        if self.audited_claims.get(&node_id) == Some(&claim.anchor) {
+            return;
+        }
+        if self.audit_endpoints.is_empty() {
+            return;
+        }
+        let Some(tx) = self.audit_tx.clone() else {
+            return;
+        };
+        if self.ca_pem.is_none() {
+            match std::fs::read(&self.cfg.ca_cert_path) {
+                Ok(pem) => self.ca_pem = Some(pem),
+                Err(e) => {
+                    debug!("[node] binding audit skipped: ca read failed: {e}");
+                    return;
+                }
+            }
+        }
+        let ca = self.ca_pem.clone().unwrap_or_default();
+        let endpoint = self.audit_endpoints[self.audit_cursor % self.audit_endpoints.len()].clone();
+        self.audit_cursor = self.audit_cursor.wrapping_add(1);
+        let claim = claim.clone();
+        tokio::spawn(async move {
+            let Some((host, port)) = endpoint
+                .rsplit_once(':')
+                .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(8443)))
+            else {
+                return;
+            };
+            let res = tokio::time::timeout(
+                Duration::from_secs(5),
+                audit_binding(
+                    &host,
+                    port,
+                    &ca,
+                    node_id,
+                    &claim.static_pubkey,
+                    &claim.binding,
+                    claim.anchor,
+                ),
+            )
+            .await;
+            match res {
+                Ok(Ok((verdict, applied))) => {
+                    debug!(
+                        "[node] binding audit reply: node_id={} verdict={} applied_index={}",
+                        node_id, verdict, applied
+                    );
+                    let _ = tx.send(AuditOutcome {
+                        node_id,
+                        anchor: claim.anchor,
+                        verdict,
+                    });
+                }
+                _ => debug!("[node] binding audit failed: node_id={}", node_id),
+            }
+        });
+    }
+
+    /// 审计结果收账（pump_timers 节奏调用）。Conflict = 确定伪造/未进日志：
+    /// 拆会话移除对端身份（自身绑定 Conflict 只告警——签发者可疑但不自断数据面，
+    /// v1 语义）；Behind/Unknown 不记账，下个触发点重试
+    fn pump_audits(&mut self) {
+        let Some(rx) = self.audit_rx.as_mut() else {
+            return;
+        };
+        while let Ok(out) = rx.try_recv() {
+            match out.verdict {
+                AUDIT_VERDICT_VERIFIED => {
+                    info!(
+                        "[node] binding audit verified: node_id={} anchor=({},{})",
+                        out.node_id, out.anchor.0, out.anchor.1
+                    );
+                    self.audited_claims.insert(out.node_id, out.anchor);
+                }
+                AUDIT_VERDICT_CONFLICT => {
+                    if out.node_id == 0 {
+                        warn!(
+                            "[node] own binding failed cross-audit (issuance not in raft log, split-view?)"
+                        );
+                    } else {
+                        warn!(
+                            "[node] peer {} binding failed cross-audit (unlogged signature), dropping session",
+                            out.node_id
+                        );
+                        self.mesh.drop_session(out.node_id);
+                        self.mesh.remove_peer_static(out.node_id);
+                    }
+                    self.audited_claims.insert(out.node_id, out.anchor);
+                }
+                AUDIT_VERDICT_BEHIND | AUDIT_VERDICT_UNKNOWN => {}
+                _ => {}
+            }
+        }
+    }
+
     /// 定时器：控制面心跳（租约保活）/ 数据面心跳（会话活性 + 3 次超时拆会话）/ rekey。
     /// dn42 leg 事件/明文 drain 同挂此节奏（非阻塞）：控制面退避分片（sleep_with_timers）
     /// 也持续调用，dn42-only 形态（无 coordinator）路由事件不饿死（DN42_LEG §5）
     pub async fn pump_timers(&mut self) {
         self.pump_dn42().await;
         self.pump_ts2021().await;
+        self.pump_audits();
         let now = Instant::now();
         // 租约看门狗（CONTROL_PLANE §5.2 节点侧，REQ-070）：LEASE.expires_at 逾期
         // 且会话仍在 = coordinator 静默僵死（TCP 可写但不应答）→ 断开走既有
@@ -703,6 +836,11 @@ impl Node {
             IncomingEvent::Established { peer } => {
                 info!("[node] session established with {}", peer);
                 self.peer_heartbeats.insert(peer, 0);
+                // 会话对端绑定声明交叉审计（REQ-049②）：握手只验签名有效性，
+                // "签了但未进日志"（split-view 签发）由审计兜底
+                if let Some(claim) = self.mesh.binding_claim(peer).cloned() {
+                    self.queue_binding_audit(peer, &claim);
+                }
                 None
             }
             IncomingEvent::Rejected { peer, .. } => {

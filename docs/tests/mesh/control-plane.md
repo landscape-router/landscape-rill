@@ -155,6 +155,14 @@
 - 说明：coord 3 副本 raft 集群（node-a→coord1、node-b→coord2，至少一节点初始必连 follower，重定向证据前置；setup.sh 生成 cluster 配置段与多域名证书）。断言：选主收敛（唯一 Leader，raft state 日志尾行）；follower 重定向注册（节点日志 `leader redirect:` ≥1 + 双节点注册完成）；**停 leader 容器窗口 5×双栈 ping 无一丢失**（数据面不经 coord，§4.3/§5.6——重连退避分片 + 连接建立后台化持续服务 mesh 输入；连接前台 await 停摆缺陷由单测 data_plane_alive_while_control_connect_stalls 回归：慢协调者连接悬挂窗口内对端懒握手仍完成，区分性已验证——旧代码 5s 超时失败）；停 leader 优雅退出（docker stop 退出码 0——SIGTERM close_notify + 500ms 宽限兜底，REQ-070 开放问题 8）；存活副本选出新 Leader（term 严格递增）；节点经重定向链幂等重注册（node_id 全程唯一）；旧 leader 重启以 Follower 回归（`state=Follower leader=Some(新主 id)`）；终态 a↔b 双栈通；CI e2e-mesh run 36865122523（含 ha job）
 - 缺口：无——节点侧租约看门狗与 SIGTERM 收尾已有单测（rill-node/src/runtime/tests.rs：lease_watchdog_drops_expired_session 真实 LEASE 记账/逾期断开/拒租不触发、sigterm_shutdown_closes_control_session close_notify 后写失败 + 停机收尾、data_plane_alive_while_control_connect_stalls 连接悬挂窗口数据面存活）；多 coordinator_url 维持单 URL（REQ-070 开放问题 6/7/8 均已定）
 
+## CTL-24 绑定交叉审计（REQ-049② / REQ-070 阶段三）
+
+- 关联 REQ：REQ-049 / REQ-070
+- 测试层：单测（进程内 3 副本集群 + TLS 线格式往返）+ docker e2e
+- 状态：`已覆盖`
+- 证据：rill-coord/src/raft/tests.rs、rill-mesh/src/control/server_tests.rs、e2e/scenarios/ha.sh
+- 说明：binding v2 签发锚点（log_index, term）+ AuditRequest/AuditResponse 线格式 + 吊销墓碑（CoordState schema v3）+ 节点侧审计行为（CONTROL_PLANE §3.16）。单测一（binding_audit_cross_verification_rejects_unlogged_issuance，进程内 3 副本）：真实绑定任意副本 Verified（follower 本地裁决）；**未进日志的签发（同一签发种子、签名有效但条目从未经 raft——split-view 场景）任意已 apply 副本 Conflict**；在册节点换公钥重签 Conflict；超前锚点 Behind（非终局）；垃圾签名 Unknown（验签失败）；吊销后旧绑定 Unknown（墓碑语义，不误判 conflict）；单机形态审计语义一致（锚点 (0,0)）。单测二（binding_audit_roundtrip_over_tls）：独立审计连接（不注册）经 audit_binding 客户端 → CoordinatorServer AUDIT_REQUEST 分派 → Verified/Conflict/Unknown 往返 + RegisterResponse 锚点字段。握手层锚点（rill-core/src/handshake/tests.rs：msg3_carries_issuance_anchor / msg3_wrong_anchor_rejected + 签名域锚点对抗 rill-coord/src/signer.rs wrong_anchor_rejected）。e2e（ha.sh 阶段 1.5）：双节点注册后各产生 ≥1 条 `binding audit verified`（节点对自身 + netmap 条目绑定经副本 AUDIT 背书——replica_endpoints 随 netmap 下发、审计走真实 TLS）
+
 ## 验收断言
 
 - [x] CTL-01：注册幂等、身份绑定签名可验证
@@ -185,3 +193,4 @@
   - 证据：rill-mesh/src/control/server.rs（resume_with_valid_key_still_requires_pop / one_time_key_consumed_only_after_pop / resume_caps_mismatch_rejected_after_pop 三单测）、CI e2e-mesh run 33679179273
 - [x] CTL-22：Raft 单机过日志——等价/重启/崩溃重放（恰好一次）/REQ-048 窗口语义/日志边界/手动快照，全部现有测试语义等价通过（458 → 464，rill-coord/src/raft/tests.rs 六测）
 - [x] CTL-23：Raft 3 副本 failover e2e——选主收敛/follower 重定向/停 leader 窗口 5×双栈 ping 无丢失（数据面不中断）/停 leader 优雅退出（exit 0）/term 递增选新主/重定向链幂等重注册（node_id 唯一）/旧 leader Follower 回归/终态双栈通（e2e/scenarios/ha.sh，全五阶段断言）
+- [x] CTL-24：绑定交叉审计（REQ-049②）——伪造绑定（签名有效但未进日志）任意已 apply 副本 Conflict 被拒；真实绑定 Verified；超前锚点 Behind；吊销墓碑 Unknown；TLS 线格式往返；e2e ha 阶段 1.5 双节点 audit verified 背书

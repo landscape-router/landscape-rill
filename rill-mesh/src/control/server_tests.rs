@@ -95,9 +95,15 @@ async fn register_over_tls_loopback() {
 fn binding_verifies_with_ed25519() {
     use landscape_rill_core::control::registry::IdentitySigner;
     let signer = landscape_rill_coord::signer::Ed25519Signer::new([0x99; 32]);
-    let msg = landscape_rill_core::control::registry::binding_message(7, &[0x42; 32]);
+    let msg = landscape_rill_core::control::registry::binding_message(7, &[0x42; 32], (0, 0));
     let sig = signer.sign(&msg);
-    assert!(verify_binding(&signer.verifier(), 7, &[0x42; 32], &sig));
+    assert!(verify_binding(
+        &signer.verifier(),
+        7,
+        &[0x42; 32],
+        &sig,
+        (0, 0)
+    ));
 }
 
 // ==================== ACL 策略线格式（REQ-045，CONTROL_PLANE §3.10） ====================
@@ -129,7 +135,7 @@ fn netmap_push_embeds_acl_policy() {
         },
     );
     let network_id = landscape_rill_coord::domain::network_id_for("lab");
-    let push = netmap_push_message(&coord, network_id);
+    let push = netmap_push_message(&coord, network_id, Vec::new());
     assert_eq!(push.version, coord.netmap_version());
 
     // 编码 → 解码往返（envelope_body + from_reader，同客户端/服务端编解码路径）
@@ -910,4 +916,115 @@ async fn heartbeat_telemetry_stored() {
     while read_envelope(&mut tls).await.unwrap().0 != MsgType::LEASE {}
     drop(tls);
     server.await.unwrap();
+}
+
+// ==================== 绑定审计端点（REQ-049②，CONTROL_PLANE §3.16） ====================
+
+/// AUDIT_REQUEST/AUDIT_RESPONSE 线格式往返：真实绑定 Verified、
+/// 伪造绑定（在册节点换公钥重签）Conflict、垃圾签名 Unknown。
+/// 服务端 = 单机形态（锚点 (0,0)）；客户端走独立 audit_binding 连接
+#[tokio::test]
+async fn binding_audit_roundtrip_over_tls() {
+    use crate::control::AUDIT_VERDICT_CONFLICT;
+    use crate::control::AUDIT_VERDICT_UNKNOWN;
+    use crate::control::AUDIT_VERDICT_VERIFIED;
+    use landscape_rill_coord::signer::Ed25519Signer;
+    use landscape_rill_core::control::registry::{binding_message, IdentitySigner};
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (ca_cert, cert, key) = ca_pair();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let master = [0x11; 32];
+    let seed = [0x22; 32];
+    let ak = landscape_rill_coord::authkey::generate_auth_key("lab", 3600).unwrap();
+    let ak_server = ak.clone();
+    let server = tokio::spawn(async move {
+        let mut listener = listener;
+        // 同一 server 四条连接：注册 + 三次独立审计（共享已 apply 状态）
+        let mut server = CoordinatorServer::new(master, seed);
+        server
+            .coordinator
+            .with_coord_mut(|c| c.add_auth_key(&ak_server, AuthKeyPolicy::Reusable));
+        for _ in 0..4 {
+            let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+            let _ = server.handle_connection(&mut tls).await;
+        }
+    });
+
+    let host = addr.ip().to_string();
+    let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+        .await
+        .unwrap();
+    let client = MeshClient::new([0x33; 32]);
+    let config = MeshLegConfig {
+        coordinator_host: host.clone(),
+        coordinator_port: addr.port(),
+        auth_key: ak.clone(),
+        static_key: [0x33; 32],
+        capabilities: 0x01,
+        announce_routes: vec![],
+    };
+    framing::write_frame(&mut tls, &client.register_request(&config))
+        .await
+        .unwrap();
+    let _ = answer_challenge(&mut tls, &client).await;
+    let (mt, body) = read_envelope(&mut tls).await.unwrap();
+    assert_eq!(mt, MsgType::REGISTER_RESPONSE);
+    let mut reader = BytesReader::from_bytes(&body);
+    let resp = RegisterResponse::from_reader(&mut reader, &body).unwrap();
+    // RegisterResponse 携带签发锚点（binding v2）
+    assert_eq!(
+        (resp.raft_log_index, resp.raft_term),
+        (0, 0),
+        "单机锚点 (0,0)"
+    );
+    drop(tls);
+
+    // 审计连接（独立 TLS，不注册）：真实绑定 → Verified
+    let pubkey = client.static_pubkey();
+    let (verdict, applied) = crate::control::client::audit_binding(
+        &host,
+        addr.port(),
+        &ca_cert,
+        resp.node_id,
+        &pubkey,
+        &resp.identity_binding,
+        (0, 0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(verdict, AUDIT_VERDICT_VERIFIED);
+    assert_eq!(applied, u64::MAX, "单机 applied = 全部已生效");
+
+    // 伪造：在册节点换公钥重签（同种子 = 签名有效，但与本地状态不符）→ Conflict
+    let signer = Ed25519Signer::new(seed);
+    let forged = signer.sign(&binding_message(resp.node_id, &[0x44; 32], (0, 0)));
+    let (verdict, _) = crate::control::client::audit_binding(
+        &host,
+        addr.port(),
+        &ca_cert,
+        resp.node_id,
+        &[0x44; 32],
+        &forged,
+        (0, 0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(verdict, AUDIT_VERDICT_CONFLICT, "伪造绑定交叉验证被拒");
+
+    // 垃圾签名 → Unknown（验签失败，无日志证据）
+    let (verdict, _) = crate::control::client::audit_binding(
+        &host,
+        addr.port(),
+        &ca_cert,
+        resp.node_id,
+        &[0x44; 32],
+        &[0xff; 64],
+        (0, 0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(verdict, AUDIT_VERDICT_UNKNOWN);
+    drop(server);
 }

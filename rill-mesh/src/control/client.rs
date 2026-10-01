@@ -137,6 +137,9 @@ pub struct NetmapNode {
     pub protocol_version: u32,
     /// 可达性标记（CTL-11）：租约超时 = true，节点路由表据此撤销其公告
     pub offline: bool,
+    /// 身份绑定 + 签发锚点（REQ-049②）：对 netmap 条目交叉审计的输入
+    pub identity_binding: Vec<u8>,
+    pub binding_log_id: (u64, u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +149,8 @@ pub struct NetmapData {
     pub relay_list: Vec<String>,
     /// 网络级 ACL 策略（REQ-045，CONTROL_PLANE §3.10）；None = 未启用（v1 全放行）
     pub acl: Option<CoreAclPolicy>,
+    /// raft 副本端点（绑定审计目标，REQ-049②）；单机 = 空
+    pub replica_endpoints: Vec<String>,
 }
 
 /// 线格式策略 → rill-core 策略（REQ-045）：主体 "node:<id>"/"group:<name>"/"any"。
@@ -211,6 +216,8 @@ pub enum ControlEvent {
         node_id: u32,
         network_id: u32,
         identity_binding: Vec<u8>,
+        /// 签发锚点 (log_index, term)（binding v2，REQ-049②）；单机 = (0, 0)
+        binding_log_id: (u64, u64),
     },
     Netmap(NetmapData),
     KeyDist {
@@ -343,6 +350,7 @@ impl ControlSession {
                     node_id,
                     network_id,
                     identity_binding,
+                    binding_log_id: (resp.proto().raft_log_index, resp.proto().raft_term),
                 })
             }
             MsgType::NETMAP_PUSH => {
@@ -363,6 +371,8 @@ impl ControlSession {
                             routes: e.routes.iter().map(|s| s.to_string()).collect(),
                             protocol_version: e.protocol_version,
                             offline: e.offline,
+                            identity_binding: e.identity_binding.to_vec(),
+                            binding_log_id: (e.raft_log_index, e.raft_term),
                         }
                     })
                     .collect();
@@ -376,6 +386,12 @@ impl ControlSession {
                         .map(|s| s.to_string())
                         .collect(),
                     acl: owned.proto().acl.as_ref().map(acl_from_wire),
+                    replica_endpoints: owned
+                        .proto()
+                        .replica_endpoints
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
                 }))
             }
             MsgType::KEY_DIST => {
@@ -469,6 +485,41 @@ impl ControlSession {
             )),
         }
     }
+}
+
+/// 绑定交叉审计（REQ-049②，CONTROL_PLANE §3.16）：向任一副本发起独立
+/// AUDIT_REQUEST（单连接单请求，不注册）。返回 (verdict, applied_index)；
+/// verdict 取值见 AUDIT_VERDICT_* 常量
+pub async fn audit_binding(
+    host: &str,
+    port: u16,
+    ca_cert_pem: &[u8],
+    node_id: u32,
+    static_pubkey: &[u8; 32],
+    binding: &[u8],
+    anchor: (u64, u64),
+) -> BoxResult<(u32, u64)> {
+    use crate::control::codec::envelope_bytes;
+    let mut stream = client_tls_stream(host, port, ca_cert_pem).await?;
+    let req = AuditRequest {
+        node_id,
+        static_pubkey: Cow::Borrowed(static_pubkey.as_slice()),
+        binding: Cow::Borrowed(binding),
+        raft_log_index: anchor.0,
+        raft_term: anchor.1,
+    };
+    framing::write_frame(&mut stream, &envelope_bytes(MsgType::AUDIT_REQUEST, &req)).await?;
+    let mut rbuf = bytes::BytesMut::with_capacity(512);
+    let (msg_type, body) = read_envelope_buf(&mut stream, &mut rbuf).await?;
+    if msg_type != MsgType::AUDIT_RESPONSE {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected audit reply {:?}", msg_type),
+        )));
+    }
+    let mut reader = BytesReader::from_bytes(&body);
+    let resp = AuditResponse::from_reader(&mut reader, &body).map_err(decoding_err)?;
+    Ok((resp.verdict, resp.applied_index))
 }
 
 fn decoding_err(e: impl std::fmt::Debug) -> std::io::Error {

@@ -23,6 +23,8 @@ pub const SESSION_KEY_LEN: usize = 32;
 pub const NODE_ID_LEN: usize = 4;
 pub const SALT_LEN: usize = 4;
 pub const BINDING_LEN: usize = 64;
+/// 签发日志锚点长度（binding v2，REQ-049②）：log_index(8B) + term(8B) 大端
+pub const ISSUANCE_LEN: usize = 16;
 pub const PROLOGUE_LEN: usize = 5;
 pub const REKEY_INFO: &[u8] = b"mesh-rekey-v1";
 pub const SESSION_INFO: &[u8] = b"mesh-session-v1";
@@ -36,10 +38,11 @@ pub const MSG1_BODY_LEN: usize = 32;
 pub const MSG2_BODY_LEN: usize = 96;
 pub const MSG3_BODY_LEN: usize = 64;
 
-/// 帧载荷长度（不含帧头）：msg1 = 目标(4) + 体(32)；msg3 = 绑定(64) + 盐(4) + 体(64)
+/// 帧载荷长度（不含帧头）：msg1 = 目标(4) + 体(32)；
+/// msg3 = 绑定(64) + 签发锚点(16) + 盐(4) + 体(64)
 pub const MSG1_PAYLOAD_LEN: usize = NODE_ID_LEN + MSG1_BODY_LEN;
 pub const MSG2_PAYLOAD_LEN: usize = MSG2_BODY_LEN;
-pub const MSG3_PAYLOAD_LEN: usize = BINDING_LEN + SALT_LEN + MSG3_BODY_LEN;
+pub const MSG3_PAYLOAD_LEN: usize = BINDING_LEN + ISSUANCE_LEN + SALT_LEN + MSG3_BODY_LEN;
 
 pub fn prologue(network_id: u32, version: u8) -> [u8; PROLOGUE_LEN] {
     let mut out = [0u8; PROLOGUE_LEN];
@@ -93,6 +96,8 @@ pub struct HandshakeContext {
     pub version: u8,
     pub local_static: [u8; SESSION_KEY_LEN],
     pub identity_binding: Vec<u8>,
+    /// 本节点绑定的签发日志锚点（binding v2，REQ-049②）：msg3 随绑定携带
+    pub binding_issuance: (u64, u64),
 }
 
 /// 发起方握手状态机
@@ -100,6 +105,7 @@ pub struct HandshakeInitiator {
     state: HandshakeState,
     target_node_id: u32,
     identity_binding: Vec<u8>,
+    binding_issuance: (u64, u64),
     salt: u32,
     expected_peer_static: [u8; SESSION_KEY_LEN],
     sent_msg1: bool,
@@ -114,6 +120,7 @@ impl HandshakeInitiator {
         version: u8,
         target_node_id: u32,
         identity_binding: &[u8],
+        binding_issuance: (u64, u64),
         salt: u32,
         expected_peer_static: &[u8; SESSION_KEY_LEN],
     ) -> Result<Self, HandshakeError> {
@@ -131,6 +138,7 @@ impl HandshakeInitiator {
             state,
             target_node_id,
             identity_binding: identity_binding.to_vec(),
+            binding_issuance,
             salt,
             expected_peer_static: *expected_peer_static,
             sent_msg1: false,
@@ -159,7 +167,7 @@ impl HandshakeInitiator {
         Ok(out)
     }
 
-    /// 接收 msg2，返回 msg3 帧载荷：身份绑定(64B) + 会话盐(4B) + Noise 第三条消息体
+    /// 接收 msg2，返回 msg3 帧载荷：身份绑定(64B) + 签发锚点(16B) + 会话盐(4B) + Noise 第三条消息体
     pub fn read_msg2(&mut self, payload: &[u8]) -> Result<Vec<u8>, HandshakeError> {
         if !self.sent_msg1 || self.sent_msg3 {
             return Err(HandshakeError::WrongStep);
@@ -178,6 +186,8 @@ impl HandshakeInitiator {
         self.sent_msg3 = true;
         let mut out = Vec::with_capacity(MSG3_PAYLOAD_LEN);
         out.extend_from_slice(&self.identity_binding);
+        out.extend_from_slice(&self.binding_issuance.0.to_be_bytes());
+        out.extend_from_slice(&self.binding_issuance.1.to_be_bytes());
         out.extend_from_slice(&self.salt.to_be_bytes());
         out.extend_from_slice(&body[..n]);
         Ok(out)
@@ -266,6 +276,7 @@ impl HandshakeResponder {
     /// 接收 msg3：校验发起方身份绑定（coordinator 签发 `node_id ⇔ 静态公钥`）。
     /// 绑定校验由 verify 注入（持 coordinator 公钥）——绑定中的静态公钥必须与
     /// Noise 握手实际使用的静态公钥一致（防绑定拷贝冒充），本模块与签名算法解耦。
+    /// 签发锚点 (log_index, term) 随绑定传给 verify（binding v2，REQ-049②）。
     pub fn read_msg3<F>(
         &mut self,
         payload: &[u8],
@@ -273,7 +284,7 @@ impl HandshakeResponder {
         verify: F,
     ) -> Result<SessionKeys, HandshakeError>
     where
-        F: Fn(u32, &[u8; SESSION_KEY_LEN], &[u8]) -> bool,
+        F: Fn(u32, &[u8; SESSION_KEY_LEN], &[u8], u64, u64) -> bool,
     {
         if !self.sent_msg2 {
             return Err(HandshakeError::WrongStep);
@@ -283,7 +294,9 @@ impl HandshakeResponder {
             .read_message(&w.body, &mut [])
             .map_err(HandshakeError::Noise)?;
         let remote_static = peer_static(&self.state, HandshakeError::BadBinding)?;
-        if !verify(claimed_node_id, &remote_static, &w.binding) {
+        let log_index = u64::from_be_bytes(w.issuance[..8].try_into().expect("16B anchor"));
+        let term = u64::from_be_bytes(w.issuance[8..].try_into().expect("16B anchor"));
+        if !verify(claimed_node_id, &remote_static, &w.binding, log_index, term) {
             return Err(HandshakeError::BadBinding);
         }
         let h = self.state.get_handshake_hash().to_vec();

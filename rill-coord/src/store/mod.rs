@@ -16,7 +16,7 @@ use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const STATE_SCHEMA: u32 = 2;
+pub const STATE_SCHEMA: u32 = 3;
 
 const STATE_TABLE: TableDefinition<&'static str, &[u8]> = TableDefinition::new("coord_state");
 const STATE_KEY: &str = "state";
@@ -48,6 +48,10 @@ pub struct CoordState {
     /// 旧 schema v2 快照无此字段 → 视为无挂起窗口
     #[serde(default)]
     pub pending_revoke_rotations: Vec<(u32, u64)>,
+    /// (node_id, log_index, term)：吊销墓碑（REQ-049②，schema v3）——
+    /// registry 吊销即删条目，审计需保留"该节点已吊销于哪个日志位置"以防旧绑定误判 conflict
+    #[serde(default)]
+    pub revoked_nodes: Vec<(u32, u64, u64)>,
 }
 
 impl From<redb::CommitError> for StoreError {

@@ -9,32 +9,41 @@ impl Node {
                 node_id,
                 network_id,
                 identity_binding,
+                binding_log_id,
             } => {
                 self.node_id = Some(node_id);
                 self.network_id = network_id;
                 self.mesh.set_self_node_id(node_id);
                 self.reconnect.on_registered();
                 info!(
-                    "[node] registered: node_id={} network_id={}",
-                    node_id, network_id
+                    "[node] registered: node_id={} network_id={} binding anchor=({},{})",
+                    node_id, network_id, binding_log_id.0, binding_log_id.1
                 );
                 let ctx = HandshakeContext {
                     network_id,
                     version: VERSION,
                     local_static: self.cfg.static_key_seed,
                     identity_binding,
+                    binding_issuance: binding_log_id,
                 };
                 self.mesh.set_handshake_context(ctx);
                 let vk = VerifyingKey::from_bytes(&self.cfg.coord_signing_pubkey)?;
-                self.mesh
-                    .set_binding_verifier(move |node_id, static_pubkey, binding| {
+                self.mesh.set_binding_verifier(
+                    move |node_id, static_pubkey, binding, log_index, term| {
                         landscape_rill_coord::signer::verify_binding(
                             &vk,
                             node_id,
                             static_pubkey,
                             binding,
+                            (log_index, term),
                         )
-                    });
+                    },
+                );
+                // 自身绑定交叉审计（REQ-049②）：签发者声称的锚点必须能被
+                // 副本的已 apply 状态背书（node_id = 0 标记自身绑定）
+                if let Some(own) = self.mesh.local_binding_claim() {
+                    self.queue_binding_audit(0, &own);
+                }
                 // 端点上报：数据面 UDP 地址（本机各接口 IP + echo seen 地址）→ coordinator 并入 netmap
                 self.report_endpoints().await;
             }
@@ -47,6 +56,28 @@ impl Node {
                             .session_mut()
                             .handle(SessionEvent::ChallengeOk);
                     }
+                }
+                // 审计目标权威下发（REQ-049②）：raft 成员端点随 netmap 全量替换
+                self.audit_endpoints = netmap.replica_endpoints.clone();
+                // 自身绑定审计（Registered 时刻 replica 列表尚未到达——这里补触发，
+                // 锚点不变时 audited_claims 去重）
+                if let Some(own) = self.mesh.local_binding_claim() {
+                    self.queue_binding_audit(0, &own);
+                }
+                // netmap 条目绑定交叉审计（伪造 netmap 兜底：MITM 篡改条目时签名
+                // 已在本地验签失败，审计捕获"签了但未进日志"的 split-view 签发）
+                for entry in &netmap.entries {
+                    if entry.identity_binding.is_empty()
+                        || self.audited_claims.get(&entry.node_id) == Some(&entry.binding_log_id)
+                    {
+                        continue;
+                    }
+                    let claim = BindingClaim {
+                        static_pubkey: entry.static_pubkey,
+                        binding: entry.identity_binding.clone(),
+                        anchor: entry.binding_log_id,
+                    };
+                    self.queue_binding_audit(entry.node_id, &claim);
                 }
                 self.apply_netmap(&netmap);
                 info!(

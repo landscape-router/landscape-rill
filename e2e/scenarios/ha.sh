@@ -6,7 +6,8 @@
 #       ③ 节点经重定向链重注册（node_id 不变，幂等；配置面 coord 存活的节点
 #       必然完成——配置面 coord 即 leader 的节点等待阶段 4 回归后恢复）；
 #       ④ 旧 leader 容器重启 → 以 Follower 回归（已知现任 leader）；
-#       ⑤ a↔b 双栈仍通 + 两节点 node_id 全程唯一
+#       ⑤ a↔b 双栈仍通 + 两节点 node_id 全程唯一；
+#       1.5 绑定交叉审计（REQ-049②）：节点绑定/netmap 条目经副本 AUDIT Verified 背书
 COORDS=(mesh-coord1 mesh-coord2 mesh-coord3)
 
 raft_state_lines() { logs "$1" | grep '\[coord\] raft node_id='; }
@@ -74,6 +75,23 @@ ping_pair || {
   echo "--- node-a 日志尾 20 行 ---"; logs mesh-node-a | tail -20
   exit 1
 }
+
+echo "==> 阶段 1.5/5：绑定交叉审计（REQ-049②）——节点绑定经副本 Verified 背书"
+for i in $(seq 1 20); do
+  a_audits=$(logs mesh-node-a | grep -c 'binding audit verified' || true)
+  b_audits=$(logs mesh-node-b | grep -c 'binding audit verified' || true)
+  if [ "$a_audits" -ge 1 ] && [ "$b_audits" -ge 1 ]; then
+    echo "PASS: 绑定交叉审计 verified（node-a=${a_audits} node-b=${b_audits} 条）"
+    break
+  fi
+  sleep 2
+done
+if [ "${a_audits:-0}" -lt 1 ] || [ "${b_audits:-0}" -lt 1 ]; then
+  echo "FAIL: 绑定交叉审计未完成（node-a=${a_audits:-0} node-b=${b_audits:-0}）"
+  echo "--- node-a 日志尾 15 行 ---"; logs mesh-node-a | tail -15
+  echo "--- node-b 日志尾 15 行 ---"; logs mesh-node-b | tail -15
+  exit 1
+fi
 
 echo "==> 阶段 2/5：停 leader（$LEADER）——数据面不受影响 + 存活副本选出新 Leader"
 A_REG_BEFORE=$(logs mesh-node-a | grep -c 'registered:' || true)
@@ -178,4 +196,4 @@ if [ "$(registered_ids mesh-node-a)" -ne 1 ] || [ "$(registered_ids mesh-node-b)
   echo "FAIL: 终态 node_id 漂移"
   exit 1
 fi
-echo "PASS: ha e2e 全部断言通过（重定向/failover/幂等重注册/Follower 回归）"
+echo "PASS: ha e2e 全部断言通过（重定向/failover/幂等重注册/Follower 回归/绑定交叉审计）"

@@ -31,8 +31,17 @@ coordinator 是单点：进程重启丢软状态（v1 自愈：节点重连/心�
 - 阶段一：全部现有测试语义等价通过；写操作产生日志条目（apply 顺序 = 提交顺序）——**✅ 已覆盖（CTL-22，rill-coord/src/raft/tests.rs：等价/重启/崩溃重放恰好一次/REQ-048 窗口/日志边界/手动快照）**
 - 阶段二 e2e：3 副本——follower 直连返回 LeaderRedirect；kill leader 后 ≤ 选主超时内新主可写；旧 leader 回归为 follower；节点全程数据面不中断（§4.3）、重连后软状态重建——**✅ 已覆盖（CTL-23，e2e/scenarios/ha.sh 五阶段：停 leader 窗口 5×双栈 ping 无一丢失 + term 递增选新主 + 重定向链幂等重注册 node_id 唯一 + 旧 leader Follower 回归；CI e2e-mesh ha）**
 - 阶段二：持久状态经多数派复制（任一副本单独存活可恢复全量注册表）——**✅ 已覆盖（CTL-12，rill-coord/src/raft/tests.rs 进程内 3 副本集群：复制/转发错误/故障转移/旧 leader 回归；行为入档 CONTROL_PLANE §1.2/§3.6/§5.6/§6）**
-- 阶段三：伪造 netmap（未进日志的签名）交叉验证被拒
+- 阶段三：伪造 netmap（未进日志的签名）交叉验证被拒——**✅ 已覆盖（CTL-24，rill-coord/src/raft/tests.rs binding_audit_cross_verification_rejects_unlogged_issuance：3 副本进程内集群裁决矩阵——未注册节点/在册换公钥的"签了但未进日志"绑定（同一签发种子签名有效）在任意已 apply 副本 Conflict、真实绑定 Verified、超前锚点 Behind、垃圾签名/吊销后旧绑定 Unknown；rill-mesh/src/control/server_tests.rs binding_audit_roundtrip_over_tls：TLS 线格式往返；e2e ha 阶段 1.5 双节点 binding audit verified 背书）**
 - 回归：REQ-048 合并轮换窗口、REQ-047 限速、REQ-045 ACL 在日志复制下语义不变——**✅ 阶段一等价测试含 REQ-048/047 路径；ACL 经写路径单一不变（CTL-09 全量回归绿）**
+
+### 阶段三落地要点（实现级，已入档 §3.16）
+
+- **binding v2 签名域**：`"rill-binding-v2" || node_id || static_pubkey || log_index || term`——锚点在 machine.apply 内从 entry.log_id 取（确定性重放：同日志同锚点），单机直连恒 (0,0)
+- **锚点通道**：RegisterResponse 字段 + NetmapEntry 绑定/锚点 + NetmapPush.replica_endpoints（raft 成员表）+ msg3 载荷 +16B（FRAME_HEADER §2.4 布局更新）
+- **审计端点**：任意副本本地已 apply 状态应答、不重定向（§3.6 例外）；裁决顺序 = 签名先验 → 吊销墓碑（CoordState schema v3 新增 revoked_nodes，防旧绑定误判 conflict）→ 进度比较 → 状态比对
+- **节点侧**：注册/收 netmap/会话建立三触发点，锚点去重，replica 轮转，fire-and-forget（独立 TLS 单连接，5s 超时，结果经 unbounded mpsc 在 pump_timers 收账）；Conflict → peer 拆会话移除公钥 / 自身绑定仅告警（不自断数据面）
+- **等价性修订**：binding 字节/锚点路径相关（raft=日志位置，直连=(0,0)），single_node_equivalent_to_direct_calls 改为按各自锚点独立验签 + 持久状态比较归一化绑定域
+- **已知限制（v1）**：replica 列表由当前连接的 coordinator 下发（恶意 leader 可缩窄审计面——列出自身以外诚实副本仍会暴露）；审计锚定注册表核心（绑定）而非 netmap 全文（版本含软状态，非日志纯度）
 
 ### 阶段二落地要点（实现级，已入档 §5.6）
 

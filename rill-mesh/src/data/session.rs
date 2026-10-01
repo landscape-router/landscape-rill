@@ -24,6 +24,7 @@ impl MeshData {
             ctx.version,
             peer,
             &ctx.identity_binding,
+            ctx.binding_issuance,
             rand::random::<u32>(),
             &peer_static,
         )
@@ -329,11 +330,32 @@ impl MeshData {
                 reason: HandshakeError::WrongStep,
             };
         };
-        let result = responder.read_msg3(payload, from, |node_id, static_pubkey, binding| {
-            verifier(node_id, static_pubkey, binding)
-        });
+        let claimed = std::cell::RefCell::new(None);
+        let result = responder.read_msg3(
+            payload,
+            from,
+            |node_id, static_pubkey, binding, log_index, term| {
+                let ok = verifier(node_id, static_pubkey, binding, log_index, term);
+                if ok {
+                    *claimed.borrow_mut() =
+                        Some((*static_pubkey, binding.to_vec(), (log_index, term)));
+                }
+                ok
+            },
+        );
         match result {
             Ok(keys) => {
+                // 记录对端绑定声明（REQ-049②）：会话建立后运行时交叉审计用
+                if let Some((static_pubkey, binding, anchor)) = claimed.into_inner() {
+                    self.binding_claims.insert(
+                        from,
+                        BindingClaim {
+                            static_pubkey,
+                            binding,
+                            anchor,
+                        },
+                    );
+                }
                 self.sessions.insert(from, Session::new(from, keys));
                 IncomingEvent::Established { peer: from }
             }

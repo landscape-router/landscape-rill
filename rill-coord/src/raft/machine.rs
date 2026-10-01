@@ -100,7 +100,10 @@ impl CoordStateMachine {
         )
     }
 
-    fn apply_command(&mut self, cmd: CoordCommand) -> CoordCommandResult {
+    fn apply_command(&mut self, cmd: CoordCommand, log_id: LogId<u64>) -> CoordCommandResult {
+        // 签发锚点 = 本条日志的提交位置（binding v2，REQ-049②）：同一日志在所有
+        // 副本/重启重放得到相同锚点（确定性），未进日志的签发无法伪造出匹配锚点
+        let issuance = (log_id.index, log_id.leader_id.term);
         match cmd {
             CoordCommand::Register {
                 auth_key,
@@ -114,10 +117,11 @@ impl CoordStateMachine {
                 capabilities,
                 routes,
                 now,
+                issuance,
             )),
             CoordCommand::Revoke { node_id, now } => {
                 let known = self.coordinator.static_pubkey_of(node_id).is_some();
-                self.coordinator.revoke(node_id, now);
+                self.coordinator.revoke(node_id, now, issuance);
                 CoordCommandResult::Revoke(known)
             }
             CoordCommand::SetEndpoints { node_id, endpoints } => {
@@ -239,7 +243,9 @@ impl RaftStateMachine<TypeConfig> for SharedStateMachine {
                 inner.last_applied = Some(entry.log_id);
                 match entry.payload {
                     EntryPayload::Blank => results.push(CoordCommandResult::Noop),
-                    EntryPayload::Normal(cmd) => results.push(inner.apply_command(cmd)),
+                    EntryPayload::Normal(cmd) => {
+                        results.push(inner.apply_command(cmd, entry.log_id))
+                    }
                     EntryPayload::Membership(membership) => {
                         inner.last_membership =
                             StoredMembership::new(Some(entry.log_id), membership);

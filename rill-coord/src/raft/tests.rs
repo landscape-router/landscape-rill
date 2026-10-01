@@ -137,7 +137,9 @@ fn register_cmd(ak: &str, seed: u8, capabilities: u32, routes: Vec<String>) -> C
     }
 }
 
-/// expires_at 源于墙钟（PathSet TTL），归一化后比较（同秒内本就相等，防跨秒抖动）
+/// expires_at 源于墙钟（PathSet TTL），归一化后比较（同秒内本就相等，防跨秒抖动）。
+/// 绑定字节/签发锚点/吊销墓碑随路径不同（raft = 日志位置，直连 = (0,0)，binding v2），
+/// 归一化对齐后比较——绑定正确性由注册断言单独覆盖
 fn normalize(mut state: CoordState) -> CoordState {
     for (_, map, _) in &mut state.path_maps {
         for (_, _, set) in map {
@@ -146,11 +148,24 @@ fn normalize(mut state: CoordState) -> CoordState {
             }
         }
     }
+    for n in &mut state.nodes {
+        n.identity_binding.clear();
+        n.binding_log_id = (0, 0);
+    }
+    state.revoked_nodes = state
+        .revoked_nodes
+        .iter()
+        .map(|(id, _, _)| (*id, 0, 0))
+        .collect();
     state
 }
 
 fn machine_state(machine: &SharedStateMachine) -> CoordState {
     normalize(machine.with(|m| m.state_snapshot()))
+}
+
+fn direct_state(c: &crate::coordinator::Coordinator) -> CoordState {
+    normalize(c.snapshot())
 }
 
 /// CoordState 未派生 PartialEq：序列化字节比较（确定性结构 + 排序字段）
@@ -159,12 +174,7 @@ fn assert_state_eq(a: &CoordState, b: &CoordState, ctx: &str) {
         serde_json::to_vec(a).unwrap(),
         serde_json::to_vec(b).unwrap(),
     );
-    assert!(
-        ja == jb,
-        "{ctx} 状态不等:
-raft   = {ja:#?}
-direct = {jb:#?}"
-    );
+    assert!(ja == jb, "{ctx} 状态不等");
 }
 
 #[tokio::test]
@@ -194,7 +204,9 @@ async fn single_node_equivalent_to_direct_calls() {
         ],
     );
 
-    // 注册 ×2：响应逐字段等价
+    // 注册 ×2：node_id/网络等价；绑定按各自签发锚点独立校验通过
+    //（binding v2：绑定消息内含锚点——raft 路径锚 = 日志位置，直连路径恒 (0,0)，字节不再相等）
+    let verifier = direct.verifier();
     for seed in 1..=2u8 {
         let routes = vec![format!("10.4{}.0.0/24", seed)];
         let raft_data = match write(&raft, register_cmd(&ak, seed, 0x01, routes.clone())).await {
@@ -202,9 +214,35 @@ async fn single_node_equivalent_to_direct_calls() {
             other => panic!("register failed: {other:?}"),
         };
         let direct_data = direct
-            .register(&ak, &pubkey(seed), 0x01, routes, 0)
+            .register(&ak, &pubkey(seed), 0x01, routes, 0, (0, 0))
             .unwrap();
-        assert_eq!(raft_data, direct_data);
+        assert_eq!(raft_data.node_id, direct_data.node_id);
+        assert_eq!(raft_data.network_id, direct_data.network_id);
+        assert_eq!(direct_data.binding_log_id, (0, 0));
+        // raft 锚点 = 该注册条目的日志位置（首个注册条目在初始成员变更之后）
+        assert!(raft_data.binding_log_id.0 > 0 && raft_data.binding_log_id.1 >= 1);
+        assert!(crate::signer::verify_binding(
+            &verifier,
+            raft_data.node_id,
+            &pubkey(seed),
+            &raft_data.identity_binding,
+            raft_data.binding_log_id
+        ));
+        assert!(crate::signer::verify_binding(
+            &verifier,
+            direct_data.node_id,
+            &pubkey(seed),
+            &direct_data.identity_binding,
+            direct_data.binding_log_id
+        ));
+        // 跨锚点不可互换（签名域包含锚点）
+        assert!(!crate::signer::verify_binding(
+            &verifier,
+            raft_data.node_id,
+            &pubkey(seed),
+            &raft_data.identity_binding,
+            direct_data.binding_log_id
+        ));
     }
 
     // 端点 + 路径
@@ -249,10 +287,10 @@ async fn single_node_equivalent_to_direct_calls() {
         CoordCommandResult::Revoke(true) => {}
         other => panic!("revoke should hit: {other:?}"),
     }
-    direct.revoke(2, 1_000);
+    direct.revoke(2, 1_000, (0, 0));
 
     // 持久状态等价（apply 顺序 = 提交顺序的直接推论）
-    assert_state_eq(&machine_state(&machine), &direct.snapshot(), "等价性");
+    assert_state_eq(&machine_state(&machine), &direct_state(&direct), "等价性");
 
     raft.shutdown().await.unwrap();
 }
@@ -351,7 +389,9 @@ async fn revoke_rotation_window_semantics_hold_through_log() {
     .await;
     let mut direct = direct_coordinator(&ak);
     register(&raft, &ak, 1).await;
-    direct.register(&ak, &pubkey(1), 0, vec![], 0).unwrap();
+    direct
+        .register(&ak, &pubkey(1), 0, vec![], 0, (0, 0))
+        .unwrap();
     let version_before = machine.with(|m| m.coordinator().key_version_for("lab"));
 
     // 未知节点吊销：不命中、不动窗口
@@ -392,7 +432,7 @@ async fn revoke_rotation_window_semantics_hold_through_log() {
     }
 
     // 直接调用同序列对照
-    direct.revoke(1, 100);
+    direct.revoke(1, 100, (0, 0));
     assert!(!direct.flush_revoke_rotations(159));
     assert!(direct.flush_revoke_rotations(160));
     assert!(!direct.flush_revoke_rotations(1_000));
@@ -1023,6 +1063,157 @@ async fn backend_leadership_view_and_write_dispatch() {
         .unwrap();
     assert_eq!(d.node_id, 1);
     assert!(single.revoke(1, 0).await.unwrap(), "Single 吊销命中");
+
+    for n in &nodes {
+        let _ = n.raft.shutdown().await;
+    }
+}
+
+// ==================== 绑定交叉审计（REQ-049② 阶段三验收） ====================
+
+/// 伪造绑定（签名有效但未进日志）在任意已 apply 副本上被拒（Conflict）；
+/// 真实绑定 Verified、超前锚点 Behind、吊销后旧绑定 Unknown。
+/// 单机形态（审计语义的直连回归）一并覆盖
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binding_audit_cross_verification_rejects_unlogged_issuance() {
+    use crate::raft::backend::{AuditVerdict, CoordBackend};
+    use crate::signer::Ed25519Signer;
+    use landscape_rill_core::control::registry::{binding_message, IdentitySigner};
+
+    let net = TestNetwork::new();
+    let ak = lrk("lab", 86_400);
+    let paths: Vec<_> = (0..3).map(|id| cluster_paths("audit", id)).collect();
+    let mut nodes = Vec::new();
+    for id in 0..3u64 {
+        nodes.push(
+            spawn_cluster_node(
+                &net,
+                id,
+                &paths[id as usize].0,
+                &paths[id as usize].1,
+                auth_config(&ak),
+            )
+            .await,
+        );
+    }
+    nodes[0]
+        .raft
+        .initialize(BTreeMap::from([
+            (0, BasicNode::default()),
+            (1, BasicNode::default()),
+            (2, BasicNode::default()),
+        ]))
+        .await
+        .unwrap();
+    let leader = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
+    let leader_node = nodes.iter().find(|n| n.id == leader).unwrap();
+    let advertise: std::collections::HashMap<u64, String> = (0..3)
+        .map(|id| (id, format!("127.0.0.1:{}", 9100 + id)))
+        .collect();
+    let backends: Vec<CoordBackend> = nodes
+        .iter()
+        .map(|n| CoordBackend::Cluster {
+            raft: n.raft.clone(),
+            machine: n.machine.clone(),
+            members: Arc::new(advertise.clone()),
+            self_id: n.id,
+        })
+        .collect();
+
+    // leader 注册 → 全员 apply（锚点 = 该条目日志位置）
+    let data = match leader_node
+        .raft
+        .client_write(register_cmd(&ak, 7, 0x00, vec![]))
+        .await
+        .unwrap()
+        .data
+    {
+        CoordCommandResult::Register(Ok(d)) => d,
+        other => panic!("cluster register failed: {other:?}"),
+    };
+    assert!(data.binding_log_id.0 >= 1, "集群锚点 = 真实日志位置");
+    let refs: Vec<_> = nodes.iter().collect();
+    await_converged(&refs).await;
+    assert_eq!(
+        backends[0].replica_endpoints().len(),
+        3,
+        "replica 端点来自 raft 成员表"
+    );
+
+    // ① 真实绑定：任意副本（含 follower）本地裁决 Verified
+    for b in &backends {
+        let (v, applied) = b.audit_binding(
+            data.node_id,
+            &pubkey(7),
+            &data.identity_binding,
+            data.binding_log_id,
+        );
+        assert_eq!(v, AuditVerdict::Verified);
+        assert!(applied >= data.binding_log_id.0);
+    }
+
+    // 伪造签发面：同一签发种子（split-view 的 leader 私钥用法），但条目从未进日志
+    let forged_signer = Ed25519Signer::new([0x5a; 32]);
+    // ② 未注册节点 + 已 apply 范围内锚点 → Conflict（"未进日志的签名"被拒）
+    let unlogged = forged_signer.sign(&binding_message(9, &pubkey(9), data.binding_log_id));
+    for b in &backends {
+        let (v, _) = b.audit_binding(9, &pubkey(9), &unlogged, data.binding_log_id);
+        assert_eq!(v, AuditVerdict::Conflict, "未进日志的签发应被拒");
+    }
+    // ③ 在册节点换公钥重签（条目锚点相同但内容不符）→ Conflict
+    let swapped = forged_signer.sign(&binding_message(
+        data.node_id,
+        &pubkey(0x99),
+        data.binding_log_id,
+    ));
+    let (v, _) =
+        backends[1].audit_binding(data.node_id, &pubkey(0x99), &swapped, data.binding_log_id);
+    assert_eq!(v, AuditVerdict::Conflict);
+
+    // ④ 超前锚点（编造未来日志位置/replica 落后）→ Behind（无法判定，非终局）
+    let future = (backends[0].applied_index() + 100, data.binding_log_id.1);
+    let future_sig = forged_signer.sign(&binding_message(9, &pubkey(9), future));
+    let (v, _) = backends[2].audit_binding(9, &pubkey(9), &future_sig, future);
+    assert_eq!(v, AuditVerdict::Behind);
+
+    // ⑤ 垃圾签名（无签发种子者伪造）→ Unknown（本地验签即失败，无日志证据可言）
+    let (v, _) =
+        backends[0].audit_binding(data.node_id, &pubkey(7), &[0xff; 64], data.binding_log_id);
+    assert_eq!(v, AuditVerdict::Unknown);
+
+    // ⑥ 吊销后的旧绑定：签名仍有效但节点已吊销 → Unknown（墓碑防误判 conflict）
+    leader_node
+        .raft
+        .client_write(CoordCommand::Revoke {
+            node_id: data.node_id,
+            now: 1_000,
+        })
+        .await
+        .unwrap();
+    await_converged(&refs).await;
+    let (v, _) = backends[0].audit_binding(
+        data.node_id,
+        &pubkey(7),
+        &data.identity_binding,
+        data.binding_log_id,
+    );
+    assert_eq!(v, AuditVerdict::Unknown, "吊销墓碑语义");
+
+    // 单机形态：审计语义一致（锚点恒 (0,0)，applied = 全部已生效）
+    let mut single = Coordinator::new([0x5a; 32]);
+    single.add_network("lab", [0x77; 32]);
+    single.add_auth_key(&ak, AuthKeyPolicy::Reusable);
+    let backend = CoordBackend::single(single);
+    let d = backend
+        .register(&ak, &pubkey(3), 0x00, vec![], 0)
+        .await
+        .unwrap();
+    assert_eq!(d.binding_log_id, (0, 0));
+    let (v, _) = backend.audit_binding(d.node_id, &pubkey(3), &d.identity_binding, (0, 0));
+    assert_eq!(v, AuditVerdict::Verified);
+    let forged_single = forged_signer.sign(&binding_message(2, &pubkey(4), (0, 0)));
+    let (v, _) = backend.audit_binding(2, &pubkey(4), &forged_single, (0, 0));
+    assert_eq!(v, AuditVerdict::Conflict);
 
     for n in &nodes {
         let _ = n.raft.shutdown().await;

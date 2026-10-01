@@ -12,7 +12,9 @@ pub mod raft_rpc;
 pub mod server;
 pub mod tls;
 
-pub use client::{ControlEvent, ControlSession, MeshClient, MeshEvent, MeshLegConfig, NetmapData};
+pub use client::{
+    audit_binding, ControlEvent, ControlSession, MeshClient, MeshEvent, MeshLegConfig, NetmapData,
+};
 pub use codec::{
     envelope_body, envelope_bytes, parse_envelope, read_envelope, write_msg, EnvelopeError,
 };
@@ -22,6 +24,12 @@ pub use tls::{client_tls_stream, server_tls_accept, server_tls_acceptor, server_
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const CHALLENGE_NONCE_LEN: usize = 16;
+
+/// AuditResponse.verdict 线格式取值（REQ-049②，CONTROL_PLANE §3.16）
+pub const AUDIT_VERDICT_VERIFIED: u32 = 0;
+pub const AUDIT_VERDICT_CONFLICT: u32 = 1;
+pub const AUDIT_VERDICT_BEHIND: u32 = 2;
+pub const AUDIT_VERDICT_UNKNOWN: u32 = 3;
 
 /// 边界 I/O 结果别名（ERROR_ID §2.2）：统一 `Box<dyn Error + Send + Sync>`
 pub(crate) type BoxResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

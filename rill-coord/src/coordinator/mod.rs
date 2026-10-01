@@ -47,6 +47,8 @@ pub struct RegisterData {
     pub node_id: u32,
     pub network_id: u32,
     pub identity_binding: Vec<u8>,
+    /// 签发日志锚点 (log_index, term)（binding v2，REQ-049②）；单机直连 = (0, 0)
+    pub binding_log_id: (u64, u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,9 @@ pub struct NodeInfo {
     pub offline: bool,
     /// 协议版本（v2 路径能力协商；v1 节点恒 1）
     pub protocol_version: u32,
+    /// 身份绑定签名 + 签发锚点（REQ-049②）：随 netmap 下发供交叉审计
+    pub identity_binding: Vec<u8>,
+    pub binding_log_id: (u64, u64),
 }
 
 pub struct Coordinator {
@@ -85,6 +90,9 @@ pub struct Coordinator {
     telemetry: HashMap<u32, TelemetryView>,
     /// 注册拒绝累计（REQ-051 安全计数器，§3.14 内容组 4）
     register_rejects: u64,
+    /// 吊销墓碑 node_id → (log_index, term)（REQ-049②）：registry 吊销即删条目，
+    /// 墓碑保留"吊销于哪个日志位置"，审计时不把已吊销节点的旧绑定误判 conflict
+    revoked: HashMap<u32, (u64, u64)>,
 }
 
 impl Coordinator {
@@ -98,6 +106,7 @@ impl Coordinator {
             store: None,
             telemetry: HashMap::new(),
             register_rejects: 0,
+            revoked: HashMap::new(),
         }
     }
 
@@ -265,6 +274,11 @@ impl Coordinator {
             state.netmap_version,
             state.endpoints.iter().cloned().collect(),
         );
+        self.revoked = state
+            .revoked_nodes
+            .iter()
+            .map(|(id, index, term)| (*id, (*index, *term)))
+            .collect();
         Ok(())
     }
 
@@ -321,6 +335,12 @@ impl Coordinator {
             .flat_map(|d| d.registry.consumed_one_time_keys().iter().cloned())
             .collect();
         consumed.sort();
+        let mut revoked_nodes: Vec<(u32, u64, u64)> = self
+            .revoked
+            .iter()
+            .map(|(id, (index, term))| (*id, *index, *term))
+            .collect();
+        revoked_nodes.sort_unstable();
         CoordState {
             schema: STATE_SCHEMA,
             next_node_id: self.next_node_id,
@@ -332,6 +352,7 @@ impl Coordinator {
             path_maps,
             relay_lists,
             pending_revoke_rotations,
+            revoked_nodes,
         }
     }
 
@@ -509,9 +530,10 @@ impl Coordinator {
         capabilities: u32,
         routes: Vec<String>,
         now: u64,
+        issuance: (u64, u64),
     ) -> Result<RegisterData, RegisterError> {
         // 注册拒绝计数（REQ-051 §3.14 内容组 4）：任何 Err 路径收口统计
-        let r = self.register_inner(auth_key, static_pubkey, capabilities, routes, now);
+        let r = self.register_inner(auth_key, static_pubkey, capabilities, routes, now, issuance);
         if r.is_err() {
             self.register_rejects = self.register_rejects.saturating_add(1);
         }
@@ -525,6 +547,7 @@ impl Coordinator {
         capabilities: u32,
         routes: Vec<String>,
         now: u64,
+        issuance: (u64, u64),
     ) -> Result<RegisterData, RegisterError> {
         // 过期时间内嵌在 key 自身（REQ-043）：admission 时解析校验；
         // 解析失败 = 非法 key（fail-closed）。格式知识在 rill-coord，注册表按不透明字符串处理。
@@ -559,6 +582,7 @@ impl Coordinator {
                 capabilities,
                 routes,
                 tentative,
+                issuance,
                 signer,
             )
         };
@@ -586,6 +610,7 @@ impl Coordinator {
             node_id: entry.node_id,
             network_id: entry.network_id,
             identity_binding: entry.identity_binding.clone(),
+            binding_log_id: entry.binding_log_id,
         })
     }
 
@@ -707,6 +732,9 @@ impl Coordinator {
                 endpoints: self.directory.endpoints_of(e.node_id).to_vec(),
                 offline: self.liveness.is_offline(e.node_id),
                 protocol_version: self.directory.protocol_version(e.node_id),
+                // 绑定随 netmap 下发（REQ-049②）：节点可对 netmap 条目与握手对端做交叉审计
+                identity_binding: e.identity_binding.clone(),
+                binding_log_id: e.binding_log_id,
             })
             .collect()
     }
@@ -764,7 +792,7 @@ impl Coordinator {
         self.liveness.offline_nodes()
     }
 
-    pub fn revoke(&mut self, node_id: u32, now: u64) {
+    pub fn revoke(&mut self, node_id: u32, now: u64, log_id: (u64, u64)) {
         self.flush_revoke_rotations(now);
         let revoked = self
             .domains
@@ -786,6 +814,8 @@ impl Coordinator {
             })
             .is_some();
         if revoked {
+            // 吊销墓碑（REQ-049②）：跨域全局 node_id 键控
+            self.revoked.insert(node_id, log_id);
             self.persist();
         }
     }
@@ -845,6 +875,27 @@ impl Coordinator {
         self.domain_of_node(node_id)
             .and_then(|d| d.registry.entry(node_id))
             .map(|e| e.identity_binding.clone())
+    }
+
+    /// 签发日志锚点（binding v2，REQ-049②）
+    pub fn binding_log_id_of(&self, node_id: u32) -> Option<(u64, u64)> {
+        self.domain_of_node(node_id)
+            .and_then(|d| d.registry.entry(node_id))
+            .map(|e| e.binding_log_id)
+    }
+
+    /// 注册表条目只读视图（审计读取：公钥/绑定/锚点三元组，REQ-049②）
+    pub fn node_entry(
+        &self,
+        node_id: u32,
+    ) -> Option<&landscape_rill_core::control::registry::NodeEntry> {
+        self.domain_of_node(node_id)
+            .and_then(|d| d.registry.entry(node_id))
+    }
+
+    /// 吊销墓碑（REQ-049②）：node_id → 吊销日志位置
+    pub fn revocation_of(&self, node_id: u32) -> Option<(u64, u64)> {
+        self.revoked.get(&node_id).copied()
     }
 
     /// auth key 只读校验（REQ-060 新建类挑战前置）：格式/过期/归域/注册表存在；

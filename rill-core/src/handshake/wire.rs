@@ -9,7 +9,9 @@ use zerocopy::byteorder::big_endian::U32;
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 use super::error::HandshakeError;
-use super::{BINDING_LEN, MSG1_BODY_LEN, MSG1_PAYLOAD_LEN, MSG3_BODY_LEN, MSG3_PAYLOAD_LEN};
+use super::{
+    BINDING_LEN, ISSUANCE_LEN, MSG1_BODY_LEN, MSG1_PAYLOAD_LEN, MSG3_BODY_LEN, MSG3_PAYLOAD_LEN,
+};
 
 /// msg1 帧载荷视图:目标 node_id(4B) + Noise 消息体(32B)
 #[derive(Debug, Clone, Copy, KnownLayout, Immutable, FromBytes, Unaligned)]
@@ -28,11 +30,12 @@ impl WireMsg1 {
     }
 }
 
-/// msg3 帧载荷视图:身份绑定(64B) + 会话盐(4B) + Noise 消息体(64B)
+/// msg3 帧载荷视图:身份绑定(64B) + 签发锚点(16B) + 会话盐(4B) + Noise 消息体(64B)
 #[derive(Debug, Clone, Copy, KnownLayout, Immutable, FromBytes, Unaligned)]
 #[repr(C, packed)]
 pub(super) struct WireMsg3 {
     pub binding: [u8; BINDING_LEN],
+    pub issuance: [u8; ISSUANCE_LEN],
     pub salt: U32,
     pub body: [u8; MSG3_BODY_LEN],
 }

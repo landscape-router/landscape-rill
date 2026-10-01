@@ -63,9 +63,11 @@ node-C 容器 ──┘
     断言 BadRouteMac 丢弃 + lab 主密钥正对照（越过 route_mac，证明 drop 因密钥不匹配）
   - `ha`：coordinator Raft 3 副本 failover（REQ-070 阶段二，CTL-23，CONTROL_PLANE
     §3.6/§5.6）——coord1/2/3 静态成员集群（node-a→coord1、node-b→coord2，至少一节点
-    初始必连 follower）：选主收敛 → follower 重定向注册 → `docker stop` leader 窗口
-    5×双栈 ping 无一丢失（数据面不经 coord）→ 存活副本 term 递增选新主 → 节点经
-    重定向链幂等重注册（node_id 唯一）→ 旧 leader 重启以 Follower 回归 → 终态双栈通
+    初始必连 follower）：选主收敛 → follower 重定向注册 → 绑定交叉审计 verified 背书
+    （REQ-049②/CTL-24/§3.16 阶段 1.5：节点对自身 + netmap 条目绑定经副本 AUDIT）→
+    `docker stop` leader 窗口 5×双栈 ping 无一丢失（数据面不经 coord）→ 存活副本
+    term 递增选新主 → 节点经重定向链幂等重注册（node_id 唯一）→ 旧 leader 重启以
+    Follower 回归 → 终态双栈通
 - **e2e 容器网段**（RFC 1918，避开 docker 默认池 172.17-172.30 与 CGNAT）：
   - `192.168.240.0/23`：mesh e2e 专用（direct 用 `192.168.240.0/24`，relay 的
     net1/net2 用 `192.168.240.0/24` + `192.168.241.0/24`）

@@ -25,6 +25,8 @@ enum MsgType {
   PATH_WITHDRAW = 14;
   PATH_PROBE = 15;
   PATH_PROBE_RESPONSE = 16;
+  AUDIT_REQUEST = 17;           // §3.16 签发溯源交叉验证（REQ-049②/REQ-070 阶段三）
+  AUDIT_RESPONSE = 18;
 }
 
 message Envelope {
@@ -52,7 +54,9 @@ message RegisterRequest {
 message RegisterResponse {
   fixed32 node_id = 1;          // coordinator 唯一分配
   fixed32 network_id = 2;       // 本网络标识（联邦钩子，v1 恒为本地网络）
-  bytes identity_binding = 3;   // coordinator 签名 (node_id || static_pubkey)
+  bytes identity_binding = 3;   // coordinator 签名（§6 binding v2：签域 + node_id + static_pubkey + log 锚点）
+  fixed64 raft_log_index = 4;   // 签发日志锚点（REQ-049②）：该注册 apply 的日志位
+  fixed64 raft_term = 5;        // 日志锚点任期
 }
 
 // §3.6 主重定向（Raft 期）：follower 对 REGISTER/HEARTBEAT 及写请求以此应答，
@@ -72,6 +76,9 @@ message NetmapEntry {
   repeated string routes = 6;   // 前缀公告（CIDR，§3.8）
   uint32 protocol_version = 7;  // 协议版本（v2 路径服务协商；v1 节点 = 1）
   bool offline = 8;             // 可达性标记（CTL-11）：租约超时 = true，节点侧路由表据此撤销其公告
+  bytes identity_binding = 9;   // 该节点身份绑定（§6 binding v2，随注册表下发；节点间握手交叉验证用）
+  fixed64 raft_log_index = 10;  // 签发日志锚点（REQ-049②）
+  fixed64 raft_term = 11;
 }
 
 message NetmapPush {
@@ -79,6 +86,7 @@ message NetmapPush {
   repeated NetmapEntry entries = 2;
   repeated string relay_list = 3;  // 候选中继（CONNECTIVITY §5）
   AclPolicy acl = 4;            // 网络级 ACL 策略（REQ-045；缺省 = 未启用，v1 全放行）
+  repeated string replica_endpoints = 5;  // raft 成员端点（§3.16 审计目标；单机 = 空）
 }
 
 // §3.10 ACL 策略（REQ-045，前缀级先行）
@@ -216,4 +224,20 @@ message PathProbe {
 message PathProbeResponse {
   uint64 path_id = 1;
   uint64 nonce = 2;
+}
+
+// §3.16 签发溯源交叉验证（REQ-049②/REQ-070 阶段三，split-view 检测）：
+// 节点持 binding 声明（自身注册 / netmap 条目 / 握手对端）向任意副本求证；
+// 副本以本地已 apply 状态应答（follower 不重定向——交叉验证正是对 leader 的制衡）
+message AuditRequest {
+  fixed32 node_id = 1;
+  bytes static_pubkey = 2;      // 声明中的公钥（32B）
+  bytes binding = 3;            // 声明的绑定签名（64B）
+  fixed64 raft_log_index = 4;   // 声明的签发日志锚点
+  fixed64 raft_term = 5;
+}
+
+message AuditResponse {
+  uint32 verdict = 1;           // 0=verified 1=conflict 2=behind 3=unknown(已吊销/无法判定)
+  fixed64 applied_index = 2;    // 副本已 apply 日志位（behind 时节点可择机重试）
 }

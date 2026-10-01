@@ -23,9 +23,9 @@ coordinator 私钥 = 网络信任根（CONTROL_PLANE §6：泄露即全网 key �
 ## 验收标准（草案）
 
 - ①落地后：旧版本/回滚 netmap 重放被拒（容器级）
-- ②落地后：未进日志的伪造 netmap/身份绑定在交叉验证时被拒（split-view 检测）
+- ②落地后：未进日志的伪造 netmap/身份绑定在交叉验证时被拒（split-view 检测）——**✅ 已覆盖（2026-10-01，REQ-070 阶段三，CTL-24：3 副本裁决矩阵单测 + TLS 线格式往返 + ha e2e 阶段 1.5；行为入档 CONTROL_PLANE §3.16）**
 - ③落地后：单份额泄露无法产生有效签名
-- 本 REQ 为调研型：方向收敛后拆实现 REQ 与验收场景（合并时落 tests/security/）
+- 本 REQ 为调研型：方向收敛后拆实现 REQ 与验收场景（合并时落 tests/security/）——②经 REQ-070 阶段三实现，验收落 tests/mesh/control-plane.md CTL-24
 
 ## 关联
 
