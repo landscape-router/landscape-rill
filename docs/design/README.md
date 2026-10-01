@@ -16,6 +16,7 @@
 | routing | [routing/route-engine.md](./routing/route-engine.md) | `ROUTE_ENGINE` | 路由策略引擎、LPM、fallback、MTU、DNS 分类 |
 | runtime | [runtime/logging.md](./runtime/logging.md) | `LOGGING` | daemon 日志：框架、级别、格式、存储、限速、红线 |
 | runtime | [runtime/errors.md](./runtime/errors.md) | `ERROR_ID` | 错误处理：thiserror 规范、稳定错误 ID、序列化信封 |
+| runtime | [runtime/release.md](./runtime/release.md) | `RELEASE` | 可复现构建、产物对账、二进制外连审计 |
 
 ## 2. 短名注册（代码注释引用契约）
 
@@ -32,6 +33,7 @@
 | `ROUTE_ENGINE` | [routing/route-engine.md](./routing/route-engine.md) |
 | `LOGGING` | [runtime/logging.md](./runtime/logging.md) |
 | `ERROR_ID` | [runtime/errors.md](./runtime/errors.md) |
+| `RELEASE` | [runtime/release.md](./runtime/release.md) |
 
 引用规范：
 - 只在**协议/安全契约绑定处**引用（常量、线格式、加密语义、安全边界），纯实现逻辑不引

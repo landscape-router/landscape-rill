@@ -1,0 +1,25 @@
+# REQ-050 可复现构建验收：同 commit 双构建哈希比对 + 产物（dist/）+ AO-06 二进制外连审计。
+# 仅 main 触发（两次 release 构建成本高，不进 PR 门禁；PR 侧由 check.yml 覆盖）
+name: repro
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: double build + hash compare
+        run: ./scripts/verify-repro.sh
+      - name: binary hardcoded-domain audit (AO-06)
+        run: ./scripts/audit-binary.sh target/repro-a/release/lrill
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
