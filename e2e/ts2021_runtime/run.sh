@@ -125,15 +125,22 @@ done
 echo "==> 5/8 启动 tsrv（自研 ts2021 服务端）"
 $COMPOSE build
 $COMPOSE up -d --force-recreate tsrv
+# 成功标志位判收：`grep -q && break` 在 pipefail 下有 SIGPIPE 隐患（grep 提前退出
+# → docker logs 141 → break 不触发），且循环后再探一次会撞 docker 日志传播延迟
+# （listening 已写但未可见 → 误判 FAIL，CI run 36865796734）
+tsrv_ok=0
 for i in $(seq 1 30); do
-  docker logs "$TSRV" 2>&1 | grep -q "ts2021-server.*listening" && break
+  if docker logs "$TSRV" 2>&1 | grep -q "ts2021-server.*listening"; then
+    tsrv_ok=1
+    break
+  fi
   sleep 1
 done
-docker logs "$TSRV" 2>&1 | grep -q "ts2021-server.*listening" || {
+if [ "$tsrv_ok" != 1 ]; then
   echo "FAIL: tsrv 未监听"
   docker logs "$TSRV" 2>&1 | tail -20
   exit 1
-}
+fi
 
 echo "==> 6/8 生成 mesh 配置（coord / rill-ext / rill-b）"
 hex() { openssl rand -hex 32; }
