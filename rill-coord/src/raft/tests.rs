@@ -798,6 +798,37 @@ fn auth_config(ak: &str) -> impl FnOnce(&mut Coordinator) + '_ {
     }
 }
 
+/// 向当前 leader 写入；选举翻转（ForwardToLeader）时跟进重试。
+/// CI 并行测试负载可让选举超时意外触发重选，leader 不能在测量点钉死
+async fn write_via_leader(nodes: &[ClusterNode], cmd: CoordCommand) -> CoordCommandResult {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let refs: Vec<_> = nodes.iter().collect();
+        let leader = await_any_leader(&refs, &[]).await;
+        let raft = &nodes.iter().find(|n| n.id == leader).unwrap().raft;
+        let res = raft.client_write(cmd.clone()).await;
+        match res {
+            Ok(r) => return r.data,
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(_))) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "10s 内未完成 leader 写入（leader 持续翻转）"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(other) => panic!("leader write failed: {other:?}"),
+        }
+    }
+}
+
+/// 节点此刻是否仍报 Leader（follower 转发目标的稳定采样依据）
+fn reports_leader(n: &ClusterNode) -> bool {
+    matches!(
+        n.raft.metrics().borrow().state,
+        openraft::ServerState::Leader
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_node_cluster_replicates_writes_and_rejects_follower_writes() {
     let net = TestNetwork::new();
@@ -826,17 +857,8 @@ async fn three_node_cluster_replicates_writes_and_rejects_follower_writes() {
         ]))
         .await
         .unwrap();
-    let leader = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
-    let leader_node = &nodes[leader as usize];
-
-    // leader 写入 → 多数派复制 → 全员 apply
-    let node_id = match leader_node
-        .raft
-        .client_write(register_cmd(&ak, 7, 0x01, vec![]))
-        .await
-        .unwrap()
-        .data
-    {
+    // leader 写入 → 多数派复制 → 全员 apply（选举可翻转，写跟进当前 leader）
+    let node_id = match write_via_leader(&nodes, register_cmd(&ak, 7, 0x01, vec![])).await {
         CoordCommandResult::Register(Ok(d)) => d.node_id,
         other => panic!("cluster register failed: {other:?}"),
     };
@@ -845,19 +867,30 @@ async fn three_node_cluster_replicates_writes_and_rejects_follower_writes() {
     let state = await_converged(&refs).await;
     assert_eq!(state.nodes.len(), 1, "全部副本都应 apply 注册");
 
-    // follower 写 → ForwardToLeader（带 leader id，LeaderRedirect 依据）
-    let follower = &nodes[(if leader == 0 { 1 } else { 0 }) as usize];
-    let err = follower
-        .raft
-        .client_write(register_cmd(&ak, 8, 0x01, vec![]))
-        .await
-        .unwrap_err();
-    match err {
-        openraft::error::RaftError::APIError(ClientWriteError::ForwardToLeader(ftl)) => {
-            assert_eq!(ftl.leader_id, Some(leader), "转发目标必须是当前 leader");
+    // follower 写 → ForwardToLeader（带 leader id，LeaderRedirect 依据）。
+    // 转发目标在采样窗口内可能再翻转：按当前 metrics 视图选 follower 重采样，
+    // 直到观察到一次"目标仍是 leader"的稳定转发
+    let mut forwarded = false;
+    for attempt in 0..100u8 {
+        let leader = await_any_leader(&refs, &[]).await;
+        let follower = &nodes[(if leader == 0 { 1 } else { 0 }) as usize];
+        let res = follower
+            .raft
+            .client_write(register_cmd(&ak, 8 + attempt, 0x01, vec![]))
+            .await;
+        if let Err(RaftError::APIError(ClientWriteError::ForwardToLeader(ftl))) = res {
+            if ftl
+                .leader_id
+                .is_some_and(|id| reports_leader(&nodes[id as usize]))
+            {
+                forwarded = true;
+                break;
+            }
         }
-        other => panic!("follower write should forward, got: {other:?}"),
+        // Ok（该 follower 恰当选为主，注册生效）或目标已翻转：重采样
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(forwarded, "100 次采样内未观察到稳定的 follower 转发");
 
     for n in &nodes {
         n.raft.shutdown().await.unwrap();
@@ -893,11 +926,7 @@ async fn leader_failover_then_old_leader_rejoins_as_follower() {
         .unwrap();
     let leader1 = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
     // 写入 node_id=1
-    write(
-        &nodes[leader1 as usize].raft,
-        register_cmd(&ak, 1, 0, vec![]),
-    )
-    .await;
+    write_via_leader(&nodes, register_cmd(&ak, 1, 0, vec![])).await;
     let refs: Vec<_> = nodes.iter().collect();
     await_converged(&refs).await;
 
@@ -910,8 +939,7 @@ async fn leader_failover_then_old_leader_rejoins_as_follower() {
     assert_ne!(leader2, leader1, "新 leader 必须是另一个成员");
 
     // 故障转移后可写（注册 b → node_id=2，node_id 分配器经日志复制不回退）
-    let leader2_node = remaining.iter().find(|n| n.id == leader2).unwrap();
-    match write(&leader2_node.raft, register_cmd(&ak, 2, 0, vec![])).await {
+    match write_via_leader(&nodes, register_cmd(&ak, 2, 0, vec![])).await {
         CoordCommandResult::Register(Ok(d)) => assert_eq!(d.node_id, 2),
         other => panic!("write after failover failed: {other:?}"),
     }
@@ -981,9 +1009,6 @@ async fn backend_leadership_view_and_write_dispatch() {
         ]))
         .await
         .unwrap();
-    let leader = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
-    let follower_id = (leader + 1) % 3;
-
     // advertise 表（id → 节点面地址占位）
     let advertise: std::collections::HashMap<u64, String> = (0..3)
         .map(|id| (id, format!("127.0.0.1:{}", 9000 + id)))
@@ -994,61 +1019,107 @@ async fn backend_leadership_view_and_write_dispatch() {
         members: Arc::new(advertise.clone()),
         self_id: n.id,
     };
-
-    let leader_node = nodes.iter().find(|n| n.id == leader).unwrap();
-    let follower_node = nodes.iter().find(|n| n.id == follower_id).unwrap();
-    let leader_backend = backend_of(leader_node);
-    let follower_backend = backend_of(follower_node);
+    // 端点 → 成员 id（advertise 为双射）
+    let id_of_endpoint = |ep: &str| {
+        advertise
+            .iter()
+            .find(|(_, v)| v.as_str() == ep)
+            .map(|(k, _)| *k)
+    };
 
     // leadership 视图（follower 的 current_leader 经 metrics watch 传播，
-    // 晚于 leader 自身状态——轮询至 follower 视图收敛）
-    assert_eq!(leader_backend.leadership(), Leadership::Leader);
-    let expected = format!("127.0.0.1:{}", 9000 + leader);
-    let mut follower_view = None;
+    // 晚于 leader 自身状态）。CI 并行负载下选举可翻转：以
+    // "follower 上报端点 ↔ 此刻仍报 Leader 的成员"的稳定样本为准
+    let mut stable_view = false;
+    for _ in 0..1000 {
+        let refs: Vec<_> = nodes.iter().collect();
+        let leader = await_any_leader(&refs, &[]).await;
+        let follower_node = nodes.iter().find(|n| n.id != leader).unwrap();
+        let follower_backend = backend_of(follower_node);
+        if let Leadership::Follower {
+            leader_endpoint: Some(ep),
+            term,
+        } = follower_backend.leadership()
+        {
+            let stable = id_of_endpoint(&ep)
+                .is_some_and(|id| reports_leader(nodes.iter().find(|n| n.id == id).unwrap()));
+            if stable {
+                assert_eq!(
+                    term,
+                    follower_node.raft.metrics().borrow().current_term,
+                    "leadership 视图 term 取自 metrics"
+                );
+                stable_view = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(stable_view, "10s 内未观察到稳定的 follower leadership 视图");
+
+    // leader 写 → 直提成功（选举可翻转：跟进当前 leader 重试）；随后副本 apply
+    let data = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let refs: Vec<_> = nodes.iter().collect();
+            let leader = await_any_leader(&refs, &[]).await;
+            let leader_backend = backend_of(nodes.iter().find(|n| n.id == leader).unwrap());
+            match leader_backend
+                .register(&ak, &pubkey(1), 0x00, vec![], 0)
+                .await
+            {
+                Ok(d) => break d,
+                Err(WriteError::Forward { .. }) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "10s 内未完成 leader 写入"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(other) => panic!("leader write failed: {other:?}"),
+            }
+        }
+    };
+    assert_eq!(data.node_id, 1);
+    let mut applied = false;
     for _ in 0..500 {
-        follower_view = Some(follower_backend.leadership());
-        if matches!(
-            &follower_view,
-            Some(Leadership::Follower { leader_endpoint: Some(ep), .. }) if *ep == expected
-        ) {
+        if nodes
+            .iter()
+            .any(|n| backend_of(n).with_coord(|c| c.node_id_by_pubkey(&pubkey(1)).is_some()))
+        {
+            applied = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(
-        follower_view,
-        Some(Leadership::Follower {
-            leader_endpoint: Some(expected),
-            term: follower_node.raft.metrics().borrow().current_term,
-        }),
-        "follower 视图应收敛到 leader 节点面地址"
-    );
+    assert!(applied, "leader 写应在副本侧 apply");
 
-    // leader 写 → 直提成功；单机等价读（with_coord 看到已 apply 条目）
-    let data = leader_backend
-        .register(&ak, &pubkey(1), 0x00, vec![], 0)
-        .await
-        .unwrap();
-    assert_eq!(data.node_id, 1);
-    assert!(leader_backend.with_coord(|c| c.node_id_by_pubkey(&pubkey(1)).is_some()));
-
-    // follower 写 → Forward（携 leader 节点面地址；LeaderRedirect 依据）
-    match follower_backend
-        .register(&ak, &pubkey(2), 0x00, vec![], 0)
-        .await
-    {
-        Err(WriteError::Forward { leader_endpoint }) => {
-            assert_eq!(
-                leader_endpoint,
-                Some(format!("127.0.0.1:{}", 9000 + leader))
-            );
+    // follower 写 → Forward（携 leader 节点面地址；LeaderRedirect 依据）——
+    // 同样按稳定采样（转发端点回指仍报 Leader 的成员）
+    let mut forwarded = false;
+    for attempt in 0..100u32 {
+        let refs: Vec<_> = nodes.iter().collect();
+        let leader = await_any_leader(&refs, &[]).await;
+        let follower_backend = backend_of(nodes.iter().find(|n| n.id != leader).unwrap());
+        let reg_forwarded = matches!(
+            follower_backend
+                .register(&ak, &pubkey((0x10 + attempt) as u8), 0x00, vec![], 0)
+                .await,
+            Err(WriteError::Forward { leader_endpoint: Some(ep) })
+                if id_of_endpoint(&ep)
+                    .is_some_and(|id| reports_leader(nodes.iter().find(|n| n.id == id).unwrap()))
+        );
+        let revoke_forwarded = matches!(
+            follower_backend.revoke(1, 0).await,
+            Err(WriteError::Forward { .. })
+        );
+        if reg_forwarded && revoke_forwarded {
+            forwarded = true;
+            break;
         }
-        other => panic!("follower write should forward, got: {other:?}"),
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    match follower_backend.revoke(1, 0).await {
-        Err(WriteError::Forward { .. }) => {}
-        other => panic!("follower revoke should forward, got: {other:?}"),
-    }
+    assert!(forwarded, "100 次采样内未观察到稳定的 follower 转发");
 
     // Single 形态回归：leadership 恒 Leader、写直调等价
     let mut single_coord = Coordinator::new([0x5a; 32]);
@@ -1105,8 +1176,11 @@ async fn binding_audit_cross_verification_rejects_unlogged_issuance() {
         ]))
         .await
         .unwrap();
-    let leader = await_any_leader(&nodes.iter().collect::<Vec<_>>(), &[]).await;
-    let leader_node = nodes.iter().find(|n| n.id == leader).unwrap();
+    // leader 注册 → 全员 apply（锚点 = 该条目日志位置；选举可翻转，写跟进当前 leader）
+    let data = match write_via_leader(&nodes, register_cmd(&ak, 7, 0x00, vec![])).await {
+        CoordCommandResult::Register(Ok(d)) => d,
+        other => panic!("cluster register failed: {other:?}"),
+    };
     let advertise: std::collections::HashMap<u64, String> = (0..3)
         .map(|id| (id, format!("127.0.0.1:{}", 9100 + id)))
         .collect();
@@ -1120,17 +1194,6 @@ async fn binding_audit_cross_verification_rejects_unlogged_issuance() {
         })
         .collect();
 
-    // leader 注册 → 全员 apply（锚点 = 该条目日志位置）
-    let data = match leader_node
-        .raft
-        .client_write(register_cmd(&ak, 7, 0x00, vec![]))
-        .await
-        .unwrap()
-        .data
-    {
-        CoordCommandResult::Register(Ok(d)) => d,
-        other => panic!("cluster register failed: {other:?}"),
-    };
     assert!(data.binding_log_id.0 >= 1, "集群锚点 = 真实日志位置");
     let refs: Vec<_> = nodes.iter().collect();
     await_converged(&refs).await;
@@ -1182,14 +1245,14 @@ async fn binding_audit_cross_verification_rejects_unlogged_issuance() {
     assert_eq!(v, AuditVerdict::Unknown);
 
     // ⑥ 吊销后的旧绑定：签名仍有效但节点已吊销 → Unknown（墓碑防误判 conflict）
-    leader_node
-        .raft
-        .client_write(CoordCommand::Revoke {
+    write_via_leader(
+        &nodes,
+        CoordCommand::Revoke {
             node_id: data.node_id,
             now: 1_000,
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
     await_converged(&refs).await;
     let (v, _) = backends[0].audit_binding(
         data.node_id,

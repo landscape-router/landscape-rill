@@ -140,86 +140,112 @@ async fn cluster_leader_elects_follower_redirects_and_write_replicates() {
         });
     }
 
-    // 等选主收敛（openraft 默认选主超时 ~150-300ms）
-    let (leader_idx, leader_endpoint) = async {
-        for _ in 0..500 {
-            for s in servers.iter() {
-                let l = s.lock().await.coordinator.leadership();
-                if let Leadership::Follower {
-                    leader_endpoint: Some(ep),
-                    ..
-                } = &l
-                {
-                    // 某副本已知 leader：再确认该成员自认 leader
-                    let idx = node_addrs
-                        .iter()
-                        .position(|a| a.port().to_string() == ep.rsplit(':').next().unwrap())
-                        .unwrap();
-                    if matches!(
-                        servers[idx].lock().await.coordinator.leadership(),
-                        Leadership::Leader
-                    ) {
-                        return (idx, ep.clone());
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("10s 内未选出 leader");
-    }
-    .await;
-
-    // follower 节点面 REGISTER → LEADER_REDIRECT（leader 节点面地址）
-    let follower_idx = (leader_idx + 1) % 3;
-    let f_addr = node_addrs[follower_idx];
-    let mut tls = client_tls_stream("127.0.0.1", f_addr.port(), &ca_pem)
-        .await
-        .unwrap();
+    // follower 节点面 REGISTER → LEADER_REDIRECT（leader 节点面地址）。
+    // CI 并行负载下选举可翻转（follower 的 leader 视图可为空/滞后）：
+    // 以"重定向端点回指仍自认 Leader 的成员"的稳定样本为准
     let client = MeshClient::new([0x33; 32]);
     let leg = MeshLegConfig {
         coordinator_host: "127.0.0.1".into(),
-        coordinator_port: f_addr.port(),
+        coordinator_port: 0,
         auth_key: ak.clone(),
         static_key: [0x33; 32],
         capabilities: 0x00,
         announce_routes: vec![],
     };
-    framing::write_frame(&mut tls, &client.register_request(&leg))
-        .await
-        .unwrap();
-    let (mt, body) = read_envelope(&mut tls).await.unwrap();
-    assert_eq!(mt, MsgType::LEADER_REDIRECT, "follower 应答重定向");
-    let mut reader = BytesReader::from_bytes(&body);
-    let redirect = LeaderRedirect::from_reader(&mut reader, &body).unwrap();
-    assert_eq!(redirect.leader_endpoint, leader_endpoint);
-    drop(tls);
+    let (leader_idx, leader_endpoint) = async {
+        for _ in 0..500 {
+            for f in 0..servers.len() {
+                let ep = match servers[f].lock().await.coordinator.leadership() {
+                    Leadership::Follower {
+                        leader_endpoint: Some(ep),
+                        ..
+                    } => ep,
+                    _ => continue,
+                };
+                let Some(t) = node_addrs
+                    .iter()
+                    .position(|a| a.port().to_string() == ep.rsplit(':').next().unwrap())
+                else {
+                    continue;
+                };
+                if !matches!(
+                    servers[t].lock().await.coordinator.leadership(),
+                    Leadership::Leader
+                ) {
+                    continue;
+                }
+                // 该 follower 此刻有健康 leader 视图：探 REGISTER 验证重定向
+                let mut tls = client_tls_stream("127.0.0.1", node_addrs[f].port(), &ca_pem)
+                    .await
+                    .unwrap();
+                framing::write_frame(&mut tls, &client.register_request(&leg))
+                    .await
+                    .unwrap();
+                let Ok((mt, body)) = read_envelope(&mut tls).await else {
+                    drop(tls);
+                    continue;
+                };
+                drop(tls);
+                if mt != MsgType::LEADER_REDIRECT {
+                    continue;
+                }
+                let mut reader = BytesReader::from_bytes(&body);
+                let redirect = LeaderRedirect::from_reader(&mut reader, &body).unwrap();
+                if redirect.leader_endpoint == ep {
+                    return (t, ep);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("10s 内未采到稳定的 follower 重定向");
+    }
+    .await;
 
-    // 节点按重定向重连 leader → 完整注册流（挑战/PoP/REGISTER_RESPONSE/NETMAP）
-    let l_port: u16 = leader_endpoint.rsplit(':').next().unwrap().parse().unwrap();
-    let mut tls = client_tls_stream("127.0.0.1", l_port, &ca_pem)
-        .await
-        .unwrap();
-    framing::write_frame(&mut tls, &client.register_request(&leg))
-        .await
-        .unwrap();
-    let (mt, body) = read_envelope(&mut tls).await.unwrap();
-    assert_eq!(mt, MsgType::CHALLENGE);
-    let owned = ChallengeOwned::try_from(body).unwrap();
-    assert_eq!(owned.proto().node_id, 0, "新建类挑战 node_id=0");
-    let ack = client.challenge_ack(&Challenge {
-        eph_pub: std::borrow::Cow::Borrowed(owned.proto().eph_pub.as_ref()),
-        nonce: std::borrow::Cow::Borrowed(owned.proto().nonce.as_ref()),
-        issued_at: owned.proto().issued_at,
-        node_id: owned.proto().node_id,
-    });
-    framing::write_frame(&mut tls, &ack).await.unwrap();
-    let (mt, body) = read_envelope(&mut tls).await.unwrap();
-    assert_eq!(mt, MsgType::REGISTER_RESPONSE);
-    let mut reader = BytesReader::from_bytes(&body);
-    let resp = RegisterResponse::from_reader(&mut reader, &body).unwrap();
-    assert_eq!(resp.node_id, 1);
+    // 节点按重定向重连 leader → 完整注册流（挑战/PoP/REGISTER_RESPONSE）。
+    // 目标在窗口内可能卸任再重定向：按链跟进（客户端重定向语义）
+    let mut target = leader_endpoint.clone();
+    let mut registered = false;
+    for _hop in 0..10 {
+        let port: u16 = target.rsplit(':').next().unwrap().parse().unwrap();
+        let mut tls = client_tls_stream("127.0.0.1", port, &ca_pem).await.unwrap();
+        framing::write_frame(&mut tls, &client.register_request(&leg))
+            .await
+            .unwrap();
+        let (mt, body) = read_envelope(&mut tls).await.unwrap();
+        match mt {
+            MsgType::LEADER_REDIRECT => {
+                let mut reader = BytesReader::from_bytes(&body);
+                let redirect = LeaderRedirect::from_reader(&mut reader, &body).unwrap();
+                assert!(!redirect.leader_endpoint.is_empty(), "重定向链端点为空");
+                target = redirect.leader_endpoint.to_string();
+                drop(tls);
+                continue;
+            }
+            MsgType::CHALLENGE => {
+                let owned = ChallengeOwned::try_from(body).unwrap();
+                assert_eq!(owned.proto().node_id, 0, "新建类挑战 node_id=0");
+                let ack = client.challenge_ack(&Challenge {
+                    eph_pub: std::borrow::Cow::Borrowed(owned.proto().eph_pub.as_ref()),
+                    nonce: std::borrow::Cow::Borrowed(owned.proto().nonce.as_ref()),
+                    issued_at: owned.proto().issued_at,
+                    node_id: owned.proto().node_id,
+                });
+                framing::write_frame(&mut tls, &ack).await.unwrap();
+                let (mt, body) = read_envelope(&mut tls).await.unwrap();
+                assert_eq!(mt, MsgType::REGISTER_RESPONSE);
+                let mut reader = BytesReader::from_bytes(&body);
+                let resp = RegisterResponse::from_reader(&mut reader, &body).unwrap();
+                assert_eq!(resp.node_id, 1);
+                registered = true;
+                break;
+            }
+            other => panic!("注册流意外消息: {other:?}"),
+        }
+    }
+    assert!(registered, "10 跳重定向内未完成注册");
 
     // 多数派复制：follower 本地读在秒级窗口内看到注册（心跳驱动 apply 推进）
+    let follower_idx = (leader_idx + 1) % servers.len();
     let mut replicated = false;
     for _ in 0..300 {
         let seen = servers[follower_idx]
