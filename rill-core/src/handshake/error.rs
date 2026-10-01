@@ -23,6 +23,9 @@ pub enum HandshakeError {
     #[error("wrong handshake step")]
     #[error_id("handshake.wrong_step")]
     WrongStep,
+    #[error("simultaneous initiation collision")]
+    #[error_id("handshake.collision")]
+    Collision,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error, landscape_rill_macro::ErrorId)]

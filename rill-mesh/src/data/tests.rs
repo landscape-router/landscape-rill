@@ -2363,3 +2363,54 @@ async fn path_probe_pending_cap_rejects_new_sends() {
     assert!(a.send_path_probe(2, 0x100, 2).await.is_none());
     assert_eq!(a.path_probe_pending.len(), 64);
 }
+
+#[tokio::test]
+async fn simultaneous_initiation_converges_single_session() {
+    let (mut a, mut b) = setup_pair().await;
+    // 同时互启（互有出站流量的懒握手）：两条 msg1 交错在途
+    let msg1_a = a.initiate_handshake(2).unwrap().unwrap();
+    let msg1_b = b.initiate_handshake(1).unwrap().unwrap();
+    a.send_to_node(2, &msg1_a).await.unwrap();
+    b.send_to_node(1, &msg1_b).await.unwrap();
+    // 低 node id（a=1）发起胜出：a 忽略 b 的 msg1，b 弃自身发起转响应
+    assert_eq!(
+        a.handle_incoming().await.unwrap(),
+        IncomingEvent::Rejected {
+            peer: 2,
+            reason: HandshakeError::Collision
+        }
+    );
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Responded { peer: 1 }
+    );
+    assert_eq!(
+        a.handle_incoming().await.unwrap(),
+        IncomingEvent::Established { peer: 2 }
+    );
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Established { peer: 1 }
+    );
+    assert!(a.has_session(2) && b.has_session(1));
+
+    // 回归前两条握手都完成、各持对侧实例密钥 → 双向 AEAD 黑洞
+    let (frame, hop) = a.build_data_frame(2, b"collide-a", 0).unwrap();
+    a.send_to_node_hop(2, hop, &frame).await.unwrap();
+    assert_eq!(
+        b.handle_incoming().await.unwrap(),
+        IncomingEvent::Data {
+            from: 1,
+            payload: b"collide-a".to_vec().into()
+        }
+    );
+    let (frame, hop) = b.build_data_frame(1, b"collide-b", 0).unwrap();
+    b.send_to_node_hop(1, hop, &frame).await.unwrap();
+    assert_eq!(
+        a.handle_incoming().await.unwrap(),
+        IncomingEvent::Data {
+            from: 2,
+            payload: b"collide-b".to_vec().into()
+        }
+    );
+}

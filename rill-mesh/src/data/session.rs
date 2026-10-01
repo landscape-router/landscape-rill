@@ -7,9 +7,14 @@ use tracing::debug;
 impl MeshData {
     /// 主动发起握手（懒握手入口）。已有会话 → Ok(None)；
     /// 在途握手中 → Ok(None)（不重复发起，避免 eph 状态轮换）；
+    /// 对端已发起（响应在途）→ Ok(None)（两条并行握手会以不同顺序在两侧
+    /// 完成、各持不成对密钥——同 handle_msg1 碰撞裁定，等响应握手收敛）；
     /// 否则返回 msg1 帧供调用方发送。
     pub fn initiate_handshake(&mut self, peer: u32) -> Result<Option<Vec<u8>>, SendError> {
-        if self.sessions.contains_key(&peer) || self.initiators.contains_key(&peer) {
+        if self.sessions.contains_key(&peer)
+            || self.initiators.contains_key(&peer)
+            || self.responders.contains_key(&peer)
+        {
             return Ok(None);
         }
         let ctx = self.ctx.as_ref().ok_or(SendError::NoContext)?;
@@ -228,6 +233,20 @@ impl MeshData {
     }
 
     pub(super) async fn handle_msg1(&mut self, from: u32, payload: &[u8]) -> IncomingEvent {
+        // 同时互启裁定（FRAME_HEADER §2.3）：双方同时懒握手 → 两条握手各自
+        // 完成、会话单槽各持对侧实例的密钥（最后 insert 者胜）→ 双向 AEAD
+        // 黑洞。低 node id 的发起胜出：高 id 方收到对端 msg1 弃自身发起转
+        // 响应；低 id 方忽略对端 msg1（自身发起继续）→ 两侧收敛到同一实例
+        if self.initiators.contains_key(&from) {
+            if from < self.self_node_id {
+                self.initiators.remove(&from);
+            } else {
+                return IncomingEvent::Rejected {
+                    peer: from,
+                    reason: HandshakeError::Collision,
+                };
+            }
+        }
         let Some(ctx) = self.ctx.clone() else {
             return IncomingEvent::Rejected {
                 peer: from,
