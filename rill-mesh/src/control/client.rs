@@ -146,7 +146,8 @@ pub struct NetmapNode {
 pub struct NetmapData {
     pub version: u64,
     pub entries: Vec<NetmapNode>,
-    pub relay_list: Vec<String>,
+    /// 激活 relay roster（REQ-062）：有序 node_id（顺序 = 挂靠优先级）；端点查条目
+    pub relay_roster: Vec<u32>,
     /// 网络级 ACL 策略（REQ-045，CONTROL_PLANE §3.10）；None = 未启用（v1 全放行）
     pub acl: Option<CoreAclPolicy>,
     /// raft 副本端点（绑定审计目标，REQ-049②）；单机 = 空
@@ -322,10 +323,12 @@ impl ControlSession {
         self.client.heartbeat(telemetry)
     }
 
-    /// 端点上报（数据面 UDP 地址；注册后/地址变化时发送，服务端并入 netmap）
-    pub fn endpoint_report_envelope(&self, endpoints: Vec<String>) -> Vec<u8> {
+    /// 端点上报（数据面 UDP 地址；注册后/地址变化时发送，服务端并入 netmap）。
+    /// 分列上报（REQ-062）：本地接口地址（公网准入基准）+ echo 回显 seen 地址
+    pub fn endpoint_report_envelope(&self, local: Vec<String>, seen: Vec<String>) -> Vec<u8> {
         let msg = EndpointReport {
-            endpoints: endpoints.into_iter().map(Cow::Owned).collect(),
+            endpoints: local.into_iter().map(Cow::Owned).collect(),
+            seen: seen.into_iter().map(Cow::Owned).collect(),
         };
         envelope_bytes(MsgType::ENDPOINT_REPORT, &msg)
     }
@@ -379,12 +382,7 @@ impl ControlSession {
                 Ok(ControlEvent::Netmap(NetmapData {
                     version: owned.proto().version,
                     entries,
-                    relay_list: owned
-                        .proto()
-                        .relay_list
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
+                    relay_roster: owned.proto().relay_roster.to_vec(),
                     acl: owned.proto().acl.as_ref().map(acl_from_wire),
                     replica_endpoints: owned
                         .proto()

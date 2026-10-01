@@ -124,8 +124,12 @@ impl CoordStateMachine {
                 self.coordinator.revoke(node_id, now, issuance);
                 CoordCommandResult::Revoke(known)
             }
-            CoordCommand::SetEndpoints { node_id, endpoints } => {
-                self.coordinator.set_endpoints(node_id, endpoints);
+            CoordCommand::SetEndpoints {
+                node_id,
+                local,
+                seen,
+            } => {
+                self.coordinator.set_endpoints(node_id, local, seen);
                 CoordCommandResult::SetEndpoints
             }
             CoordCommand::RequestPaths {
@@ -135,6 +139,13 @@ impl CoordStateMachine {
                 now,
             } => CoordCommandResult::RequestPaths(
                 self.coordinator.request_paths(source, dest, max, now),
+            ),
+            CoordCommand::SetRelayRoster {
+                network_id,
+                roster,
+                now,
+            } => CoordCommandResult::SetRelayRoster(
+                self.coordinator.apply_relay_roster(network_id, roster, now),
             ),
             CoordCommand::RotateMasterKey {
                 network,

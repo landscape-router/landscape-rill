@@ -148,11 +148,7 @@ pub fn netmap_push_message(
     NetmapPush {
         version: coordinator.netmap_version(),
         entries,
-        relay_list: coordinator
-            .relay_list_for(network_id)
-            .iter()
-            .map(|s| Cow::Owned(s.clone()))
-            .collect(),
+        relay_roster: coordinator.relay_roster_for(network_id).to_vec().into(),
         // ACL 策略随 netmap 原子下发（REQ-045，CONTROL_PLANE §3.10；None = 未启用）
         acl: Some(acl_policy_message(&coordinator.acl_policy_of(network_id))),
         replica_endpoints: replica_endpoints.into_iter().map(Cow::Owned).collect(),
@@ -942,11 +938,14 @@ impl CoordinatorServer {
                 let mut reader = BytesReader::from_bytes(body);
                 let report = EndpointReport::from_reader(&mut reader, body)?;
                 if let Some(node_id) = state.registered {
-                    let endpoints: Vec<String> =
+                    // 分列落位（REQ-062）：本地接口地址 + echo seen 地址
+                    //（公网准入判定基准；空上报无意义不写）
+                    let local: Vec<String> =
                         report.endpoints.iter().map(|s| s.to_string()).collect();
-                    if !endpoints.is_empty() {
+                    let seen: Vec<String> = report.seen.iter().map(|s| s.to_string()).collect();
+                    if !local.is_empty() || !seen.is_empty() {
                         if let Err(WriteError::Forward { .. }) =
-                            self.coordinator.set_endpoints(node_id, endpoints).await
+                            self.coordinator.set_endpoints(node_id, local, seen).await
                         {
                             let leadership = self.coordinator.leadership();
                             self.write_leader_redirect(stream, &leadership).await?;

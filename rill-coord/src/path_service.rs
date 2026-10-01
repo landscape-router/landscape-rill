@@ -28,6 +28,13 @@ pub struct PathCandidate {
 pub struct PathSet {
     pub version: u64,
     pub candidates: Vec<PathCandidate>,
+    /// 请求方候选预算（2~4，重建时沿用；旧快照缺省 4）
+    #[serde(default = "default_path_max")]
+    pub max: u32,
+}
+
+fn default_path_max() -> u32 {
+    4
 }
 
 impl PathSet {
@@ -122,6 +129,7 @@ impl PathService {
         let set = PathSet {
             version,
             candidates,
+            max: max.clamp(2, 4),
         };
         // 路径参与者全量下发（CONTROL_PLANE §3.11.5：key_path 只发路径参与者）：
         // source = 路径选择方；dest 与 relay 为接收/转发校验方，同样需要 key_path
@@ -162,6 +170,8 @@ impl PathService {
     }
 
     /// 吊销联动：撤销所有涉及 node_id 的路径（作为源/目的 = 全撤；仅中继 = 撤该候选保留其余）。
+    /// 事件推送范围 = 全部 hops 参与者（REQ-062 修缝隙：relay/dest 同样持 key_path，
+    /// 只推 source 会让参与者带着失效 key_path 播到 TTL 3600s）
     pub fn withdraw_node(&mut self, node_id: u32) {
         let affected_keys: Vec<(u32, u32)> = self
             .map
@@ -183,46 +193,153 @@ impl PathService {
             if source == node_id || dest == node_id {
                 if let Some(set) = self.map.remove(&key) {
                     for c in &set.candidates {
-                        self.pending
-                            .entry(source)
-                            .or_default()
-                            .push(PathEvent::Withdraw {
-                                dest,
-                                path_id: c.path_id,
-                            });
+                        let mut targets = vec![source, dest];
+                        targets.extend(c.hops.iter().copied());
+                        self.push_withdraw(targets, dest, c.path_id);
                     }
                 }
                 continue;
             }
-            if let Some(set) = self.map.get_mut(&key) {
-                let withdrawn: Vec<u64> = set
-                    .candidates
-                    .iter()
-                    .filter(|c| c.hops.contains(&node_id))
-                    .map(|c| c.path_id)
-                    .collect();
-                set.candidates.retain(|c| !c.hops.contains(&node_id));
-                let remaining = set.candidates.clone();
-                if remaining.is_empty() {
-                    self.map.remove(&key);
-                    for path_id in withdrawn {
-                        self.pending
-                            .entry(source)
-                            .or_default()
-                            .push(PathEvent::Withdraw { dest, path_id });
-                    }
-                } else {
-                    set.version += 1;
-                    self.pending
-                        .entry(source)
-                        .or_default()
-                        .push(PathEvent::Update {
-                            source,
-                            dest,
-                            set: set.clone(),
-                        });
+            self.withdraw_relay_in_set(source, dest, node_id);
+        }
+    }
+
+    /// roster 收窄联动（REQ-062）：节点被移出 relay roster → 撤其全部中继角色候选。
+    /// 与吊销的"仅中继"分支同语义（节点仍在网，仅失去 relay 资格）
+    pub fn withdraw_relay(&mut self, node_id: u32) {
+        let affected_keys: Vec<(u32, u32)> = self
+            .map
+            .iter()
+            .filter(|(_, set)| set.candidates.iter().any(|c| c.hops.contains(&node_id)))
+            .map(|(k, _)| *k)
+            .collect();
+        for (source, dest) in affected_keys {
+            self.withdraw_relay_in_set(source, dest, node_id);
+        }
+    }
+
+    /// 单路径集内的中继移除：撤含 node 的候选，其余保留并广播 Update。
+    /// Withdraw 只发给被撤候选的参与者；Update 发给剩余候选的全部参与者
+    fn withdraw_relay_in_set(&mut self, source: u32, dest: u32, node: u32) {
+        let Some(set) = self.map.get_mut(&(source, dest)) else {
+            return;
+        };
+        let withdrawn: Vec<PathCandidate> = set
+            .candidates
+            .iter()
+            .filter(|c| c.hops.contains(&node))
+            .cloned()
+            .collect();
+        if withdrawn.is_empty() {
+            return;
+        }
+        set.candidates.retain(|c| !c.hops.contains(&node));
+        let remaining_empty = set.candidates.is_empty();
+        set.version += 1;
+        let set = set.clone();
+        if remaining_empty {
+            self.map.remove(&(source, dest));
+        }
+        for c in &withdrawn {
+            let mut targets = vec![source, dest];
+            targets.extend(c.hops.iter().copied());
+            self.push_withdraw(targets, dest, c.path_id);
+        }
+        if !remaining_empty {
+            let mut targets = vec![source, dest];
+            for c in &set.candidates {
+                targets.extend(c.hops.iter().copied());
+            }
+            let event = PathEvent::Update { source, dest, set };
+            let mut seen = std::collections::HashSet::new();
+            for t in targets {
+                if seen.insert(t) {
+                    self.push_event(t, event.clone());
                 }
             }
+        }
+    }
+
+    /// Withdraw 事件发给一组参与者（去重；per-source 饱和由 push_event 收口）
+    fn push_withdraw(&mut self, targets: Vec<u32>, dest: u32, path_id: u64) {
+        let mut seen = std::collections::HashSet::new();
+        for t in targets {
+            if seen.insert(t) {
+                self.push_event(t, PathEvent::Withdraw { dest, path_id });
+            }
+        }
+    }
+
+    /// roster 扩充联动（REQ-062）：现有路径集补入 roster 新增的 relay 候选。
+    /// 幂等命中（request）返回既有集，不重建——roster 扩充必须显式补员，
+    /// 否则既有 src→dst 集到 TTL 为止都不知道新 relay。缺员才重建：
+    /// direct 与在册 relay 候选保留原 path_id（key_path 不变），新增者新签发；
+    /// 预算沿用请求时的 max；Update 推全部参与者
+    pub fn expand_relay_candidates(&mut self, now: u64) {
+        let keys: Vec<(u32, u32)> = self.map.keys().copied().collect();
+        for (source, dest) in keys {
+            let relays: Vec<u32> = self
+                .relays
+                .iter()
+                .copied()
+                .filter(|r| *r != source && *r != dest)
+                .collect();
+            let Some(set) = self.map.get(&(source, dest)).cloned() else {
+                continue;
+            };
+            if set.expired(now) {
+                continue; // 过期集随下次请求重建
+            }
+            let missing = relays
+                .iter()
+                .any(|r| !set.candidates.iter().any(|c| c.hops.first() == Some(r)));
+            if !missing {
+                continue;
+            }
+            let budget = set.max.clamp(2, 4) as usize;
+            // direct 保留（path_id/key_path 不变）
+            let mut candidates: Vec<PathCandidate> = set
+                .candidates
+                .iter()
+                .filter(|c| c.hops.len() == 1)
+                .cloned()
+                .collect();
+            if candidates.is_empty() {
+                candidates.push(PathCandidate {
+                    path_id: self.alloc_path_id(),
+                    path_epoch: 1,
+                    hops: vec![dest],
+                    expires_at: now + PATH_DEFAULT_TTL,
+                });
+            }
+            // 在册 relay 的既有候选保留（path_id 不变）
+            for c in &set.candidates {
+                if c.hops.len() > 1 && relays.contains(&c.hops[0]) {
+                    candidates.push(c.clone());
+                }
+            }
+            // 补入缺失 relay（预算内）
+            for relay in &relays {
+                if candidates.len() >= budget {
+                    break;
+                }
+                if candidates.iter().any(|c| c.hops.first() == Some(relay)) {
+                    continue;
+                }
+                candidates.push(PathCandidate {
+                    path_id: self.alloc_path_id(),
+                    path_epoch: 1,
+                    hops: vec![*relay, dest],
+                    expires_at: now + PATH_DEFAULT_TTL,
+                });
+            }
+            let new_set = PathSet {
+                version: set.version + 1,
+                candidates,
+                max: set.max,
+            };
+            self.push_to_participants(source, dest, &relays, &new_set);
+            self.map.insert((source, dest), new_set);
         }
     }
 
@@ -315,22 +432,28 @@ mod tests {
         let mut ps = PathService::new();
         ps.set_relays(vec![3]);
         ps.request(1, 2, 4, 0); // 路径：1→2 direct + via3
-        let events = ps.take_events(1);
-        assert_eq!(events.len(), 1);
-        // 吊销 relay 3 → 1 的 via3 路径撤销，direct 保留（Update）
+        let _ = ps.take_events(1);
+        let _ = ps.take_events(2);
+        let _ = ps.take_events(3);
+        // 吊销 relay 3 → via3 撤销，direct 保留（Update）；
+        // 事件推全部参与者（REQ-062 生命周期联动）
         ps.withdraw_node(3);
         let evs = ps.take_events(1);
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            PathEvent::Update { source, dest, set } => {
-                assert_eq!(*source, 1);
-                assert_eq!(*dest, 2);
+        assert_eq!(evs.len(), 2); // Update(direct) + Withdraw(via3)
+        assert!(evs.iter().any(|e| matches!(e, PathEvent::Withdraw { .. })));
+        match evs.iter().find(|e| matches!(e, PathEvent::Update { .. })) {
+            Some(PathEvent::Update { source, dest, set }) => {
+                assert_eq!((*source, *dest), (1, 2));
                 assert_eq!(set.candidates.len(), 1); // 只剩 direct
                 assert_eq!(set.candidates[0].hops, vec![2]);
             }
             _ => panic!("expected update"),
         }
-        // 吊销 dest → 整组 Withdraw
+        // dest 2 同样收到（它持有 via3 的 key_path）
+        let evs2 = ps.take_events(2);
+        assert!(evs2.iter().any(|e| matches!(e, PathEvent::Withdraw { .. })));
+        assert!(evs2.iter().any(|e| matches!(e, PathEvent::Update { .. })));
+        // 吊销 dest → 整组 Withdraw（source 收）
         ps.withdraw_node(2);
         let evs = ps.take_events(1);
         assert_eq!(evs.len(), 1);
@@ -341,6 +464,43 @@ mod tests {
         ps.withdraw_node(1);
         let evs = ps.take_events(1);
         assert!(evs.iter().all(|e| matches!(e, PathEvent::Withdraw { .. })));
+    }
+
+    /// REQ-062 验收 ④：撤销源/目的/中间 relay 后，其余参与者收到 Withdraw/Update
+    /// （旧实现只推 source——relay/dest 带失效 key_path 到 TTL）
+    #[test]
+    fn withdraw_events_fan_out_to_all_participants() {
+        let mut ps = PathService::new();
+        ps.set_relays(vec![3, 4]);
+        ps.request(1, 2, 4, 0); // direct + via3 + via4
+        for n in [1, 2, 3, 4] {
+            let _ = ps.take_events(n);
+        }
+        // 撤中间 relay 3：source/dest 收 Update+Withdraw；relay 4 收 Update（仍在用）
+        ps.withdraw_relay(3);
+        for n in [1, 2] {
+            let evs = ps.take_events(n);
+            assert!(
+                evs.iter().any(|e| matches!(e, PathEvent::Withdraw { .. })),
+                "node {n} 应收到 Withdraw"
+            );
+            assert!(
+                evs.iter().any(|e| matches!(e, PathEvent::Update { .. })),
+                "node {n} 应收到 Update"
+            );
+        }
+        let evs4 = ps.take_events(4);
+        assert!(evs4.iter().all(|e| matches!(e, PathEvent::Update { .. })));
+        // 撤 dest：source 收 direct+via4 两条 Withdraw；via4 的 key_path 同步失效
+        ps.withdraw_node(2);
+        let evs = ps.take_events(1);
+        assert!(evs.iter().all(|e| matches!(e, PathEvent::Withdraw { .. })));
+        assert!(evs.len() >= 2);
+        let evs4 = ps.take_events(4);
+        assert!(
+            evs4.iter().all(|e| matches!(e, PathEvent::Withdraw { .. })),
+            "relay 4 也应收到 Withdraw（持有该路径 key_path）"
+        );
     }
 
     #[test]

@@ -250,11 +250,12 @@ async fn single_node_equivalent_to_direct_calls() {
         &raft,
         CoordCommand::SetEndpoints {
             node_id: 1,
-            endpoints: vec!["203.0.113.1:41641".to_string()],
+            local: vec!["203.0.113.1:41641".to_string()],
+            seen: vec![],
         },
     )
     .await;
-    direct.set_endpoints(1, vec!["203.0.113.1:41641".to_string()]);
+    direct.set_endpoints(1, vec!["203.0.113.1:41641".to_string()], vec![]);
 
     let raft_paths = match write(
         &raft,
@@ -310,7 +311,8 @@ async fn restart_restores_state_and_continues() {
         &raft,
         CoordCommand::SetEndpoints {
             node_id: 1,
-            endpoints: vec!["203.0.113.9:41641".to_string()],
+            local: vec!["203.0.113.9:41641".to_string()],
+            seen: vec![],
         },
     )
     .await;

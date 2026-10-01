@@ -1,5 +1,5 @@
 //! coordinator 运行入口：TLS accept 循环 + SIGHUP 重载 + UDP 数据面
-//! （echo 回显限速 + relay RTT 排序，CONNECTIVITY §2/§5）
+//! （echo 回显限速 + relay RTT 探测/roster 策划，CONNECTIVITY §2/§5、REQ-062）
 
 use crate::status_http::{spawn_status_server, StatusState};
 use crate::{load_coord, BoxResult};
@@ -58,7 +58,8 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
         .unwrap_or_else(|| config.listen_addr.parse().expect("validated"));
     let udp = tokio::net::UdpSocket::bind(udp_addr).await?;
     let udp_server = server.clone();
-    tokio::spawn(async move { run_coord_udp(udp, udp_server, networks).await });
+    let udp_networks = networks.clone();
+    tokio::spawn(async move { run_coord_udp(udp, udp_server, udp_networks).await });
     // 只读状态端点（REQ-051/CONTROL_PLANE §3.14）：配置段缺省 = 不启用；
     // 启用而无有效密码哈希已在 parse/validate 层拒绝启动（fail-closed）
     let status_state = match &config.status {
@@ -93,7 +94,26 @@ pub(crate) async fn run_coord(config_path: &Path) -> BoxResult<()> {
                 info!("[coord] SIGHUP received");
                 match load_coord(config_path) {
                     Ok(new_cfg) => {
-                        server.lock().await.apply_config(&new_cfg);
+                        {
+                            let mut guard = server.lock().await;
+                            guard.apply_config(&new_cfg);
+                            // REQ-062：relay 约束热更新（include/exclude/max_size）
+                            // 后按现有软状态立即重提 roster；新一轮测量 30s 后跟上。
+                            // Forward/瞬时错误吞掉（RTT 轮会重提，roster 非必须落位）
+                            let now = unix_now();
+                            for (_name, net_id) in &networks {
+                                let roster = guard
+                                    .coordinator
+                                    .with_coord(|c| c.propose_relay_roster(*net_id));
+                                if let Err(e) = guard
+                                    .coordinator
+                                    .apply_relay_roster(*net_id, roster, now)
+                                    .await
+                                {
+                                    debug!("[coord] roster re-propose deferred: {e:?}");
+                                }
+                            }
+                        }
                         info!("[coord] config reloaded (SIGHUP)");
                         // 状态端点增量收敛（REQ-051）：密码轮换热生效 + 重载历史
                         if let Some(state) = &status_state {
@@ -185,10 +205,17 @@ const RELAY_RTT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30)
 /// RTT 收集窗口（PONG 应答等待）
 const RELAY_RTT_COLLECT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// coordinator UDP 数据面任务（CONNECTIVITY §2/§5）：
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// coordinator UDP 数据面任务（CONNECTIVITY §2/§5、REQ-062）：
 /// ① 回显：probe PING（to=0 标记）→ PONG 携带 seen 地址（STUN 式），按源 IP 限速（§2.2）
-/// ② relay RTT 排序：周期向各网 relay 端点发 PING 测 RTT → 排序写入 relay_list +
-///    PathService relay 顺序（挂靠优先级）
+/// ② relay RTT 探测：周期向各网 relay 候选端点发 PING 测 RTT → 健康轮落账
+///    （命中/连续 miss）→ 提案 roster（公网准入 + RTT 序 + 约束）→ raft 落位
 async fn run_coord_udp(
     udp: tokio::net::UdpSocket,
     server: std::sync::Arc<tokio::sync::Mutex<CoordinatorServer>>,
@@ -206,6 +233,9 @@ async fn run_coord_udp(
     let mut rtt_probes: HashMap<u32, (u32, u32, String, std::time::Instant)> = HashMap::new();
     // 已测 RTT：network_id → (node_id, endpoint) → rtt
     let mut rtt_done: HashMap<u32, HashMap<(u32, String), u64>> = HashMap::new();
+    // 本轮探测目标（network_id → node_id）：收集窗结束 = 一次健康轮，
+    // 未应答目标记 miss（退出口迟滞推进）
+    let mut probed_nodes: HashMap<u32, std::collections::HashSet<u32>> = HashMap::new();
     let mut collecting = false;
     let mut collect_deadline = std::time::Instant::now();
     let mut next_rtt = std::time::Instant::now() + RELAY_RTT_PERIOD;
@@ -244,46 +274,59 @@ async fn run_coord_udp(
             }
             _ = tokio::time::sleep_until(until) => {
                 if collecting {
-                    // 收集窗口结束：按 RTT 排序应用（relay_list + 路径挂靠顺序）
+                    // 收集窗口结束 = 一次健康轮（REQ-062）：命中/miss 落账 →
+                    // leader 软状态提案 roster → raft 落位；Forward/瞬时错误
+                    // 吞掉（下轮重提——roster 不是必须落位的写）
                     collecting = false;
+                    let now = unix_now();
                     for (name, net_id) in &networks {
                         let done = rtt_done.remove(net_id).unwrap_or_default();
-                        if done.is_empty() {
+                        let probed = probed_nodes.remove(net_id).unwrap_or_default();
+                        if probed.is_empty() {
                             continue;
                         }
+                        // 每节点最优 RTT（多端点取最小）；未应答 = miss
                         let mut node_best: HashMap<u32, u64> = HashMap::new();
                         for ((node, _ep), rtt) in &done {
                             let e = node_best.entry(*node).or_insert(u64::MAX);
                             *e = (*e).min(*rtt);
                         }
-                        let mut eps: Vec<(String, u64)> = done
+                        let mut results: Vec<(u32, Option<u64>)> = probed
                             .into_iter()
-                            .map(|((_n, ep), rtt)| (ep, rtt))
+                            .map(|node| (node, node_best.get(&node).copied()))
                             .collect();
-                        eps.sort_by_key(|(_, r)| *r);
-                        let mut nodes: Vec<(u32, u64)> =
-                            node_best.into_iter().collect();
-                        nodes.sort_by_key(|(_, r)| *r);
-                        let guard = server.lock().await;
-                        guard.coordinator.with_coord_mut(|c| {
-                            c.set_relay_list(name, eps.iter().map(|(e, _)| e.clone()).collect())
-                        });
-                        guard.coordinator.with_coord_mut(|c| {
-                            c.set_relay_order(name, nodes.iter().map(|(n, _)| *n).collect())
-                        });
+                        results.sort_unstable_by_key(|(n, _)| *n);
                         info!(
-                            "[coord] relay rtt (net={}): {}",
+                            "[coord] relay rtt round (net={}): {}",
                             name,
-                            eps.iter()
-                                .map(|(e, r)| format!("{e}({r}ms)"))
+                            results
+                                .iter()
+                                .map(|(n, r)| match r {
+                                    Some(ms) => format!("{n}({ms}ms)"),
+                                    None => format!("{n}(miss)"),
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" ")
                         );
+                        let guard = server.lock().await;
+                        let roster = guard.coordinator.with_coord_mut(|c| {
+                            c.record_relay_rtt_round(*net_id, &results);
+                            c.propose_relay_roster(*net_id)
+                        });                        if let Err(e) = guard
+                            .coordinator
+                            .apply_relay_roster(*net_id, roster, now)
+                            .await
+                        {
+                            debug!("[coord] roster apply deferred (net={}): {e:?}", name);
+                        }
                     }
                     next_rtt = std::time::Instant::now() + RELAY_RTT_PERIOD;
                 } else {
-                    // 发起新一轮 RTT 探测（各网络 relay 能力节点的全部已上报端点）
+                    // 发起新一轮 RTT 探测（各网络 relay 候选的全部已上报端点；
+                    // exclude 剔除目标不探测——roster 恒不可入）
                     rtt_probes.clear();
+                    rtt_done.clear();
+                    probed_nodes.clear();
                     let mut sent = 0usize;
                     for (_name, net_id) in &networks {
                         let targets = server
@@ -292,6 +335,7 @@ async fn run_coord_udp(
                             .coordinator
                             .with_coord(|c| c.relay_probe_targets(*net_id));
                         for (node, eps) in targets {
+                            probed_nodes.entry(*net_id).or_default().insert(node);
                             for ep in eps {
                                 let Ok(addr) = ep.parse::<SocketAddr>() else { continue };
                                 let nonce = landscape_rill_core::probe::random_nonce();
@@ -306,7 +350,8 @@ async fn run_coord_udp(
                             }
                         }
                     }
-                    if sent > 0 {
+                    // 有目标即开窗（含"有候选但端点全无"的全 miss 轮——迟滞推进）
+                    if !probed_nodes.is_empty() {
                         collecting = true;
                         collect_deadline = std::time::Instant::now() + RELAY_RTT_COLLECT;
                     } else {

@@ -31,6 +31,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 |---|---|---|---|---|---|
 | [REQ-066](./REQ-066.md) | 决策 | ✅ merged | — | 09-03 | FRAME_HEADER §2.1 |
 | [REQ-060](./REQ-060-existing-path-possession.md) | 需求 | ✅ merged | — | 09-02 | CONTROL_PLANE §2/§3.1/§3.9/§5.1 |
+| [REQ-062](./REQ-062-relay-roster.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §3.11/§3.2/§3.12 |
 | [REQ-059](./REQ-059-preauth-parse-alloc.md) | 需求 | ✅ merged | — | 09-02 | FRAME_HEADER §5.1 / CONNECTIVITY §2.1 / CONTROL_PLANE §3.13 |
 | [REQ-058](./REQ-058-revocation-canonical-keying.md) | 需求 | ✅ merged | — | 09-02 | CONTROL_PLANE §3.5/§3.1 |
 | [REQ-057](./REQ-057-registration-ack-loss-recovery.md) | 需求 | ✅ merged | — | 09-02 | CONTROL_PLANE §3.9/§5.1 |
@@ -48,7 +49,6 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-070](./REQ-070-raft-ha.md) | 需求 | 📌 proposed | P3 | 10-01 | — |
 | [REQ-049](./REQ-049-coordinator-transparency.md) | 需求 | 📌 proposed | P3 | 09-01 | — |
 | [REQ-065](./REQ-065-dn42-route-update.md) | 需求 | 📌 proposed | P3 | 09-03 | — |
-| [REQ-062](./REQ-062-relay-roster.md) | 需求 | 📌 proposed | P3 | 09-02 | — |
 | [REQ-064](./REQ-064-path-stats.md) | 需求 | 📌 proposed | P3 | 09-02 | — |
 | [REQ-055](./REQ-055-faketcp-xdp.md) | 决策 | 📌 proposed | P4 | 09-01 | — |
 | [REQ-061](./REQ-061-multihop-relay-chain.md) | 需求 | 📌 proposed | P5 | 09-02 | — |

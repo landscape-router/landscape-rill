@@ -70,8 +70,10 @@ fn register_idempotent_no_version_bump() {
     assert_eq!(c.netmap_version(), v1);
 }
 
+/// REQ-062 验收 ③：注册不再自动进 relay 集（能力位只是必要条件）；
+/// roster 落位后路径候选才含中继跳
 #[test]
-fn relay_list_follows_registration() {
+fn relay_roster_gates_path_candidates() {
     let (mut c, ak) = setup();
     let relay = c
         .register(&ak, &pubkey(1), 0x01, vec![], 0, (0, 0))
@@ -85,9 +87,21 @@ fn relay_list_follows_registration() {
         .register(&ak, &pubkey(3), 0x00, vec![], 0, (0, 0))
         .unwrap()
         .node_id;
+    // 未落位 roster：能力位节点不进任何候选路径（无 key_path 签发 = 停用语义）
+    let cands = c.request_paths(src, dst, 4, 1_000);
+    assert_eq!(cands.len(), 1, "仅 direct（roster 空）");
+    // roster 落位（apply 侧入口）→ 中继候选出现
+    let nid = c.network_id_of(src).unwrap();
+    assert!(c.apply_relay_roster(nid, vec![relay], 1_000));
     let cands = c.request_paths(src, dst, 4, 1_000);
     assert!(cands.iter().any(|(p, _)| p.hops == vec![relay, dst]));
     assert_eq!(cands.len(), 2); // direct + relay
+
+    // roster 清空 → 候选收窄回 direct
+    assert!(c.apply_relay_roster(nid, vec![], 1_000));
+    let cands = c.request_paths(src, dst, 4, 1_000);
+    assert_eq!(cands.len(), 1);
+    assert!(cands.iter().all(|(p, _)| !p.hops.contains(&relay)));
 }
 
 #[test]
@@ -313,7 +327,7 @@ fn takeover_reset_liveness_avoids_stale_offline_sweep() {
 fn endpoints_enter_netmap() {
     let (mut c, ak) = setup();
     let id = register_node(&mut c, &ak, 1);
-    c.set_endpoints(id, vec!["203.0.113.1:41641".into()]);
+    c.set_endpoints(id, vec!["203.0.113.1:41641".into()], vec![]);
     let nid = c.network_id_of(id).unwrap();
     let snap = c.netmap_snapshot(nid);
     assert_eq!(snap[0].endpoints, vec!["203.0.113.1:41641"]);
@@ -627,13 +641,165 @@ fn relays_isolated_per_network() {
         .register(&ak_b, &pubkey(5), 0x00, vec![], 0, (0, 0))
         .unwrap()
         .node_id;
-    // A 网路径含 A relay
+    // A 网 roster 落位 → A 网路径含 A relay
+    let nid_a = c.network_id_of(r).unwrap();
+    assert!(c.apply_relay_roster(nid_a, vec![r], 1_000));
     let cands_a = c.request_paths(a1, a2, 4, 1_000);
     assert!(cands_a.iter().any(|(p, _)| p.hops == vec![r, a2]));
-    // B 网路径不含 A relay（relay 集合按网络独立）
+    // B 网路径不含 A relay（roster 按网络独立）
     let cands_b = c.request_paths(b1, b2, 4, 1_000);
     assert!(cands_b.iter().all(|(p, _)| !p.hops.contains(&r)));
     assert_eq!(cands_b.len(), 1); // 仅 direct（B 无 relay）
+}
+
+// ---------------------------------------------------------------------------
+// relay roster 策划（REQ-062 验收 ①②：交集语义 / exclude 优先 / include 兜底 /
+// 滞回退出 / max_size 名额 / 在线过滤）
+// ---------------------------------------------------------------------------
+
+/// 构造：公网直连 relay 候选（seen ∈ 本地）+ 已测得 RTT
+fn roster_setup(relay_count: usize) -> (Coordinator, String, u32, Vec<u32>) {
+    let (mut c, ak) = setup();
+    let mut relays = Vec::new();
+    for i in 0..relay_count {
+        let id = c
+            .register(&ak, &pubkey((i + 1) as u8), 0x01, vec![], 0, (0, 0))
+            .unwrap()
+            .node_id;
+        c.set_endpoints(
+            id,
+            vec![format!("203.0.113.{id}:41641")],
+            vec![format!("203.0.113.{id}:41641")],
+        );
+        relays.push(id);
+    }
+    let network_id = c.network_id_of(relays[0]).unwrap();
+    // 一轮全命中 RTT（rtt 值 = node_id，便于断言排序）
+    let results: Vec<(u32, Option<u64>)> = relays.iter().map(|&r| (r, Some(r as u64))).collect();
+    c.record_relay_rtt_round(network_id, &results);
+    (c, ak, network_id, relays)
+}
+
+/// REQ-062 验收 ①：能力位 ∩ roster；exclude 优先于自动策划；include 兜底判定失败节点
+#[test]
+fn roster_intersection_exclude_and_include_semantics() {
+    // 3 个公网直连 relay 候选 + 1 个 NAT 后候选（include 兜底对象）
+    let (mut c, ak, network_id, relays) = roster_setup(3);
+    let natted = c
+        .register(&ak, &pubkey(0x40), 0x01, vec![], 0, (0, 0))
+        .unwrap()
+        .node_id;
+    c.set_endpoints(
+        natted,
+        vec!["192.168.1.5:41641".into()],
+        vec!["198.51.100.7:52010".into()], // NAT 映射，seen ∉ 本地
+    );
+    c.record_relay_rtt_round(network_id, &[(natted, Some(9))]);
+    // ① 双资格：无能力位节点不进（include 也不行——能力位是必要条件）
+    let plain = register_node_caps(&mut c, &ak, 0x50, 0x00);
+    let mut cfg = crate::config::RelayRosterConfig::default();
+    cfg.include.push(plain);
+    c.set_relay_constraints("lab", cfg.clone());
+    assert!(!c.propose_relay_roster(network_id).contains(&plain));
+    // ② exclude 优先：自动策划命中者被剔除
+    cfg.exclude.push(relays[0]);
+    c.set_relay_constraints("lab", cfg.clone());
+    let proposed = c.propose_relay_roster(network_id);
+    assert!(!proposed.contains(&relays[0]), "exclude 优先于自动策划");
+    assert!(proposed.contains(&relays[1]));
+    // ③ include 兜底：NAT 后（判定失败）候选经 include 进 roster
+    assert!(!proposed.contains(&natted), "无 include 时 NAT 后不进");
+    cfg.include.push(natted);
+    c.set_relay_constraints("lab", cfg);
+    let proposed = c.propose_relay_roster(network_id);
+    assert!(proposed.contains(&natted), "include 兜底判定失败节点");
+    // RTT 升序（rtt 值 = node_id：2 < 3 < 4=natted(9)）
+    assert_eq!(proposed, vec![relays[1], relays[2], natted]);
+}
+
+/// max_size 名额截断自动策划；include 追加不计名额
+#[test]
+fn roster_max_size_caps_auto_but_not_include() {
+    let (mut c, _ak, network_id, relays) = roster_setup(3);
+    let mut cfg = crate::config::RelayRosterConfig {
+        max_size: 2,
+        ..Default::default()
+    };
+    c.set_relay_constraints("lab", cfg.clone());
+    let proposed = c.propose_relay_roster(network_id);
+    assert_eq!(proposed.len(), 2, "自动策划截断到 max_size");
+    cfg.include.push(relays[2]);
+    c.set_relay_constraints("lab", cfg);
+    let proposed = c.propose_relay_roster(network_id);
+    assert_eq!(proposed.len(), 3, "include 追加不计名额");
+    assert!(proposed.contains(&relays[2]));
+}
+
+/// 滞回（REQ-062 开放问题 ②默认值）：miss < 3 轮保留；满 3 轮移出；重新命中即回
+#[test]
+fn roster_exit_hysteresis_by_consecutive_misses() {
+    let (mut c, _ak, network_id, relays) = roster_setup(1);
+    let r = relays[0];
+    assert_eq!(c.propose_relay_roster(network_id), vec![r]);
+    // miss 1~2 轮：仍在（防健康抖动）
+    for _ in 0..2 {
+        c.record_relay_rtt_round(network_id, &[(r, None)]);
+    }
+    assert_eq!(c.propose_relay_roster(network_id), vec![r]);
+    // 第 3 轮 miss：移出
+    c.record_relay_rtt_round(network_id, &[(r, None)]);
+    assert!(c.propose_relay_roster(network_id).is_empty());
+    // 重新命中：回 roster
+    c.record_relay_rtt_round(network_id, &[(r, Some(5))]);
+    assert_eq!(c.propose_relay_roster(network_id), vec![r]);
+}
+
+/// 在线过滤：租约超时（离线）节点不进 roster；include 不豁免离线
+#[test]
+fn roster_excludes_offline_nodes() {
+    let (mut c, _ak, network_id, relays) = roster_setup(1);
+    let r = relays[0];
+    // 心跳维持在线（liveness 默认无记录 = 不离线；这里显式打 miss 标记离线）
+    c.mark_offline(r);
+    assert!(c.propose_relay_roster(network_id).is_empty());
+    let mut cfg = crate::config::RelayRosterConfig::default();
+    cfg.include.push(r);
+    c.set_relay_constraints("lab", cfg);
+    assert!(
+        c.propose_relay_roster(network_id).is_empty(),
+        "include 不豁免离线"
+    );
+}
+
+/// roster 落位（apply）→ netmap/状态可见；集合变化才 bump netmap（顺序变化不 bump）
+#[test]
+fn roster_apply_bumps_netmap_on_set_change_only() {
+    let (mut c, _ak, network_id, relays) = roster_setup(2);
+    let v0 = c.netmap_version();
+    assert!(c.apply_relay_roster(network_id, vec![relays[0], relays[1]], 1_000));
+    let v1 = c.netmap_version();
+    assert_eq!(v1, v0 + 1);
+    assert_eq!(c.relay_roster_for(network_id), &[relays[0], relays[1]]);
+    // 同集不同序：无集合变化（不 bump），但顺序（挂靠优先级）已更新
+    assert!(!c.apply_relay_roster(network_id, vec![relays[1], relays[0]], 1_000));
+    assert_eq!(c.netmap_version(), v1);
+    assert_eq!(c.relay_roster_for(network_id), &[relays[1], relays[0]]);
+}
+
+/// 吊销 roster 成员：roster 即时收口 + 路径撤销（联动断言见 path_service 测试）
+#[test]
+fn revoke_removes_node_from_roster() {
+    let (mut c, ak, network_id, relays) = roster_setup(1);
+    let r = relays[0];
+    assert!(c.apply_relay_roster(network_id, vec![r], 1_000));
+    let src = register_node_caps(&mut c, &ak, 0x60, 0x00);
+    let dst = register_node_caps(&mut c, &ak, 0x61, 0x00);
+    let cands = c.request_paths(src, dst, 4, 1_000);
+    assert!(cands.iter().any(|(p, _)| p.hops == vec![r, dst]));
+    c.revoke(r, 1_000, (0, 0));
+    assert!(!c.relay_roster_for(network_id).contains(&r));
+    let cands = c.request_paths(src, dst, 4, 1_000);
+    assert!(cands.iter().all(|(p, _)| !p.hops.contains(&r)));
 }
 
 /// 跨网络 identity_binding 验签失败（SEC-24 核心断言；数据面握手跨网互拒见
@@ -741,7 +907,7 @@ fn persist_roundtrip_restores_full_state() {
         .register(&ak, &pubkey(1), 0x01, vec![], 0, (0, 0))
         .unwrap()
         .node_id;
-    c.set_endpoints(a, vec!["203.0.113.1:41641".into()]);
+    c.set_endpoints(a, vec!["203.0.113.1:41641".into()], vec![]);
     let b = c
         .register(&ak, &pubkey(2), 0x00, vec![], 0, (0, 0))
         .unwrap()

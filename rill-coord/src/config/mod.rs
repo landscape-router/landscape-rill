@@ -101,6 +101,39 @@ pub struct NetworkConfig {
     /// ACL 策略（REQ-045，CONTROL_PLANE §3.10）；缺省 = 未启用（v1 全放行）
     #[serde(default)]
     pub acl: AclConfig,
+    /// relay roster 硬约束（REQ-062，CONNECTIVITY §5）；缺省 = 自动策划（max_size 8）
+    #[serde(default)]
+    pub relay: RelayRosterConfig,
+}
+
+/// relay roster 硬约束（REQ-062 模式 C：自动策划 + 配置约束）。
+/// `deny_unknown_fields` = fail-closed：未实现字段一律加载报错
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayRosterConfig {
+    /// 强制纳入（判定失败/1:1 NAT 兜底；仍须能力位 + 在线）
+    #[serde(default)]
+    pub include: Vec<u32>,
+    /// 强制排除（优先于自动策划与 include）
+    #[serde(default)]
+    pub exclude: Vec<u32>,
+    /// 自动策划名额上限（include 追加不计入）
+    #[serde(default = "default_relay_max_size")]
+    pub max_size: usize,
+}
+
+impl Default for RelayRosterConfig {
+    fn default() -> Self {
+        Self {
+            include: Vec::new(),
+            exclude: Vec::new(),
+            max_size: default_relay_max_size(),
+        }
+    }
+}
+
+fn default_relay_max_size() -> usize {
+    8
 }
 
 /// ACL 策略配置（REQ-045 前缀级）。`deny_unknown_fields` = fail-closed：
@@ -308,6 +341,24 @@ impl CoordConfig {
                     .map_err(|_| ConfigError(format!("invalid whitelist prefix: {w}")))?;
             }
             net.acl.to_policy()?;
+            // relay roster 硬约束（REQ-062）：include/exclude 不相交、max_size ≥ 1
+            if net.relay.max_size == 0 {
+                return Err(ConfigError(format!(
+                    "network {}: relay.max_size must be >= 1",
+                    net.name
+                )));
+            }
+            if let Some(id) = net
+                .relay
+                .include
+                .iter()
+                .find(|i| net.relay.exclude.contains(i))
+            {
+                return Err(ConfigError(format!(
+                    "network {}: relay node {id} in both include and exclude",
+                    net.name
+                )));
+            }
         }
         if let Some(p) = &self.storage_path {
             if p.trim().is_empty() {
@@ -368,6 +419,7 @@ impl CoordConfig {
                 .collect();
             coord.set_announce_whitelist(&net.name, whitelist);
             coord.set_acl_policy(&net.name, net.acl.to_policy().expect("validated"));
+            coord.set_relay_constraints(&net.name, net.relay.clone());
         }
     }
 }
@@ -607,6 +659,7 @@ mod tests {
                 auth_keys: vec![],
                 announce_whitelist: vec![],
                 acl: AclConfig::default(),
+                relay: RelayRosterConfig::default(),
             }],
             ..cfg.clone()
         };

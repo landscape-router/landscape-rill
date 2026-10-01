@@ -163,7 +163,8 @@ impl Node {
         }
     }
 
-    /// 端点通告（注册后 / echo 结果变化时）：本地接口 IP ++ echo seen 地址
+    /// 端点通告（注册后 / echo 结果变化时）：分列上报（REQ-062）——
+    /// 本地接口 IP 进 endpoints（公网准入判定基准），echo seen 地址进 seen
     pub(super) async fn report_endpoints(&mut self) {
         let Some(control) = self.control.as_mut() else {
             return;
@@ -171,22 +172,21 @@ impl Node {
         let Ok(addr) = self.mesh.local_addr() else {
             return;
         };
-        let mut eps: Vec<String> = self
+        let mut local: Vec<String> = self
             .advertise_ips
             .iter()
             .map(|ip| SocketAddr::new(*ip, addr.port()).to_string())
             .collect();
-        for echoed in &self.echoed_endpoints {
-            let s = echoed.to_string();
-            if !eps.contains(&s) {
-                eps.push(s);
-            }
+        if local.is_empty() {
+            local.push(addr.to_string());
         }
-        if eps.is_empty() {
-            eps.push(addr.to_string());
-        }
-        debug!("[node] endpoint report: {:?}", eps);
-        let report = control.endpoint_report_envelope(eps);
+        let seen: Vec<String> = self
+            .echoed_endpoints
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+        debug!("[node] endpoint report: local={local:?} seen={seen:?}");
+        let report = control.endpoint_report_envelope(local, seen);
         let _ = control.send_envelope(&report).await;
     }
 }

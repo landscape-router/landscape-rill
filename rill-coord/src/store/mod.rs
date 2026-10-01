@@ -16,7 +16,7 @@ use redb::{Database, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const STATE_SCHEMA: u32 = 3;
+pub const STATE_SCHEMA: u32 = 4;
 
 const STATE_TABLE: TableDefinition<&'static str, &[u8]> = TableDefinition::new("coord_state");
 const STATE_KEY: &str = "state";
@@ -39,11 +39,14 @@ pub struct CoordState {
     pub netmap_version: u64,
     /// (network_id, key_version)：每网络独立
     pub key_versions: Vec<(u32, u32)>,
-    pub endpoints: Vec<(u32, Vec<String>)>,
+    /// (node_id, local, seen)：端点分列（REQ-062，schema v4——本地接口地址 +
+    /// echo 回显地址，公网准入判定基准）
+    pub endpoints: Vec<(u32, Vec<String>, Vec<String>)>,
     /// (network_id, PathMap, path_seq)：每网络独立
     pub path_maps: Vec<NetworkPathMap>,
-    /// (network_id, relay_list)：RTT 排序结果落盘（CONNECTIVITY §5）
-    pub relay_lists: Vec<(u32, Vec<String>)>,
+    /// (network_id, relay_roster)：激活 relay 名单落盘（REQ-062，schema v4——
+    /// 重启不丢挂靠顺序与激活状态；RTT 软状态重测即得）
+    pub relay_rosters: Vec<(u32, Vec<u32>)>,
     /// (network_id, deadline)：吊销合并轮换窗口落盘（REQ-048），重启后自愈；
     /// 旧 schema v2 快照无此字段 → 视为无挂起窗口
     #[serde(default)]

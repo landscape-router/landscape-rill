@@ -252,22 +252,55 @@ impl CoordBackend {
         }
     }
 
-    /// 持久写：端点上报
+    /// 持久写：端点上报（分列，REQ-062——本地接口/echo seen）
     pub async fn set_endpoints(
         &self,
         node_id: u32,
-        endpoints: Vec<String>,
+        local: Vec<String>,
+        seen: Vec<String>,
     ) -> Result<(), WriteError<()>> {
         match self {
             Self::Single(_) => {
-                self.with_coord_mut(|c| c.set_endpoints(node_id, endpoints));
+                self.with_coord_mut(|c| c.set_endpoints(node_id, local, seen));
                 Ok(())
             }
             Self::Cluster { .. } => match self
-                .propose(CoordCommand::SetEndpoints { node_id, endpoints })
+                .propose(CoordCommand::SetEndpoints {
+                    node_id,
+                    local,
+                    seen,
+                })
                 .await
             {
                 Ok(CoordCommandResult::SetEndpoints) => Ok(()),
+                Ok(other) => Err(WriteError::Raft(format!("unexpected result: {other:?}"))),
+                Err(e) => Err(e.into_err()),
+            },
+        }
+    }
+
+    /// 持久写：relay roster 落位（REQ-062；roster 由 leader 提案——调用方先
+    /// record_relay_rtt_round + propose_relay_roster）。非 leader 的 Forward
+    /// 由调用方吞掉（下轮 RTT 重提），roster 不是必须落位的写
+    pub async fn apply_relay_roster(
+        &self,
+        network_id: u32,
+        roster: Vec<u32>,
+        now: u64,
+    ) -> Result<bool, WriteError<bool>> {
+        match self {
+            Self::Single(_) => {
+                Ok(self.with_coord_mut(|c| c.apply_relay_roster(network_id, roster, now)))
+            }
+            Self::Cluster { .. } => match self
+                .propose(CoordCommand::SetRelayRoster {
+                    network_id,
+                    roster,
+                    now,
+                })
+                .await
+            {
+                Ok(CoordCommandResult::SetRelayRoster(changed)) => Ok(changed),
                 Ok(other) => Err(WriteError::Raft(format!("unexpected result: {other:?}"))),
                 Err(e) => Err(e.into_err()),
             },

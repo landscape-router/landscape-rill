@@ -3,9 +3,9 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-066
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-066
 
-**版本：v0.20（2026-10-01 修订：REQ-049②/REQ-070 阶段三——binding v2 签发锚点进 §3.1/§3.2，新增 §3.16 绑定交叉审计（AuditRequest/AuditResponse + 吊销墓碑 + 节点侧审计行为）；v0.19 为 REQ-070——§5.2 节点侧租约看门狗 + SIGTERM 优雅退出 + §5.6 重连全程分片（连接建立后台化，数据面零停摆）；v0.17 为 REQ-070 阶段二：§1.2 静态成员集群/§3.6 LeaderRedirect/§5.6 接管软状态重置 + 数据面不中断/§6 mTLS）**
+**版本：v0.21（2026-10-01 修订：REQ-062 relay 池策划——§3.2 `relay_list` 升级为 `relay_roster`（node_id 有序激活名单）+ endpoints 合并视图说明 + EndpointReport 本地/回显分列（§3.11 roster 段）；§3.11 新增 relay roster 段（双资格/自动策划+硬约束/迟滞/raft 语义/生命周期事件全参与者扇出）；§3.12 relay 约束段 + SIGHUP 重提；§3.14 relay roster 状态视图；v0.20 为 REQ-049②/REQ-070 阶段三——binding v2 签发锚点 + §3.16 绑定交叉审计）**
 
 **最后修改：2026-10-01**
 
@@ -126,11 +126,11 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
   - `node_id`（4B；联邦场景高 8 位 = 网络号，§7.3）
   - `network_id`（联邦钩子；v1 恒为本网络；用于过滤策略与环路预防）
   - `static_pubkey`（32B）
-  - `endpoints[]`：UDP 端点（**上报机制**：节点经 coordinator UDP 回显探测，周期 30s + 网络变更触发，见 CONNECTIVITY §2；联邦边界：远端端点只下发到桥节点，不扩散）
+  - `endpoints[]`：UDP 端点 = 本地接口地址 ∪ echo seen 地址（去重合并视图；**上报机制**：节点经 coordinator UDP 回显探测，周期 30s + 网络变更触发，见 CONNECTIVITY §2；联邦边界：远端端点只下发到桥节点，不扩散）
   - `capabilities`（含 `relay` 自愿位：节点声明愿当中继，opt-in）
   - `routes[]`：**前缀公告**（节点背后 LAN/前缀，见 §3.8 前缀公告流程）——注册时携带初始公告 + 变更时更新；`routes` 汇总 = rill ext 节点 subnet router 广播进自建 tailnet 的数据源（TS2021_LEG §3.3）
   - 条目签名：本地条目由本 coordinator 签名；联邦条目经过滤后用本 coordinator 私钥**重签**（§7）
-- `relay_list`：候选中继列表（DERP map 等价物）——coordinator 兜底 + 自愿节点（可达性验证 + RTT 测量后纳入），随 netmap 下发，见 CONNECTIVITY §5
+- `relay_roster`：**relay 激活名单**（REQ-062，升级原 `relay_list` 端点串列表）——`repeated fixed32 node_id` 有序数组，顺序 = 挂靠优先级（RTT 升序）；**双资格 = 能力位 ∩ roster**（不在 roster 的能力位节点不进任何候选路径，无 key_path 签发 = 停用而非吊销）；节点按 node_id 从 netmap 条目直取 relay 端点（不再按端点串反查归属）。策划机制见 §3.11 relay roster 段；随 netmap 下发，**集合变化才 bump 版本**（顺序变化不 bump，路径候选序经路径请求即时生效）
 - `acl`：**网络级 ACL 策略**（REQ-045，前缀级）——AclPolicy{enabled, rules[], groups{}}，随 netmap 原子下发；缺省/未启用 = v1 全放行
 - `replica_endpoints[]`：raft 成员端点（绑定审计目标，REQ-049② §3.16；单机 = 空）
 - `entries[].identity_binding + raft_log_index/raft_term`：条目绑定 + 签发锚点随 netmap 下发（REQ-049②）——节点对 netmap 条目做交叉审计的输入
@@ -148,6 +148,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
 - 节点周期发送 Heartbeat（建议默认 10s，v1 实现时定）
 - coordinator 维护**软状态** `last_seen`；超过租约阈值（建议默认 60s）判定离线
 - 离线判定只影响 netmap 可达性标记，**不删除条目**（避免反复注册）
+- **EndpointReport（端点上报，写路径）**：`endpoints[]`（本地接口地址——announce IP 或 mesh 绑定地址）与 `seen[]`（coordinator UDP 回显观测地址，STUN 式）**分列上报**（REQ-062，公网准入判定的输入，§3.11 relay roster 段）；coordinator 合并去重进 netmap 条目（§3.2 `endpoints[]`）
 
 ### 3.5 Revoke（吊销）
 
@@ -292,6 +293,17 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 - 控制面：Path\* 消息在现有 Envelope 消息族新增 MsgType（§8 已落地）
 - 能力位：不新增；PathService 属 coordinator 侧实现
 
+**relay roster——relay 池策划（REQ-062）**
+
+- **单一写者**：PathService 的 relay 集合唯一写者 = roster 落位（`apply_relay_roster`）；注册/端点上报不再自动改 relay 集合（"愿意 ≠ 被用"），吊销与租约离线联动剔除（include 不豁免离线）
+- **生成 = 自动策划 + 配置硬约束**（`networks[].relay { include[], exclude[], max_size }`，§3.12）：
+  - 自动策划准入 = 能力位 ∧ 非 exclude ∧ 非离线 ∧ **公网直连**（echo seen IP ∈ 节点上报本地接口地址集合，端口不计；NAT 后节点排除——中继须两端直连可达）∧ 已测得 RTT ∧ 健康（miss 未达退出口）
+  - 排序 RTT 升序，截断 `max_size`（默认 8）；`include` 兜底强制纳入（判定失败/1:1 NAT 场景；不占自动名额，仍要求能力位 + 健康）；`exclude` 优先级最高（探测目标也剔除）
+- **迟滞（防名单抖动）**：进入需 ≥1 次 RTT 测量；退出 = 连续 3 轮 RTT miss（RELAY_EXIT_MISS_ROUNDS）或离线；测量轮 = coordinator 30s RTT 探测周期（CONNECTIVITY §5）
+- **raft 语义**：roster 落位经 raft 日志命令（提案读 leader 本地软状态——liveness/RTT/端点；apply 确定性：集合替换 + 撤销移出者中继路径 + 扩充既有路径集 + **集合变化才 bump netmap**），重放安全；非 leader 的 Forward 由调用方吞掉（下轮重提——roster 非必须落位写）
+- **SIGHUP 联动**：relay 约束热更新后按现有软状态立即重提 roster（新一轮测量 30s 后跟上）
+- **生命周期事件扇出（全参与者）**：withdraw_node / roster 收窄触发的 Withdraw/Update 推送范围 = {source, dest} ∪ hops 内 relay（修原"只推 source"的缝隙——relay/dest 持失效 key_path 直至 TTL）；roster 扩充对幂等命中的既有路径集**显式补员**（`expand_relay_candidates`：保留既有 path_id，按原 max 预算补新 relay 候选）
+
 ### 3.12 管理面（v1，REQ-038）
 
 > 管理面 = coordinator 侧的配置权威面（前缀公告白名单 §3.8、auth key 生命周期 §6、策略模型 §3.10 的 v2 载体）。v1 形态定稿：**配置文件为唯一权威 + 库 API 执行面分离**（REQ-038）。
@@ -314,6 +326,11 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 
 - systemd 形态 `ExecReload=kill -HUP $MAINPID`；进程收到 SIGHUP → 重新解析配置文件 → `apply_config` **增量应用**（auth key 增删、白名单更新），**不中断在途 TLS 连接与已注册节点**
 - 重载失败（新配置非法）→ **保持旧配置继续运行** + 日志报错（fail-closed 于启动，容错于重载）
+
+**relay 约束段（REQ-062）**
+
+- `networks[].relay { include[], exclude[], max_size }`（均可缺省：include/exclude 空、max_size=8）；`deny_unknown_fields`；校验：max_size ≥1、include ∩ exclude 必须为空
+- 语义见 §3.11 relay roster 段；SIGHUP 热更新后按现有软状态立即重提 roster（收窄即时生效——被移出 relay 的中继路径撤销并推送全参与者；恢复同理）
 
 **SIGTERM 优雅退出（REQ-070 开放问题 8，2026-10-01）**
 
@@ -379,7 +396,7 @@ coordinator 的**观察面 + 操作面**（§3.12 配置写路径不变，WebUI 
   - `status` 段启用而无有效密码哈希 → **拒绝启动**（fail-closed，同 ADM-01）
 - **密码轮换**：改配置 + SIGHUP 增量生效（ADM-03 同机制），热更新不重启；旧密码即刻 401
 - **内容**（admin 全网视图，多网络全量）：
-  1. 网络概览：网络名/network_id、节点数（在线/离线/总）、netmap_version、relay 列表（RTT 排序）、announce 白名单
+  1. 网络概览：网络名/network_id、节点数（在线/离线/总）、netmap_version、relay roster（node_id + 合并端点视图，REQ-062）、announce 白名单
   2. 节点表：node_id、公钥指纹、capabilities、公告前缀、最近端点、在线状态 + last_seen age、协议版本、构建版本（REQ-052）
   3. auth key 台账：前缀脱敏、归域 network、policy、tag、一次性消费状态、剩余有效期
   4. 安全计数器：注册拒绝/限速摘要、echo 限速摘要

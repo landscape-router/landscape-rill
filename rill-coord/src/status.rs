@@ -165,9 +165,11 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // 快照视图（§3.14 内容组 1-6）
 // ---------------------------------------------------------------------------
 
+/// 激活 relay 条目（REQ-062）：roster node_id + 解析端点（netmap 条目合并视图）
 #[derive(Debug, Clone, Serialize)]
 pub struct RelayStatus {
-    pub endpoint: String,
+    pub node_id: u32,
+    pub endpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -279,10 +281,11 @@ impl StatusView {
                 nodes_offline: total_offline,
                 netmap_version: coord.netmap_version(),
                 relays: coord
-                    .relay_list_for(network_id)
+                    .relay_roster_for(network_id)
                     .iter()
-                    .map(|e| RelayStatus {
-                        endpoint: e.clone(),
+                    .map(|&id| RelayStatus {
+                        node_id: id,
+                        endpoints: coord.node_endpoints_merged(id),
                     })
                     .collect(),
                 announce_whitelist: coord.announce_whitelist(name),

@@ -295,32 +295,23 @@ impl Node {
         // mesh routes[] 汇总注入 ts2021 广播（变更 poke 重发 MapRequest，
         // Hostinfo.RoutableIPs 只在新请求生效，TS2021_LEG §3.3.2）
         self.ts2021_set_mesh_routes(mesh_routes);
-        // relay 列表：netmap 权威全量替换；归属节点按 netmap 端点匹配解析
-        // （relay_list 为端点串，须定位节点才能定向互探）
-        let netmap_endpoints: HashMap<SocketAddr, u32> = netmap
-            .entries
-            .iter()
-            .flat_map(|e| {
-                e.endpoints
-                    .iter()
-                    .filter_map(|ep| ep.parse::<SocketAddr>().ok().map(|a| (a, e.node_id)))
-            })
-            .collect();
-        // relay 列表：netmap 权威全量替换；归属节点按 netmap 端点匹配解析。
+        // relay roster（REQ-062）：netmap 权威全量替换；node_id 直达（不再按
+        // 端点串反查归属），每个 roster relay 展开为该节点全部端点。
         // 挂靠确认是本地状态：成员关系随 netmap 重建，已确认端点保持确认
         // （否则每次 netmap 刷新重置，30s 探测周期内确认窗口过短，
         // v1 中继兜底端点反复被冲掉，CON-04 兜底无法收敛）
         let new_relays: Vec<RelayEntry> = netmap
-            .relay_list
+            .relay_roster
             .iter()
-            .filter_map(|ep| ep.parse::<SocketAddr>().ok())
-            .map(|endpoint| RelayEntry {
+            .filter_map(|&rid| self.peer_endpoints.get(&rid).map(|eps| (rid, eps)))
+            .flat_map(|(rid, endpoints)| endpoints.iter().map(move |ep| (*ep, rid)))
+            .map(|(endpoint, node_id)| RelayEntry {
                 endpoint,
-                node_id: netmap_endpoints.get(&endpoint).copied(),
+                node_id: Some(node_id),
                 confirmed: self
                     .relays
                     .iter()
-                    .any(|r| r.endpoint == endpoint && r.confirmed),
+                    .any(|r| r.node_id == Some(node_id) && r.endpoint == endpoint && r.confirmed),
             })
             .collect();
         self.relays = new_relays;

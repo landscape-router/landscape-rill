@@ -3,9 +3,9 @@
 //! 域拆分（子结构提取，2026-09-01）：registry（admission，rill-core）/ signer /
 //! [liveness]（活性）/ [directory]（目录）/ [keys]（密钥）/ [path_service]（路径）/
 //! [store]（持久化）。本文件只做**跨域编排**（register/revoke/netmap_snapshot/
-//! sync_relays）与持久化 glue（snapshot/restore/persist）；单域逻辑在各域文件。
+//! relay roster）与持久化 glue（snapshot/restore/persist）；单域逻辑在各域文件。
 //! 多网络隔离（CONTROL_PLANE §1.5，2026-09-01）：每网络一个 [domain](crate::domain::
-//! NetworkDomain)（registry/主密钥/路径/relay 列表独立）；node_id 全局唯一分配。
+//! NetworkDomain)（registry/主密钥/路径/relay roster 独立）；node_id 全局唯一分配。
 
 use crate::directory::Directory;
 use crate::domain::{network_id_for, NetworkDomain};
@@ -134,7 +134,6 @@ impl Coordinator {
             coord.restore_state(&state)?;
         }
         coord.store = Some(store);
-        coord.sync_all_relays();
         Ok(coord)
     }
 
@@ -150,6 +149,10 @@ impl Coordinator {
 
     fn domain_by_network_id(&self, network_id: u32) -> Option<&NetworkDomain> {
         self.domains.iter().find(|d| d.network_id == network_id)
+    }
+
+    fn domain_by_network_id_mut(&mut self, network_id: u32) -> Option<&mut NetworkDomain> {
+        self.domains.iter_mut().find(|d| d.network_id == network_id)
     }
 
     fn domain_of_node(&self, node_id: u32) -> Option<&NetworkDomain> {
@@ -168,13 +171,6 @@ impl Coordinator {
             .find_map(|d| d.registry.entry(node_id))
             .map(|e| e.network_id)?;
         self.domains.iter_mut().find(|d| d.network_id == network_id)
-    }
-
-    /// relay 节点集合同步（每网络独立；能力位含 relay 的节点，voluntary opt-in）
-    fn sync_all_relays(&mut self) {
-        for d in &mut self.domains {
-            d.sync_relays();
-        }
     }
 
     /// 恢复持久状态（语义校验 fail-closed：不猜测重建）
@@ -255,12 +251,13 @@ impl Coordinator {
                 }
                 domain.paths.restore(path_map, *seq);
             }
-            if let Some((_, list)) = state
-                .relay_lists
+            if let Some((_, roster)) = state
+                .relay_rosters
                 .iter()
                 .find(|(id, _)| *id == domain.network_id)
             {
-                domain.relay_list = list.clone();
+                // roster 恢复 + PathService relay 集同步（REQ-062：单一落位入口语义）
+                domain.apply_roster(roster.clone());
             }
             if let Some((_, deadline)) = state
                 .pending_revoke_rotations
@@ -272,7 +269,12 @@ impl Coordinator {
         }
         self.directory.restore(
             state.netmap_version,
-            state.endpoints.iter().cloned().collect(),
+            state
+                .endpoints
+                .iter()
+                .cloned()
+                .map(|(id, local, seen)| (id, crate::directory::NodeEndpoints { local, seen }))
+                .collect(),
         );
         self.revoked = state
             .revoked_nodes
@@ -290,13 +292,13 @@ impl Coordinator {
             .flat_map(|d| d.registry.entries().cloned())
             .collect();
         nodes.sort_by_key(|n| n.node_id);
-        let mut endpoints: Vec<(u32, Vec<String>)> = self
+        let mut endpoints: Vec<(u32, Vec<String>, Vec<String>)> = self
             .directory
             .endpoints_all()
             .iter()
-            .map(|(k, v)| (*k, v.clone()))
+            .map(|(k, v)| (*k, v.local.clone(), v.seen.clone()))
             .collect();
-        endpoints.sort_by_key(|(k, _)| *k);
+        endpoints.sort_by_key(|(k, _, _)| *k);
         let mut key_versions: Vec<(u32, u32)> = self
             .domains
             .iter()
@@ -313,12 +315,12 @@ impl Coordinator {
             })
             .collect();
         path_maps.sort_by_key(|(id, _, _)| *id);
-        let mut relay_lists: Vec<(u32, Vec<String>)> = self
+        let mut relay_rosters: Vec<(u32, Vec<u32>)> = self
             .domains
             .iter()
-            .map(|d| (d.network_id, d.relay_list.clone()))
+            .map(|d| (d.network_id, d.roster.clone()))
             .collect();
-        relay_lists.sort_by_key(|(id, _)| *id);
+        relay_rosters.sort_by_key(|(id, _)| *id);
         let mut pending_revoke_rotations: Vec<(u32, u64)> = self
             .domains
             .iter()
@@ -350,7 +352,7 @@ impl Coordinator {
             key_versions,
             endpoints,
             path_maps,
-            relay_lists,
+            relay_rosters,
             pending_revoke_rotations,
             revoked_nodes,
         }
@@ -589,13 +591,9 @@ impl Coordinator {
         let node_id = match outcome {
             Ok(RegisterOutcome::NewNode(id)) => {
                 self.next_node_id += 1;
-                self.directory.bump_netmap(); // relay 候选随新节点注册更新（relay 位 opt-in）
-                let domain = self
-                    .domains
-                    .iter_mut()
-                    .find(|d| d.name == parsed.0)
-                    .unwrap();
-                domain.sync_relays();
+                self.directory.bump_netmap();
+                // REQ-062：注册不再自动进 relay 集——能力位只是必要条件，
+                // 选用须走 roster 提案/落位（公网准入 + RTT 健康 + 名额）
                 id
             }
             Ok(RegisterOutcome::Existing(id)) => id,
@@ -627,8 +625,8 @@ impl Coordinator {
         })
     }
 
-    pub fn set_endpoints(&mut self, node_id: u32, endpoints: Vec<String>) {
-        self.directory.set_endpoints(node_id, endpoints);
+    pub fn set_endpoints(&mut self, node_id: u32, local: Vec<String>, seen: Vec<String>) {
+        self.directory.set_endpoints(node_id, local, seen);
         self.persist();
     }
 
@@ -686,15 +684,122 @@ impl Coordinator {
             .unwrap_or([0u8; KEY_DST_LEN])
     }
 
-    /// 管理面库 API：relay 列表设置（按网络分域；RTT 排序见 echo 探测链路）
-    pub fn set_relay_list(&mut self, network: &str, relay_list: Vec<String>) {
+    // ==================== relay roster（REQ-062，CONNECTIVITY §5） ====================
+
+    /// roster 硬约束落位（SIGHUP/apply_to；配置权威，不触发重算——提案在 RTT 轮/重载入口）
+    pub fn set_relay_constraints(&mut self, network: &str, cfg: crate::config::RelayRosterConfig) {
         if let Some(domain) = self.domain_by_name_mut(network) {
-            domain.relay_list = relay_list;
+            domain.relay_cfg = cfg;
         }
     }
 
-    /// relay 探测目标（CONNECTIVITY §5：可达性验证 + RTT 测量）：某网络
-    /// relay 能力节点及其已上报端点。返回 (node_id, endpoints)。
+    /// 最近一轮 RTT 结果（leader 视角软状态，不落盘）：Some = 命中（miss 清零），
+    /// None = 未响应（miss+1，进入退出滞回计数）。只喂提案输入，不改 roster
+    pub fn record_relay_rtt_round(&mut self, network_id: u32, results: &[(u32, Option<u64>)]) {
+        let Some(domain) = self.domain_by_network_id_mut(network_id) else {
+            return;
+        };
+        for &(node, rtt) in results {
+            match rtt {
+                Some(ms) => {
+                    domain.relay_rtt.insert(node, ms);
+                    domain.relay_miss.insert(node, 0);
+                }
+                None => {
+                    let miss = domain.relay_miss.get(&node).copied().unwrap_or(0) + 1;
+                    domain.relay_miss.insert(node, miss);
+                }
+            }
+        }
+    }
+
+    /// roster 提案（模式 C 自动策划，纯函数不动状态）：
+    /// 能力位（必要）∩ ¬exclude ∩ 在线 ∩（公网准入 ∨ include 兜底）∧
+    /// 已测得 RTT（新注册不自动进）∧ 连续 miss < 退出阈值（滞回防名单抖动）；
+    /// RTT 升序截 max_size（include 追加不计名额——硬约束 > 软上限）。
+    /// 输入含 leader 本地软状态（liveness/RTT/端点）——落位经 apply_relay_roster
+    /// 过日志，副本重放确定性不受影响
+    pub fn propose_relay_roster(&self, network_id: u32) -> Vec<u32> {
+        let Some(domain) = self.domain_by_network_id(network_id) else {
+            return Vec::new();
+        };
+        let cfg = &domain.relay_cfg;
+        let eligible = |e: &NodeEntry| {
+            e.capabilities & CAPABILITY_RELAY != 0
+                && !cfg.exclude.contains(&e.node_id)
+                && !self.liveness.is_offline(e.node_id)
+        };
+        let rtt_of = |node: u32| domain.relay_rtt.get(&node).copied().unwrap_or(u64::MAX);
+        let measured_healthy = |node: u32| {
+            domain.relay_rtt.contains_key(&node)
+                && domain.relay_miss.get(&node).copied().unwrap_or(0)
+                    < crate::domain::RELAY_EXIT_MISS_ROUNDS
+        };
+        // 自动策划：公网准入 + 已测得 + 健康
+        let mut auto: Vec<u32> = domain
+            .registry
+            .entries()
+            .filter(|e| eligible(e))
+            .filter(|e| self.directory.public_direct(e.node_id) && measured_healthy(e.node_id))
+            .map(|e| e.node_id)
+            .collect();
+        auto.sort_by_key(|&n| (rtt_of(n), n));
+        auto.truncate(cfg.max_size);
+        // include 兜底：公网判定失败（NAT 后/1:1 NAT）仍强制纳入；不占自动名额
+        let mut roster = auto;
+        for e in domain.registry.entries().filter(|e| eligible(e)) {
+            if cfg.include.contains(&e.node_id)
+                && !roster.contains(&e.node_id)
+                && measured_healthy(e.node_id)
+            {
+                roster.push(e.node_id);
+            }
+        }
+        roster.sort_by_key(|&n| (rtt_of(n), n));
+        roster
+    }
+
+    /// roster 落位（apply 侧唯一入口；raft 过日志的确定性重放）。
+    /// 移出的 relay → 中继角色路径撤销（全参与者事件）；新增 relay → 既有
+    /// 路径集补员（幂等命中的集不会自愈，须显式扩充）；集合变化才 bump netmap
+    /// （顺序变化不 bump——路径候选序经服务端请求即时生效，netmap 侧懒传播）
+    pub fn apply_relay_roster(&mut self, network_id: u32, roster: Vec<u32>, now: u64) -> bool {
+        let Some(domain) = self.domain_by_network_id_mut(network_id) else {
+            return false;
+        };
+        let dropped: Vec<u32> = domain
+            .roster
+            .iter()
+            .filter(|r| !roster.contains(r))
+            .copied()
+            .collect();
+        let changed = domain.apply_roster(roster);
+        for node in dropped {
+            domain.paths.withdraw_relay(node);
+        }
+        domain.paths.expand_relay_candidates(now);
+        let name = domain.name.clone();
+        let roster_now = domain.roster.clone();
+        if changed {
+            self.directory.bump_netmap();
+        }
+        self.persist();
+        info!(
+            "[coord] relay roster applied: network={} changed={} roster={:?}",
+            name, changed, roster_now
+        );
+        changed
+    }
+
+    /// 激活 relay roster（netmap/状态端点用；顺序 = 挂靠优先级）
+    pub fn relay_roster_for(&self, network_id: u32) -> &[u32] {
+        self.domain_by_network_id(network_id)
+            .map(|d| d.roster.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// relay 探测目标（CONNECTIVITY §5：可达性验证 + RTT 测量）：relay 能力
+    /// 节点（exclude 剔除——roster 恒不可入，探测无意义）及其已上报端点
     pub fn relay_probe_targets(&self, network_id: u32) -> Vec<(u32, Vec<String>)> {
         let Some(domain) = self.domain_by_network_id(network_id) else {
             return Vec::new();
@@ -703,16 +808,14 @@ impl Coordinator {
             .registry
             .entries()
             .filter(|e| e.capabilities & CAPABILITY_RELAY != 0)
-            .map(|e| (e.node_id, self.directory.endpoints_of(e.node_id).to_vec()))
+            .filter(|e| !domain.relay_cfg.exclude.contains(&e.node_id))
+            .map(|e| (e.node_id, self.directory.merged_endpoints_of(e.node_id)))
             .collect()
     }
 
-    /// RTT 排序结果落位（按网络分域）：PathService relay 集合按实测 RTT 排序
-    /// （路径候选顺序 = 挂靠优先级，CONNECTIVITY §5）；relay_list 由 set_relay_list 落位
-    pub fn set_relay_order(&mut self, network: &str, ordered_node_ids: Vec<u32>) {
-        if let Some(domain) = self.domain_by_name_mut(network) {
-            domain.paths.set_relays(ordered_node_ids);
-        }
+    /// 节点合并端点（本地 ++ seen；状态端点展示用）
+    pub fn node_endpoints_merged(&self, node_id: u32) -> Vec<String> {
+        self.directory.merged_endpoints_of(node_id)
     }
 
     // ==================== netmap 快照 ====================
@@ -729,7 +832,7 @@ impl Coordinator {
                 static_pubkey: e.static_pubkey,
                 capabilities: e.capabilities,
                 routes: e.routes.clone(),
-                endpoints: self.directory.endpoints_of(e.node_id).to_vec(),
+                endpoints: self.directory.merged_endpoints_of(e.node_id),
                 offline: self.liveness.is_offline(e.node_id),
                 protocol_version: self.directory.protocol_version(e.node_id),
                 // 绑定随 netmap 下发（REQ-049②）：节点可对 netmap 条目与握手对端做交叉审计
@@ -741,12 +844,6 @@ impl Coordinator {
 
     pub fn netmap_version(&self) -> u64 {
         self.directory.netmap_version()
-    }
-
-    pub fn relay_list_for(&self, network_id: u32) -> &[String] {
-        self.domain_by_network_id(network_id)
-            .map(|d| d.relay_list.as_slice())
-            .unwrap_or(&[])
     }
 
     pub fn heartbeat(&mut self, node_id: u32, now: u64) -> bool {
@@ -805,12 +902,17 @@ impl Coordinator {
                 self.telemetry.remove(&node_id);
                 // 路径联动：撤销所有涉及该节点的路径（源/目的/中继）
                 d.paths.withdraw_node(node_id);
+                // roster 联动（REQ-062）：吊销节点移出 roster（registry/roster 皆
+                // raft 态，apply 侧确定性收口）；PathService relay 集同步
+                if d.roster.contains(&node_id) {
+                    d.roster.retain(|r| *r != node_id);
+                    d.paths.set_relays(d.roster.clone());
+                }
                 // REQ-048：吊销即时语义不变（移除/Withdraw/netmap 即时），
                 // 轮换进合并窗口，批次末一次生效
                 d.keys
                     .arm_revoke_rotation(now + REVOKE_ROTATION_WINDOW_SECS);
                 self.directory.bump_netmap();
-                d.sync_relays();
             })
             .is_some();
         if revoked {

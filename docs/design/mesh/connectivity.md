@@ -2,7 +2,7 @@
 
 > 端点发现、直连验证、中继兜底——mesh 接入的"DERP 等价物"专题。
 > 42B 帧头的转发语义见 FRAME_HEADER；端点传播进 netmap 见 CONTROL_PLANE §3.2。
-> 版本：v0.9（2026-09-30 修订：§8 补 probe 无响应喂端点 miss）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-054 / REQ-059
+> 版本：v0.10（2026-10-01 修订：REQ-062——§5 relay 集中继名单升级为 roster 策划（自动策划准入 + 迟滞 + raft 落位），§6 中继失联/下线行对齐；§7 对 CONTROL_PLANE 的引用更新为 relay_roster）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-054 / REQ-059 / REQ-062
 
 ## 1. 问题与目标
 
@@ -42,7 +42,7 @@ probe 请求无认证（有意设计），伪造源地址可让 coordinator 向�
 ## 3. 端点传播
 
 - netmap 全量推送（v1），变更即全量（版本号 CAS）
-- **relay 列表**（DERP map 等价物）随 netmap 一并下发（§5）
+- **relay roster**（node_id 激活名单，REQ-062）随 netmap 一并下发（§5；relay 端点经 netmap 条目解析）
 - 联邦边界（v2）：远端端点只下发到桥节点，不向普通节点扩散（信息暴露可控）
 
 ## 4. 直连验证（disco 式简化）
@@ -89,8 +89,9 @@ probe 无认证为有意设计（会话建立前无认证链可用，§4.2），
 
 - 中继 = 42B 帧转发节点（FRAME_HEADER §4 语义：读明文帧头 → route_mac 校验 → 查表 → 重写外层地址），**转发不是能力问题而是意愿问题**，任何持 key_dst + 端点表的节点都能转发
 - 自愿节点 opt-in 原则：中继消耗节点主人的带宽/CPU，默认关闭
-- **coordinator 汇总**：收集自愿 relay（可达性验证：UDP 回显测试 + RTT 测量），构建 relay 列表随 netmap 下发
-- **挂靠选择**：节点按 RTT/优先级排序逐个尝试，失败切下一个
+- **coordinator 策划（REQ-062）**：relay 集 = **roster**（node_id 激活名单，CONTROL_PLANE §3.11）——能力位只是必要条件，coordinator 按"在线健康 + RTT 升序 + 公网直连准入（echo seen IP ∈ 本地接口地址集合）+ 配置硬约束（include/exclude/max_size）"策划；进出带迟滞（进入需 ≥1 次测量，退出 = 连续 3 轮 miss 或离线）
+- **RTT 探测轮（30s 周期 + 3s 收集窗）**：coordinator 向各网 relay 候选的全部已上报端点发 PING → PONG 计 RTT（多端点取最优）→ 健康轮落账（未应答 = miss）→ 提案 roster → 经 raft 落位、随 netmap 下发（集合变化才 bump）；exclude 目标不探测（roster 恒不可入）；relay 约束 SIGHUP 热更新后按现有软状态立即重提
+- **挂靠选择**：节点按 roster 序（RTT 升序 = 挂靠优先级）逐个尝试，失败切下一个；relay 端点按 node_id 从 netmap 条目直取
 
 ### 5.1 滥用防护
 
@@ -101,15 +102,15 @@ probe 无认证为有意设计（会话建立前无认证链可用，§4.2），
 
 | 事件 | 行为 |
 |---|---|
-| 挂靠中继失联 | 检测超时 → 切换 relay 列表下一个 |
+| 挂靠中继失联 | 检测超时 → 切换 roster 下一个（miss 迟滞满 3 轮/离线后 coordinator 移出 roster，netmap 收敛） |
 | 直连端点失效 | **数据面 keepalive**（帧头 `type=心跳`：节点对之间周期活性探测，建议 5s；连续 N 次（建议 3 次）无响应判定失效 → 回退中继路径）。与控制面心跳（节点↔coordinator 租约，CONTROL_PLANE §3.4）是两套机制 |
 | 节点端点变化 | 上报 coordinator → netmap 全量 → 全网转发表更新 |
-| 自愿 relay 下线 | relay 列表更新（netmap 变更），挂靠节点切换 |
+| 自愿 relay 下线 | 离线/RTT miss 迟滞退出 roster（netmap bump），挂靠节点切换；roster 收窄撤销其中继路径并推送全参与者（REQ-062） |
 
 ## 7. 与既有文档的关系
 
 - **FRAME_HEADER.md**：零改动——probe 是独立小包；中继转发语义已内含 §4
-- **CONTROL_PLANE.md**：§3.2 微更新——`endpoints[]` 上报机制 + relay 列表下发
+- **CONTROL_PLANE.md**：§3.2 微更新——`endpoints[]` 上报机制（本地/回显分列，§3.4）+ relay_roster 下发
 
 ## 8. 决策记录
 

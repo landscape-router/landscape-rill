@@ -84,7 +84,7 @@ message NetmapEntry {
 message NetmapPush {
   uint64 version = 1;           // 权威版本号（CAS 语义；同时承载 ACL 策略版本）
   repeated NetmapEntry entries = 2;
-  repeated string relay_list = 3;  // 候选中继（CONNECTIVITY §5）
+  repeated fixed32 relay_roster = 3;  // 激活中继有序名单（REQ-062：node_id 序 = 挂靠优先级；端点查条目）
   AclPolicy acl = 4;            // 网络级 ACL 策略（REQ-045；缺省 = 未启用，v1 全放行）
   repeated string replica_endpoints = 5;  // raft 成员端点（§3.16 审计目标；单机 = 空）
 }
@@ -171,9 +171,12 @@ message ChallengeAck {
   bytes tag = 2;                // HMAC（32B）：HKDF-SHA256(X25519(静态私钥, eph_pub), salt=nonce, info="challenge")
 }
 
-// §3.2 端点上报（数据面 UDP 地址；注册后/地址变化时上报，随心跳周期广播进 netmap）
+// §3.2 端点上报（数据面 UDP 地址；注册后/地址变化时上报，随心跳周期广播进 netmap）。
+// 分列上报（REQ-062）：本地接口地址（公网准入判定基准）与 echo 回显 seen 地址
+// （coordinator 视角观察值）——seen ∈ 本地 = 直连公网，否则 NAT 后（relay 准入排除）
 message EndpointReport {
-  repeated string endpoints = 1;  // "ip:port"
+  repeated string endpoints = 1;  // 本地接口 "ip:port"
+  repeated string seen = 2;       // echo 回显地址 "ip:port"（可空）
 }
 
 // §3.11 路径服务（v1.5 控制面引入 / v2 数据面生效，REQ-034）

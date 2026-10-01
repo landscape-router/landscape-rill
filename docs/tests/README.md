@@ -35,7 +35,7 @@
 | 域 | 文件 | 场景 ID |
 |---|---|---|
 | mesh 帧头/握手/广播 | [mesh/frame.md](./mesh/frame.md) | `FRM-01` ~ `FRM-11` |
-| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-23` |
+| mesh 控制面 | [mesh/control-plane.md](./mesh/control-plane.md) | `CTL-01` ~ `CTL-25` |
 | mesh 连通性 | [mesh/connectivity.md](./mesh/connectivity.md) | `CON-01` ~ `CON-10` |
 | ts2021 接入 | [legs/ts2021.md](./legs/ts2021.md) | `TSL-01` ~ `TSL-11` |
 | dn42 接入 | [legs/dn42.md](./legs/dn42.md) | `DNL-01` ~ `DNL-07` |
@@ -111,7 +111,7 @@
 | REQ-054 | CON-11 | 已覆盖 | rill-mesh/src/data/、rill-node/src/runtime/、e2e/run_e2e.sh（MESH_E2E_TRANSPORT=tcp） |
 | REQ-055 | — | 📌 proposed（无验收场景） | — |
 | REQ-061 | — | 📌 proposed（无验收场景） | — |
-| REQ-062 | — | 📌 proposed（无验收场景） | — |
+| REQ-062 | CTL-25 | 待补充（单测 + e2e 本地绿，CI 后置已覆盖） | rill-coord/src/coordinator/、rill-coord/src/path_service.rs、rill-coord/src/directory.rs、rilld/src/coord_run.rs、e2e/scenarios/relay.sh、e2e/scenarios/probe.sh |
 | REQ-063 | — | 📌 proposed（无验收场景） | — |
 | REQ-064 | — | 📌 proposed（无验收场景） | — |
 | REQ-065 | — | 📌 proposed（无验收场景） | — |

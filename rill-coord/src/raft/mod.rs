@@ -71,12 +71,22 @@ pub enum CoordCommand {
     },
     SetEndpoints {
         node_id: u32,
-        endpoints: Vec<String>,
+        /// 本地接口地址（公网准入判定基准，REQ-062）
+        local: Vec<String>,
+        /// echo 回显地址（coordinator 视角观察值）
+        seen: Vec<String>,
     },
     RequestPaths {
         source: u32,
         dest: u32,
         max: u32,
+        now: u64,
+    },
+    /// relay roster 落位（REQ-062）：leader 视角提案（liveness/RTT/准入输入），
+    /// apply 侧确定性执行（集合替换 + 收窄撤销 + 集合变化才 bump netmap）
+    SetRelayRoster {
+        network_id: u32,
+        roster: Vec<u32>,
         now: u64,
     },
     RotateMasterKey {
@@ -99,6 +109,8 @@ pub enum CoordCommandResult {
     Revoke(bool),
     SetEndpoints,
     RequestPaths(Vec<(PathCandidate, [u8; KEY_DST_LEN])>),
+    /// 集合（无序）是否变化（netmap bump 已在 apply 内完成）
+    SetRelayRoster(bool),
     RotateMasterKey,
     FlushRevokeRotations(bool),
 }
