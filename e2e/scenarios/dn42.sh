@@ -485,9 +485,62 @@ wait_log_node() { # $1=容器 $2=模式 $3=快照 $4=超时秒
 dump_dual_evidence() { # DNL-16 失败现场取证（trap 清理容器前先抓关键日志）
   local c
   for c in mesh-coord mesh-node-a mesh-node-b mesh-node-c; do
-    echo "--- DUAL-EVIDENCE $c ---"
-    docker logs "$c" 2>&1 | grep -E "route map|route sync|gated|172\.20\.201|handshake|no route for|endpoint report" | tail -20 || true
+    echo "--- DUAL-EVIDENCE $c (/24 与 BGP 生命周期，排除 peer-r2/relayed 噪声) ---"
+    docker logs "$c" 2>&1 | grep -E "route map|route sync|gated|172\.20\.201|dn42 session|dn42 learned|no route for|dropped frame|frame dropped|transit|relay|acl denied" \
+      | grep -vE "peer-r2|relayed frame" | tail -25 || true
   done
+  echo "--- mesh 会话生命周期（a 与 b：建立/心跳超时拆除，INFO） ---"
+  for c in mesh-node-a mesh-node-b; do
+    echo "[$c]"; docker logs "$c" 2>&1 | grep -E "session established with|heartbeat misses" | tail -12 || true
+  done
+  echo "--- node-a peer-r 会话生命周期（原始行 + 时间戳） ---"
+  docker logs mesh-node-a 2>&1 | grep "dn42 session" | grep -v "peer-r2" | tail -15 || true
+  echo "--- node-a peer-r2 循环计数（背景噪声规模） ---"
+  docker logs mesh-node-a 2>&1 | grep -c "dn42 session established: peer-r2" || true
+  echo "--- /24 完整时间线（a/c：learned/withdrawn/route map/路由来源候选，不截断尾部） ---"
+  for c in mesh-node-a mesh-node-c; do
+    echo "[$c /24 timeline]"
+    docker logs "$c" 2>&1 | grep -E "dn42 learned 172\.20\.201|dn42 withdrawn 172\.20\.201|route map v|transit drop: no edge|no route for 172\.20\.201|transit mesh->dn42: 172\.20\.201" | tail -40 || true
+  done
+  echo "--- 失败现场活体探针（容器仍在；每条独立容忍失败） ---"
+  echo "[b->dn42 /24]"; docker exec mesh-node-b ping -c2 -W1 172.20.201.1 2>&1 | tail -2 || true
+  echo "[b->a mesh lan 10.42.0.1]"; docker exec mesh-node-b ping -c2 -W1 10.42.0.1 2>&1 | tail -2 || true
+  echo "[a->dn42 /24 本地腿]"; docker exec mesh-node-a ip route replace 172.20.201.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ping -c2 -W1 172.20.201.1 2>&1 | tail -2 || true
+  echo "[a->dn42 peer-r lan .100.100 对照]"; docker exec mesh-node-a ping -c2 -W1 172.20.100.100 2>&1 | tail -2 || true
+  echo "--- node-a 丢帧理由（mesh rx 裁决；计数 + 首尾） ---"
+  docker logs mesh-node-a 2>&1 | grep -c "dropped frame" || true
+  docker logs mesh-node-a 2>&1 | grep "dropped frame" | head -2 || true
+  docker logs mesh-node-a 2>&1 | grep "dropped frame" | tail -4 || true
+  docker logs mesh-node-a 2>&1 | grep -E "frame dropped|no session with" | tail -6 || true
+  echo "--- node-b 丢帧理由 + no route 计数 ---"
+  docker logs mesh-node-b 2>&1 | grep -cE "dropped frame|no route for" || true
+  docker logs mesh-node-b 2>&1 | grep -E "dropped frame|no route for" | tail -6 || true
+  echo "--- node-b 发送裁决（data frame 选路/端点，DEBUG） ---"
+  docker logs mesh-node-b 2>&1 | grep -E "data frame to|send to .* hop|frame from .* ingress" | tail -12 || true
+  docker logs mesh-node-b 2>&1 | grep -E "frame build failed|no endpoints" | tail -6 || true
+  echo "--- node-a 入站跳归属（b 的帧经谁到达，DEBUG） ---"
+  docker logs mesh-node-a 2>&1 | grep "frame from" | tail -8 || true
+  echo "--- 各节点 endpoint report 历史（目录端点来源仲裁） ---"
+  for c in mesh-node-a mesh-node-b mesh-node-c; do
+    echo "[$c]"; docker logs "$c" 2>&1 | grep "endpoint report" | tail -4 || true
+  done
+  echo "--- a 实际监听端口（/proc/net/udp 十六进制 local_address）vs b/c 发送目标 ---"
+  docker exec mesh-node-a sh -c "cat /proc/net/udp" 2>/dev/null || true
+  echo "[b 的发送目标统计]"; docker logs mesh-node-b 2>&1 | grep -oE "send to [0-9]+ hop [0-9]+ via [0-9.:]+" | sort | uniq -c | sort -rn | head -6 || true
+  echo "[c 的发送目标统计]"; docker logs mesh-node-c 2>&1 | grep -oE "send to [0-9]+ hop [0-9]+ via [0-9.:]+" | sort | uniq -c | sort -rn | head -6 || true
+  echo "--- UDP canary：b 向最近发送目标发裸包，a 是否见 UnknownProtocol ---"
+  LAST_ADDR=$(docker logs mesh-node-b 2>&1 | grep -oE "via [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+" | tail -1 | cut -d' ' -f2)
+  if [ -n "$LAST_ADDR" ]; then
+    docker exec mesh-node-b bash -c "echo hi > /dev/udp/${LAST_ADDR%%:*}/${LAST_ADDR##*:}" 2>/dev/null || true
+    sleep 1
+    docker logs mesh-node-a --since 3s 2>&1 | grep -E "dropped frame" | tail -3 || echo "(a 无任何收帧记录 → 端口死)"
+  fi
+  echo "--- DUAL-EVIDENCE peer-r (FRR) ---"
+  docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast summary" 2>/dev/null || true
+  docker exec mesh-dn42-peer vtysh -c "show bgp ipv4 unicast neighbor 172.20.100.1 advertised-routes" 2>/dev/null | grep -E "172\.20\.201|Total" | tail -3 || true
+  echo "--- peer-r bgpd 会话复位原因 ---"
+  docker logs mesh-dn42-peer 2>&1 | grep -iE "%NOTIFICATION|hold timer|reset|cease|closing" | tail -12 || true
 }
 
 echo "==> DNL-16a: 双 ext 拓扑上线（node-c + peer-r3）"
@@ -628,6 +681,12 @@ RELEARN=1
 wait_log_node mesh-node-a "dn42 learned 172.20.201.0/24" "$A_LEARN2" 30 || RELEARN=0
 DAMPED=1
 wait_log_node mesh-coord "route sync gated" "$GATED" 30 || DAMPED=0
+# 死 ext 退出 mesh：DN42_LEG v0.4 ④——BGP 断而节点在线期间聚合公告仍在、流量死在
+# ext 本地（best-effort）；多 ext 等权聚合的 via 裁决是任意序（v0.6：best-path 留给
+# 消费端）。peer-r3 已死的 node-c 若留在 mesh，/14 聚合是 a/c 双公告，node-b 兜底
+# 落点是掷硬币（~50% 落死 ext 黑洞）。c 停机 → netmap 离线撤销其聚合（CTL-11），
+# /14 唯一指向 node-a，聚合兜底回归才是确定性的
+docker stop mesh-node-c >/dev/null
 # 阻尼期 RouteMap 不含该前缀 → node-b 走聚合兜底 → node-a 本地 BGP 路由承载
 FALLBACK=0
 for i in $(seq 1 45); do

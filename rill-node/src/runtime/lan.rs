@@ -183,6 +183,11 @@ impl Node {
     /// 未命中 → false，调用方写 TUN（本地投递/WAN 出口）
     pub(super) async fn forward_transit(&mut self, packet: &[u8], from: TransitFrom) -> bool {
         let Ok(info) = parse_packet(packet) else {
+            debug!(
+                "[node] transit drop: parse failed ({}B from {})",
+                packet.len(),
+                from.tag()
+            );
             return false;
         };
         // 组播/广播维持既有语义（mesh 广播帧写 TUN 由内核泛洪；dn42/ts2021 侧不 transit 组播）
@@ -201,13 +206,19 @@ impl Node {
                 RouteVia::Direct(_) => false,
             };
             let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
+                debug!(
+                    "[node] transit drop: no route for {} (from {})",
+                    info.dst,
+                    from.tag()
+                );
                 return false;
             };
             (entry.via.clone(), info.dst)
         };
-        match (via, from) {
+        match (&via, from) {
             (RouteVia::Dn42(name), TransitFrom::Mesh | TransitFrom::Tailnet) => {
-                let Some(leg) = self.dn42_peers.iter().find(|l| l.name == name) else {
+                let Some(leg) = self.dn42_peers.iter().find(|l| &l.name == name) else {
+                    debug!("[node] transit drop: dn42 leg missing: {}", name);
                     return false;
                 };
                 if leg.send(packet).await {
@@ -219,10 +230,12 @@ impl Node {
                     );
                     true
                 } else {
+                    debug!("[node] transit drop: dn42 send failed: {}", leg.name);
                     false
                 }
             }
             (RouteVia::Mesh(peer), TransitFrom::Dn42 | TransitFrom::Tailnet) => {
+                let peer = *peer;
                 if !self.mesh.has_session(peer) {
                     debug!(
                         "[node] transit {}->mesh: {} no session with {}",
@@ -281,7 +294,23 @@ impl Node {
             // dn42 → tailnet 不在 v1 边集（dn42 侧可达 tailnet 经 mesh 中转）
             (RouteVia::Tailnet(_), TransitFrom::Dn42) => false,
             // 同腿进出（mesh→mesh / dn42→dn42）不存在于边集；Local 出口走 TUN
-            _ => false,
+            _ => {
+                let cands: Vec<(u8, std::string::String)> = self
+                    .engine
+                    .table()
+                    .matches(&dst)
+                    .into_iter()
+                    .map(|e| (e.source.priority(), format!("{:?}", e.via)))
+                    .collect();
+                debug!(
+                    "[node] transit drop: no edge via {:?} ({}->) dst {} candidates {:?}",
+                    via,
+                    from.tag(),
+                    dst,
+                    cands
+                );
+                false
+            }
         }
     }
 
