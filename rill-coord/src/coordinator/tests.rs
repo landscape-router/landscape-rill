@@ -1370,3 +1370,57 @@ fn revoke_withdraws_route_map_entries() {
     let (_, entries) = c.take_route_map_push(consumer).unwrap();
     assert!(entries.is_empty());
 }
+
+// ==================== mesh exit 准入（REQ-071，ROUTE_ENGINE §5） ====================
+
+#[test]
+fn exit_requires_capability_and_allow() {
+    // fail-closed：能力位无授权 / 授权无能力位 → 均非出口；交集才标记
+    let (mut c, ak) = setup();
+    let cap_node = register_node_caps(&mut c, &ak, 1, CAPABILITY_EXIT);
+    let plain_node = register_node_caps(&mut c, &ak, 2, 0);
+    // 未配置 allow：无人可为出口
+    let nid = c.network_id_of(cap_node).unwrap();
+    assert!(c.netmap_snapshot(nid).iter().all(|e| !e.exit));
+    // 授权两者：仅能力位持有者生效
+    c.set_exit_allow("lab", vec![cap_node, plain_node]);
+    let snap = c.netmap_snapshot(nid);
+    assert!(snap.iter().find(|e| e.node_id == cap_node).unwrap().exit);
+    assert!(!snap.iter().find(|e| e.node_id == plain_node).unwrap().exit);
+    // 撤销授权 → 标记消失
+    c.set_exit_allow("lab", vec![]);
+    assert!(c.netmap_snapshot(nid).iter().all(|e| !e.exit));
+}
+
+#[test]
+fn exit_allow_change_bumps_netmap_only_on_effective_change() {
+    // 生效集（能力位 ∩ 授权集）变化才 bump——纯 allow 增删无效 id 不打扰全网
+    let (mut c, ak) = setup();
+    let cap_node = register_node_caps(&mut c, &ak, 1, CAPABILITY_EXIT);
+    let plain_node = register_node_caps(&mut c, &ak, 2, 0);
+    let v0 = c.netmap_version();
+    // 无效果变更（授权无能力位节点）：不 bump
+    c.set_exit_allow("lab", vec![plain_node]);
+    assert_eq!(c.netmap_version(), v0);
+    // 生效变更：bump
+    c.set_exit_allow("lab", vec![cap_node]);
+    assert_eq!(c.netmap_version(), v0 + 1);
+    // 再应用同集：幂等不 bump
+    c.set_exit_allow("lab", vec![cap_node]);
+    assert_eq!(c.netmap_version(), v0 + 1);
+    // 撤销：bump
+    c.set_exit_allow("lab", vec![]);
+    assert_eq!(c.netmap_version(), v0 + 2);
+}
+
+#[test]
+fn exit_capability_node_late_allow_applies() {
+    // 先授权后注册（NewNode bump 即携带标记）：顺序不敏感
+    // （全新 coordinator 首个注册 = node_id 1，授权预先指向它）
+    let (mut c, ak) = setup();
+    c.set_exit_allow("lab", vec![1]);
+    let cap_node = register_node_caps(&mut c, &ak, 1, CAPABILITY_EXIT);
+    assert_eq!(cap_node, 1);
+    let nid = c.network_id_of(cap_node).unwrap();
+    assert!(c.netmap_snapshot(nid)[0].exit);
+}

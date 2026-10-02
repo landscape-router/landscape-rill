@@ -81,6 +81,7 @@ message NetmapEntry {
   bytes identity_binding = 9;   // 该节点身份绑定（§6 binding v2，随注册表下发；节点间握手交叉验证用）
   fixed64 raft_log_index = 10;  // 签发日志锚点（REQ-049②）
   fixed64 raft_term = 11;
+  bool exit = 12;               // mesh 出口授权标记（REQ-071，ROUTE_ENGINE §5：capability ∧ exits.allow，coordinator 权威）
 }
 
 message NetmapPush {

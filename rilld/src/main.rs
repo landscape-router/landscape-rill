@@ -137,6 +137,9 @@ struct FileConfig {
     static_key_seed: Option<[u8; 32]>,
     #[serde(default)]
     capabilities: u32,
+    /// 默认路由偏好序（ROUTE_ENGINE §8 v1，REQ-071）："tailnet"/"mesh" 子集
+    #[serde(default)]
+    default_route_preference: Vec<String>,
     #[serde(default)]
     announce_routes: Vec<String>,
     #[serde(default, with = "hex32_opt")]

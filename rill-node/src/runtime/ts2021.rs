@@ -486,11 +486,19 @@ impl Node {
                         self.engine.remove_tailnet_peer(id);
                     }
                 }
+                // tailnet exit 候选（REQ-071，ROUTE_ENGINE §5/§8）：对端 0/0 广播方
+                // = "把对端当 exit"的方向——不进 LPM，喂默认路由解析器
+                let exit_peers: Vec<String> = peers
+                    .iter()
+                    .filter(|p| p.allowed_ips.iter().any(|c| c.ends_with("/0")))
+                    .map(|p| p.id.clone())
+                    .collect();
+                self.default_route.set_tailnet_exits(exit_peers);
                 for p in &peers {
                     self.engine.remove_tailnet_peer(&p.id);
                     for cidr in &p.allowed_ips {
                         // 默认路由（exit 方向）不进 LPM：那是"把对端当 exit"，
-                        // 不是"经对端可达此前缀"
+                        // 不是"经对端可达此前缀"（exit 语义见 default_route 解析器）
                         if cidr.ends_with("/0") {
                             continue;
                         }

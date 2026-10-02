@@ -43,11 +43,11 @@ impl Node {
             let peers = self.mesh.flood(packet).await;
             return LanOutcome::Flooded { peers };
         }
-        let (via, _prefix) = {
+        let via = {
             // 可达性谓词：mesh 会话存在即可达；dn42 peer 以 BGP 会话建立为准（DN42_LEG §5）；
             // tailnet peer 在表即可达（WG 封装懒握手，无需预建会话）
             let dn42_up = &self.dn42_peers;
-            let reachable = |e: &RouteEntry| match &e.via {
+            let reachable = |via: &RouteVia| match via {
                 RouteVia::Mesh(_) => true,
                 RouteVia::Dn42(name) => dn42_up
                     .iter()
@@ -56,11 +56,20 @@ impl Node {
                 RouteVia::Tailnet(id) => self.ts2021.as_ref().is_some_and(|l| l.has_peer(id)),
                 RouteVia::Direct(_) => false,
             };
-            let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
-                warn!("[node] no route for {}", info.dst);
-                return LanOutcome::Dropped;
-            };
-            (entry.via.clone(), entry.prefix)
+            let entry = self.engine.lookup_best(&info.dst, &|e| reachable(&e.via));
+            match entry {
+                Some(e) => e.via.clone(),
+                // LPM 未命中 → 默认路由链（exit 语义，ROUTE_ENGINE §5/§8，REQ-071；
+                // /0 不入 LPM）：偏好序内取首个可达 exit；None = WAN 兜底（§4 链
+                // 末位）——land0 无 WAN 路由即丢弃
+                None => match self.default_route.resolve(&reachable) {
+                    Some(v) => v,
+                    None => {
+                        warn!("[node] no route for {}", info.dst);
+                        return LanOutcome::Dropped;
+                    }
+                },
+            }
         };
         match via {
             RouteVia::Mesh(peer) => {

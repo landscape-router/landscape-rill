@@ -246,6 +246,7 @@ mod tests {
             coord: None,
             dn42: None,
             ts2021: None,
+            default_route_preference: Vec::new(),
         };
         let mut node = Node::new(cfg, NodeOptions::default()).await.unwrap();
         let (out_tx, _out_rx) = mpsc::channel(64);

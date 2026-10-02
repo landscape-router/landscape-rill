@@ -1,0 +1,111 @@
+# mesh e2e 拓扑：exit_wan（E2E-05 mesh 出口，REQ-071）——node-c 携 exit 能力位
+# 接入第二张 "inet" 网充当 WAN 出口（192.168.247.0/24，inet 主机 .100）；
+# node-b default_route_preference=["mesh"] 借道 c 访问 inet。
+# 准入链：能力位（注册声明）∧ coord exits.allow（SIGHUP 运行时授权）→ netmap exit 标记
+# 网段：mesh = 192.168.240.0/24（mesh e2e 专用段）；inet = 192.168.247.0/24（ts2021 段之后）
+# 出口转发：node-c 内核 ip_forward + land0↔eth1（ privileged 同节点服务；回程路由 setup 注入）
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    command: ["--log-level", "debug"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  # 出口使用方：LPM miss → 默认路由解析器 → mesh exit（node-c）
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    command: ["--log-level", "debug"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+  # 出口节点：mesh + inet 双挂；内核转发 land0↔eth_inet（v4/v6 forwarding）
+  node-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-c
+    command: ["--log-level", "debug"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-c.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.31
+      inet:
+        ipv4_address: 192.168.247.31
+        ipv6_address: fd00:247::31
+
+  # WAN 侧主机（"互联网"）：base 镜像纯网络角色（ping 目标 + 回程路由注入点）
+  inet:
+    image: mesh-e2e-base
+    container_name: mesh-inet
+    entrypoint: ["sleep", "infinity"]
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    networks:
+      inet:
+        ipv4_address: 192.168.247.100
+        ipv6_address: fd00:247::100
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24
+  # enable_ipv6 + v6 ipam：docker 原生启用接口 v6（绕开 v4-only 网络逐口
+  # disable_ipv6=1 的注入难题），inet 主机 v6 = fd00:247::100
+  inet:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 192.168.247.0/24
+        - subnet: fd00:247::/64

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use landscape_rill_core::route::ExitSource;
+
 pub const DEFAULT_COORD_PORT: u16 = 8443;
 pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_LEASE_THRESHOLD: Duration = Duration::from_secs(60);
@@ -44,6 +46,10 @@ pub struct Config {
     pub coord: Option<CoordConfig>,
     /// dn42 接入（DN42_LEG）：None = 未启用
     pub dn42: Option<Dn42Config>,
+    /// 默认路由偏好序（ROUTE_ENGINE §8 v1，REQ-071）：LPM 未命中后的 exit
+    /// 来源次序（"tailnet"/"mesh"）；空 = 不启用任何 exit（纯 WAN 兜底）。
+    /// WAN 恒为隐式末位，不入此列
+    pub default_route_preference: Vec<ExitSource>,
     /// ts2021 接入（TS2021_LEG §3.3.2，runtime 内建会话模块）：None = 未启用
     pub ts2021: Option<Ts2021Config>,
 }
@@ -89,6 +95,13 @@ pub use error::ConfigError;
 
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // 默认路由偏好序（REQ-071）：无重复（空 = 不启用 exit，合法）
+        {
+            let prefs = &self.default_route_preference;
+            if prefs.len() != prefs.iter().collect::<std::collections::HashSet<_>>().len() {
+                return Err(ConfigError::DefaultRoutePreferenceDuplicate);
+            }
+        }
         if self.coordinator_url.is_empty() {
             return Err(ConfigError::EmptyCoordinatorUrl);
         }
@@ -240,6 +253,7 @@ mod tests {
             coord: None,
             dn42: None,
             ts2021: None,
+            default_route_preference: vec![],
         }
     }
 

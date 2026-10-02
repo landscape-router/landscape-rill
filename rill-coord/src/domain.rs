@@ -7,7 +7,7 @@ use crate::config::RelayRosterConfig;
 use landscape_rill_core::control::acl::AclPolicy;
 use landscape_rill_core::control::registry::Registry;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::keys::KeyManager;
 use crate::path_service::PathService;
@@ -50,6 +50,9 @@ pub struct NetworkDomain {
     pub roster: Vec<u32>,
     /// roster 硬约束（配置权威，REQ-062 模式 C；SIGHUP 经 set_relay_constraints 落位）
     pub relay_cfg: RelayRosterConfig,
+    /// mesh 出口授权集（REQ-071，ROUTE_ENGINE §5；配置权威，SIGHUP 经
+    /// set_exit_allow 落位；生效出口 = 注册能力位 ∩ 此集，netmap 条目 exit 标记）
+    pub exit_allow: HashSet<u32>,
     /// 最近一轮 RTT（毫秒；leader 视角软状态，不落盘——roster 提案输入）
     pub relay_rtt: HashMap<u32, u64>,
     /// 连续 RTT 探测 miss 轮数（退出滞回计数）
@@ -74,6 +77,7 @@ impl NetworkDomain {
             paths: PathService::new(),
             roster: Vec::new(),
             relay_cfg: RelayRosterConfig::default(),
+            exit_allow: HashSet::new(),
             relay_rtt: HashMap::new(),
             relay_miss: HashMap::new(),
             acl: AclPolicy::default(),

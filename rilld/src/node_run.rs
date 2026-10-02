@@ -4,6 +4,7 @@ use crate::coord_run::run_coord;
 use crate::{unix_now, BoxResult, FileConfig};
 use landscape_rill_coord::authkey::{is_expired, parse_auth_key};
 use landscape_rill_core::error::format_chain;
+use landscape_rill_core::route::ExitSource;
 use landscape_rill_node::config::{
     Config, DataTransport, Dn42Config, Dn42PeerConfig, Ts2021Config,
 };
@@ -174,6 +175,20 @@ pub(crate) fn run_daemon(
             coord: None,
             dn42: file.dn42.as_ref().map(dn42_config_from_file).transpose()?,
             ts2021: file.ts2021.as_ref().map(ts2021_config_from_file),
+            default_route_preference: file
+                .default_route_preference
+                .iter()
+                .map(|s| {
+                    ExitSource::parse(s).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "default_route_preference: unknown source \"{s}\" (tailnet|mesh)"
+                            ),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         };
         config.validate().map_err(|e| {
             std::io::Error::new(

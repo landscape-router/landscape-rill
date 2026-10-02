@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use landscape_rill_coord::coordinator::CAPABILITY_BROADCAST;
+use landscape_rill_core::control::CAPABILITY_BROADCAST;
 use landscape_rill_core::frame::{
     build_frame, build_handshake_frame, decrement_ttl, frame_payload, open_frame_in_place,
     packet_type, MeshFrameHeader, ReplayWindow, BROADCAST_NODE_ID, HEADER_LEN, PATH_ID_DEFAULT,

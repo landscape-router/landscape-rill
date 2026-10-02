@@ -26,6 +26,10 @@
 #            coord 无操作；node-a 停机 + 持续伪造心跳 → 租约照常过期（ping 断）
 #   dual_edge：双边缘冗余（E2E-06）——node-a/c 同前缀同 IP 双公告（active-backup）：
 #            ingress 归属判定活跃边缘 → 停机 → 租约过期撤销 → 引擎切 standby 收敛
+#   exit_wan：mesh 出口（E2E-05，REQ-071）——node-c（exit 能力位 0x08）双挂 inet 网，
+#            node-b default_route_preference=["mesh"] 借道出口：准入 fail-closed
+#            （能力位 ∧ exits.allow）→ SIGHUP 运行时授权 → 双栈借道转发（c ingress
+#            证据）→ 出口停机租约过期 → 无候选回退丢弃
 #   status：只读状态端点（REQ-051/052，CONTROL_PLANE §3.14/§3.15）——direct 拓扑 +
 #            coord status 段；认证（401/429/明文拒绝）、内容组齐全（含 REQ-052
 #            build_version）、遥测聚合（per-peer 计数 + 直连对 RTT）、SIGHUP 密码

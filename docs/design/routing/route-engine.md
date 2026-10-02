@@ -1,7 +1,7 @@
 # 路由策略引擎（ROUTE_ENGINE）
 
 > landscape-rill 的转发决策核心：单 TUN 汇合点，统一裁决流量走哪条接入。
-> 版本：v0.7（2026-10-01 修订：§3/§6.3 来源优先级链插入 dyn-dn42（REQ-065 RouteMap 派生路由）：LAN > mesh > dn42 > dyn-dn42 > tailnet——本地 BGP 学习与静态 mesh 公告均压动态路由，动态又压 tailnet；v0.5 为 §6.3 MTU 实现级决定落档）｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023 / REQ-065
+> 版本：v0.8（2026-10-02 修订：§5.1 默认路由解析定稿（REQ-071）——mesh exit 准入链（能力位 0x08 ∧ exits.allow）+ 节点偏好序 `default_route_preference` + 无环不变量，§4 默认路由链与 §8 未决项同步收敛；v0.7 为 §3/§6.3 来源优先级链插入 dyn-dn42（REQ-065））｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023 / REQ-065 / REQ-071
 
 ## 1. 定位
 
@@ -62,8 +62,8 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
   最后：丢弃
 
 例：默认路由（互联网）
-  首选：tailnet exit node（如配置）
-  次选：WAN 直连（NAT 兜底）
+  偏好序内逐来源取首个可达 exit（tailnet / mesh，§5.1）
+  链末位：WAN 直连（隐式兜底，不可配置；land0 无 WAN 路由即丢弃）
 ```
 
 - 触发条件：接入会话断开、BGP 会话断、netmap 移除、超时
@@ -79,6 +79,18 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 | ts2021 exit（使用） | 非本网流量封装发往 tailnet exit peer | 出口侧承担 |
 | ts2021 exit（被用作） | 解包 → 引擎 → tun0 → WAN | WAN NAT |
 | WAN 直连 | 目标非管理 LAN → 出 WAN | 网卡/上游 NAT |
+
+### 5.1 默认路由解析（REQ-071 定稿，2026-10-02）
+
+LPM miss（`/0` 不入 LPM，§5 前缀公告边界）→ **DefaultRouteResolver**（`rill-core/src/route/default.rs`，I/O-free 纯函数，候选/可达谓词由运行时喂入）：
+
+- **候选来源**：
+  - **mesh exit**：netmap 条目 `exit=true ∧ 在线 ∧ ≠self`（coordinator 权威标记，准入链见下）——候选随 netmap 原子更新（离线条目即出候选集，与 §4 触发条件一致）
+  - **tailnet exit**：ts2021 netmap 中 `allowed_ips` 含 `/0` 的 peer（对端 0/0 广播 = "把对端当 exit"的方向；不进 LPM，喂本解析器）
+  - **WAN**：隐式链末位（land0 无 WAN 路由即丢弃），不可配置、不入偏好表
+- **偏好序**：节点配置 `default_route_preference: ["tailnet","mesh"]`（默认空 = 不启用 exit，行为不变；重复项配置校验拒绝）。序内取**首个有可达候选**的来源，来源耗尽顺延下一来源；同源多 exit v1 单活（首个可达），负载分担挂 v2
+- **无环不变量**：自身是 exit（self_exit，netmap 本节点 exit 标记）时**跳过 mesh 来源**——exit 节点不得把默认流量再转给另一 exit（两出口互指 = 环）；tailnet 来源不受影响（被用作 ts2021 exit 的节点经 WG 出 tailnet，不回 mesh）
+- **mesh exit 准入链（候选资格，coordinator 权威）**：`能力位 exit（0x08，注册声明）∧ 网络 exits.allow 授权集` → netmap `exit` 标记（CONTROL_PLANE §3.3/§3.12）——与 relay roster 同族语义（能力位只是必要条件，coordinator 准入裁决）；**fail-closed**（allow 缺省/空 = 全拒，能力位不构成授权）；生效集（能力位 ∩ allow）变化才 bump netmap——纯 allow 增删无能力位对端不扰动网络
 
 ## 6. MTU / 分片 / PMTU（v1 定稿）
 
@@ -123,11 +135,7 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 
 ## 8. 未决项
 
-- mesh exit 与 ts2021 exit 的默认路由竞争优先级——v1 静态配置
-
-（冲突消解已定稿：固定优先级 `LAN > mesh > dyn-dn42 > dn42 > tailnet`，见 §3）
-
-（tailnet 路由传播已定稿：rill ext 节点公告 tailnet 前缀进 mesh，见 §3 回程）
+（无——原两项已全部定稿：默认路由竞争优先级 = 节点偏好序 `default_route_preference` + WAN 隐式链末（§5.1，REQ-071，2026-10-02）；冲突消解 = 固定优先级 `LAN > mesh > dyn-dn42 > dn42 > tailnet`（§3，REQ-021/065））
 
 ## 9. 实现级决定（2026-08-15，core/route 落档，47 单测）
 

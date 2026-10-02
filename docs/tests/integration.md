@@ -37,12 +37,11 @@
 
 ## E2E-05 rill 节点 → 互联网（mesh exit）
 
-- 关联 REQ：REQ-005 / REQ-012
+- 关联 REQ：REQ-005 / REQ-012 / REQ-071
 - 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：mesh exit WAN 透传路径未实现（/0 不入前缀公告，走 exit 语义；ROUTE_ENGINE §5）
-- 说明：经 mesh 出口节点透传 → WAN NAT（透传不 NAT，回程经 WAN NAT 映射）
+- 状态：`已覆盖`（2026-10-02）
+- 证据：e2e/scenarios/exit_wan.sh
+- 说明：node-c（能力位 0x08 纯 exit）双挂 inet 网充当 WAN 出口（192.168.247.0/24，inet 主机 .100，内核 land0↔eth_inet 转发 + 显式回程路由无 SNAT）；node-b `default_route_preference=["mesh"]` 三阶段：①准入 fail-closed（能力位声明而 exits.allow 空 → 引擎 no route 丢弃，非内核无路由）②SIGHUP 运行时授权（从 c 注册日志解析 node_id 重写 coord.json——注册顺序竞态下确定性授权）→ netmap exit 标记（版本 bump）→ 双栈借道（c ingress 计数增长 = 转发证据）③出口停机 → 租约过期（netmap 版本再 bump）→ 解析器候选清空 → 双栈回退丢弃（链末位语义）
 
 ## E2E-06 多rill ext 节点冗余
 
@@ -75,7 +74,7 @@
 - [x] E2E-02：手机 → 互联网回程对称（docker 网段替身，TSL-06/07）
 - [x] E2E-03：手机 → dn42 前缀可达（ts2021_dn42 组合场景：BGP 学习 + 转发边 + 回程桥接）
 - [x] E2E-04：rill 节点 → dn42 + 断链 fallback（DNL-14/16）
-- [ ] E2E-05：mesh exit 透传 + WAN NAT 回程（mesh exit WAN 未实现）
+- [x] E2E-05：mesh exit 透传 + 回程（fail-closed 准入 → 授权双栈借道 → 停机回退丢弃，exit_wan/REQ-071）
 - [x] E2E-06：双边缘冗余切换（dual_edge：租约过期撤销 + 引擎切 standby 收敛）
 - [ ] E2E-07：exit 竞争按优先级裁决、无环路（依赖 mesh exit）
 - [x] E2E-08：全链路大包双向通（mesh 段 MSS clamp/PTB + tailnet 段 DF@tailscale0 上限整包）

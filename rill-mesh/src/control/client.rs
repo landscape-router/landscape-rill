@@ -156,6 +156,8 @@ pub struct NetmapNode {
     /// 身份绑定 + 签发锚点（REQ-049②）：对 netmap 条目交叉审计的输入
     pub identity_binding: Vec<u8>,
     pub binding_log_id: (u64, u64),
+    /// mesh 出口授权标记（REQ-071，ROUTE_ENGINE §5）：默认路由 exit 候选依据
+    pub exit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,6 +410,7 @@ impl ControlSession {
                             offline: e.offline,
                             identity_binding: e.identity_binding.to_vec(),
                             binding_log_id: (e.raft_log_index, e.raft_term),
+                            exit: e.exit,
                         }
                     })
                     .collect();

@@ -64,7 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu, acl, status, ha, frame_attacks, coord_attacks, dual_edge]
+        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu, acl, status, ha, frame_attacks, coord_attacks, dual_edge, exit_wan]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

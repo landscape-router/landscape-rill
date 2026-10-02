@@ -10,10 +10,6 @@ use crate::route::Prefix;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// 能力位：支持 ACL 策略裁决（CONTROL_PLANE §3.1；网络开启 ACL 后
-/// 无该位的节点注册被拒——防最弱环节绕过，fail-closed）
-pub const CAPABILITY_ACL: u32 = 0x40;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AclSubject {
     Any,

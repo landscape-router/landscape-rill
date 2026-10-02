@@ -52,6 +52,10 @@ elif [ "$SCENARIO" = "coord_attacks" ]; then
 elif [ "$SCENARIO" = "dual_edge" ]; then
   # 双边缘冗余（E2E-06）：node-a/node-c 同前缀同 IP 双公告，节点 debug 日志（ingress 归属）
   COMPOSE="docker compose -f $E2E_DIR/mesh/dual_edge/docker-compose.yaml"
+elif [ "$SCENARIO" = "exit_wan" ]; then
+  # mesh 出口（E2E-05，REQ-071）：direct 三件套 + node-c 双挂 inet 网充当 WAN 出口
+  #（192.168.247.0/24；inet 主机 .100；node-c 内核转发 land0↔eth_inet）
+  COMPOSE="docker compose -f $E2E_DIR/mesh/exit_wan/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
@@ -116,9 +120,10 @@ echo "==> 4/6 生成配置"
 NODE_A_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_B_AUTHKEY=$("$OVERLAY" authkey --network lab)
 NODE_C_AUTHKEY=$("$OVERLAY" authkey --network lab)
-gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认33=relay+broadcast，REQ-035) $8=coordinator_url(默认 https://coord:8443)
+gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=公告前缀数组(JSON) $6=auth_key $7=capabilities(默认33=relay+broadcast，REQ-035) $8=coordinator_url(默认 https://coord:8443) $9=默认路由偏好(JSON数组，默认[]，REQ-071)
   CAP="${7:-33}"
   CURL="${8:-https://coord:8443}"
+  PREF="${9:-[]}"
   # 数据面 underlay（REQ-054）：MESH_E2E_TRANSPORT=tcp 时节点走真 TCP 兜底档
   DT="${MESH_E2E_TRANSPORT:-udp}"
   cat > "$BUILD_DIR/$1" <<EOF
@@ -131,6 +136,7 @@ gen_node_config() {  # $1=文件 $2=节点密钥 $3=IPv4地址 $4=IPv6地址 $5=
   "coord_signing_pubkey": "$COORD_PUBKEY",
   "ca_cert_path": "/etc/landscape/ca.pem",
   "data_transport": "$DT",
+  "default_route_preference": $PREF,
   "tun": { "name": "land0", "mtu": 1420, "address4": "$3", "address6": "$4" }
 }
 EOF
@@ -425,6 +431,28 @@ fi
 if [ "$SCENARIO" = "dual_edge" ]; then
   # E2E-06：node-c = 第二边缘，与 node-a 同前缀同 tun IP（active-backup）
   gen_node_config node-c.json "$NODE_C_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_C_AUTHKEY"
+fi
+
+if [ "$SCENARIO" = "exit_wan" ]; then
+  # E2E-05（REQ-071）：node-c = 出口（能力位 0x08，纯 exit——证 relay/broadcast 非前提）；
+  # node-b 偏好仅 mesh，借道 c 访问 inet。准入初始 fail-closed：exits.allow 空，
+  # 场景阶段 2 从 c 的注册日志解析 node_id 后重写 coord.json + SIGHUP 授权
+  #（注册顺序竞态 → 运行时发现，确定性授权）
+  gen_node_config node-b.json "$NODE_B_KEY" "10.43.0.1/24" "fd00:3::1/64" \
+    '["10.43.0.0/24", "fd00:3::/64"]' "$NODE_B_AUTHKEY" 33 '' '["mesh"]'
+  gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" \
+    '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY" 8
+  python3 - "$BUILD_DIR/coord.json" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+for net in cfg["coord"]["networks"]:
+    if net["name"] == "lab":
+        net["exits"] = {"allow": []}
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
 fi
 
 if [ "$SCENARIO" = "persist" ]; then
@@ -846,6 +874,22 @@ elif [ "$SCENARIO" = "dual_edge" ]; then
   docker exec mesh-node-a ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
   docker exec mesh-node-b ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
   docker exec mesh-node-c ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
+elif [ "$SCENARIO" = "exit_wan" ]; then
+  # 出口转发（E2E-05）：b 的 inet 前缀路由必须指向 land0——内核默认路由会经宿主
+  # 网桥直达 inet 网（宿主持有 192.168.247.0/24 路由），绕过 mesh 使断言失真；
+  # node-c 内核 land0↔eth_inet 转发（compose sysctl 已开 forwarding），双栈回程 =
+  # c 与 inet 主机各注入 b 前缀路由（无 SNAT，显式回程）；inet 网 v6 由 compose
+  # 的 v6 ipam 原生分配（fd00:247::/64），无需容器内手工配址
+  docker exec mesh-node-a ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip route add 192.168.247.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip -6 route add fd00:247::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
+  docker exec mesh-inet ip route add 10.43.0.0/24 via 192.168.247.31 2>/dev/null || true
+  docker exec mesh-inet ip -6 route add fd00:3::/64 via fd00:247::31 2>/dev/null || true
 else
   docker exec mesh-node-a ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-b ip route add 10.42.0.0/24 dev land0 2>/dev/null || true

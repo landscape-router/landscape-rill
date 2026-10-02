@@ -19,6 +19,9 @@ use landscape_rill_core::control::acl::AclPolicy;
 use landscape_rill_core::control::registry::{
     AuthKeyPolicy, AuthKeySpec, NodeEntry, RegisterError, RegisterOutcome,
 };
+pub use landscape_rill_core::control::{
+    CAPABILITY_ACL, CAPABILITY_BROADCAST, CAPABILITY_EXIT, CAPABILITY_RELAY,
+};
 use landscape_rill_core::crypto::KEY_DST_LEN;
 use landscape_rill_core::error::format_chain;
 use landscape_rill_core::route::Prefix;
@@ -28,13 +31,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use tracing::{error, info, warn};
 
-/// 能力位：relay（自愿中继，CONNECTIVITY §5 / CONTROL_PLANE §3.1）
-pub const CAPABILITY_RELAY: u32 = 0x01;
-/// 能力位：broadcast（L2 广播/组播泛洪 opt-in，CONTROL_PLANE §3.1 / FRAME_HEADER §2.6）
-pub const CAPABILITY_BROADCAST: u32 = 0x20;
 /// 吊销合并轮换窗口（REQ-048，CONTROL_PLANE §5.5）：窗口内多次吊销共享一次全网轮换
 pub const REVOKE_ROTATION_WINDOW_SECS: u64 = 60;
-pub use landscape_rill_core::control::acl::CAPABILITY_ACL;
 
 fn unix_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -75,6 +73,8 @@ pub struct NodeInfo {
     /// 身份绑定签名 + 签发锚点（REQ-049②）：随 netmap 下发供交叉审计
     pub identity_binding: Vec<u8>,
     pub binding_log_id: (u64, u64),
+    /// mesh 出口授权标记（REQ-071，ROUTE_ENGINE §5）= capability ∧ exits.allow
+    pub exit: bool,
 }
 
 pub struct Coordinator {
@@ -694,6 +694,29 @@ impl Coordinator {
         }
     }
 
+    /// mesh 出口准入落位（REQ-071，ROUTE_ENGINE §5；SIGHUP/apply_to，配置权威）。
+    /// 生效集（能力位 ∩ 授权集）变化才 bump netmap——纯 allow 增删无效 id 不打扰全网
+    pub fn set_exit_allow(&mut self, network: &str, allow: Vec<u32>) {
+        let Some(domain) = self.domain_by_name_mut(network) else {
+            return;
+        };
+        let cap_exits: HashSet<u32> = domain
+            .registry
+            .entries()
+            .filter(|e| e.capabilities & CAPABILITY_EXIT != 0)
+            .map(|e| e.node_id)
+            .collect();
+        let new_allow: HashSet<u32> = allow.into_iter().collect();
+        let effective = |allow: &HashSet<u32>| -> std::collections::BTreeSet<u32> {
+            cap_exits.intersection(allow).copied().collect()
+        };
+        let changed = effective(&domain.exit_allow) != effective(&new_allow);
+        domain.exit_allow = new_allow;
+        if changed {
+            self.directory.bump_netmap();
+        }
+    }
+
     /// 最近一轮 RTT 结果（leader 视角软状态，不落盘）：Some = 命中（miss 清零），
     /// None = 未响应（miss+1，进入退出滞回计数）。只喂提案输入，不改 roster
     pub fn record_relay_rtt_round(&mut self, network_id: u32, results: &[(u32, Option<u64>)]) {
@@ -826,19 +849,23 @@ impl Coordinator {
         self.domains
             .iter()
             .filter(|d| d.network_id == network_id)
-            .flat_map(|d| d.registry.entries())
-            .map(|e: &NodeEntry| NodeInfo {
-                node_id: e.node_id,
-                network_id: e.network_id,
-                static_pubkey: e.static_pubkey,
-                capabilities: e.capabilities,
-                routes: e.routes.clone(),
-                endpoints: self.directory.merged_endpoints_of(e.node_id),
-                offline: self.liveness.is_offline(e.node_id),
-                protocol_version: self.directory.protocol_version(e.node_id),
-                // 绑定随 netmap 下发（REQ-049②）：节点可对 netmap 条目与握手对端做交叉审计
-                identity_binding: e.identity_binding.clone(),
-                binding_log_id: e.binding_log_id,
+            .flat_map(|d| {
+                d.registry.entries().map(|e: &NodeEntry| NodeInfo {
+                    node_id: e.node_id,
+                    network_id: e.network_id,
+                    static_pubkey: e.static_pubkey,
+                    capabilities: e.capabilities,
+                    routes: e.routes.clone(),
+                    endpoints: self.directory.merged_endpoints_of(e.node_id),
+                    offline: self.liveness.is_offline(e.node_id),
+                    protocol_version: self.directory.protocol_version(e.node_id),
+                    // 绑定随 netmap 下发（REQ-049②）：节点可对 netmap 条目与握手对端做交叉审计
+                    identity_binding: e.identity_binding.clone(),
+                    binding_log_id: e.binding_log_id,
+                    // exit 授权权威计算（REQ-071）：能力位 ∧ 授权集，netmap 即最终视图
+                    exit: e.capabilities & CAPABILITY_EXIT != 0
+                        && d.exit_allow.contains(&e.node_id),
+                })
             })
             .collect()
     }

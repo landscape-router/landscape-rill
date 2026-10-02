@@ -157,6 +157,7 @@ pub fn netmap_push_message(
             identity_binding: Cow::Owned(info.identity_binding),
             raft_log_index: info.binding_log_id.0,
             raft_term: info.binding_log_id.1,
+            exit: info.exit,
         })
         .collect();
     NetmapPush {

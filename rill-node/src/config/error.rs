@@ -14,6 +14,9 @@ pub enum ConfigError {
     #[error("invalid route: {0}")]
     #[error_id("node.config.invalid_route")]
     InvalidRoute(String),
+    #[error("default_route_preference has duplicates")]
+    #[error_id("node.config.default_route_preference_duplicate")]
+    DefaultRoutePreferenceDuplicate,
     #[error("missing coordinator signing pubkey")]
     #[error_id("node.config.missing_signing_pubkey")]
     MissingSigningPubkey,

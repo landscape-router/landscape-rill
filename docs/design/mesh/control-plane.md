@@ -3,11 +3,11 @@
 > 本文档定义 `landscape-rill` 中 **mesh 模式**（自建控制面）的控制面协议。
 > 数据面帧头设计见 [FRAME_HEADER](./frame-header.md)；本文档是其 §9 接口需求的完整出处。
 > 覆盖范围：中心化 coordinator 协议、状态模型、关键流程、安全模型、联邦模型（v2 特性 + v1 钩子）。
-> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-064 / REQ-065 / REQ-066
+> 相关需求：REQ-004 / REQ-008 / REQ-010 / REQ-013 / REQ-014 / REQ-017 / REQ-018 / REQ-020 / REQ-022 / REQ-024 / REQ-025 / REQ-027 / REQ-030 / REQ-034 / REQ-035 / REQ-036 / REQ-037 / REQ-038 / REQ-045 / REQ-047 / REQ-048 / REQ-049 / REQ-051 / REQ-052 / REQ-056 / REQ-057 / REQ-058 / REQ-059 / REQ-060 / REQ-062 / REQ-064 / REQ-065 / REQ-066 / REQ-071
 
-**版本：v0.23（2026-10-01 修订：REQ-065 dn42 逐条路由动态上报——新增 §3.17 RouteSync/RouteMap 消息族（防抖上报 / 服务端聚合与三道闸 / 独立版本空间）；v0.22 为 REQ-064 逐路径统计与 PathProbe 激活）**
+**版本：v0.24（2026-10-02 修订：REQ-071 mesh 出口准入——§3.3 netmap 条目新增 `exit` 标记（能力位 ∧ exits.allow，coordinator 权威）+ §3.12 exits 准入段；v0.23 为 REQ-065 RouteSync/RouteMap）**
 
-**最后修改：2026-10-01**
+**最后修改：2026-10-02**
 
 > 重建说明：v0.1 因工作区回滚丢失 §1.5/§3.8/重连认证/版本协商/能力位表/§5.7 等内容，v0.2 完整恢复并新增 §3.9。
 > v0.3 修正：§2/§3.9 重连认证由"Ed25519 签名"改为 **X25519 静态密钥 DH 挑战**（原方案与 Noise 静态密钥 X25519 不兼容）。
@@ -129,6 +129,7 @@ coordinator：K' = X25519(eph_priv, 节点静态公钥)   ← 同一个 K
   - `endpoints[]`：UDP 端点 = 本地接口地址 ∪ echo seen 地址（去重合并视图；**上报机制**：节点经 coordinator UDP 回显探测，周期 30s + 网络变更触发，见 CONNECTIVITY §2；联邦边界：远端端点只下发到桥节点，不扩散）
   - `capabilities`（含 `relay` 自愿位：节点声明愿当中继，opt-in）
   - `routes[]`：**前缀公告**（节点背后 LAN/前缀，见 §3.8 前缀公告流程）——注册时携带初始公告 + 变更时更新；`routes` 汇总 = rill ext 节点 subnet router 广播进自建 tailnet 的数据源（TS2021_LEG §3.3）
+  - `exit`：**mesh 出口授权标记**（REQ-071，ROUTE_ENGINE §5.1）= `能力位 exit(0x08) ∧ 网络 exits.allow`（§3.12）——coordinator 权威计算，节点侧作默认路由解析的 mesh exit 候选依据；生效集变化才 bump netmap 版本
   - 条目签名：本地条目由本 coordinator 签名；联邦条目经过滤后用本 coordinator 私钥**重签**（§7）
 - `relay_roster`：**relay 激活名单**（REQ-062，升级原 `relay_list` 端点串列表）——`repeated fixed32 node_id` 有序数组，顺序 = 挂靠优先级（RTT 升序）；**双资格 = 能力位 ∩ roster**（不在 roster 的能力位节点不进任何候选路径，无 key_path 签发 = 停用而非吊销）；节点按 node_id 从 netmap 条目直取 relay 端点（不再按端点串反查归属）。策划机制见 §3.11 relay roster 段；随 netmap 下发，**集合变化才 bump 版本**（顺序变化不 bump，路径候选序经路径请求即时生效）
 - `acl`：**网络级 ACL 策略**（REQ-045，前缀级）——AclPolicy{enabled, rules[], groups{}}，随 netmap 原子下发；缺省/未启用 = v1 全放行
@@ -340,6 +341,12 @@ Register(key, pubkey) → 服务端按 pubkey 查注册表命中 → 恢复类�
 
 - `networks[].relay { include[], exclude[], max_size }`（均可缺省：include/exclude 空、max_size=8）；`deny_unknown_fields`；校验：max_size ≥1、include ∩ exclude 必须为空
 - 语义见 §3.11 relay roster 段；SIGHUP 热更新后按现有软状态立即重提 roster（收窄即时生效——被移出 relay 的中继路径撤销并推送全参与者；恢复同理）
+
+**exits 准入段（REQ-071）**
+
+- `networks[].exits { allow[] }`（node_id 授权集，可缺省 = 空）；`deny_unknown_fields`；语义：**授权集而非策划**（与 relay roster 的 RTT 策划不同——exit 资格只做准入裁决，不做排序/规模管理），netmap `exit` 标记 = `能力位 exit(0x08) ∩ allow`（fail-closed：缺省/空 = 全拒）
+- 生效集（能力位 ∩ allow）变化才 bump netmap——纯 allow 增删无能力位对端不扰动网络（允许列表与实际能力渐次对齐）；SIGHUP 热更新即重算并按需推送
+- 消费方：节点默认路由解析器（ROUTE_ENGINE §5.1）；能力位声明但未授权 = 无出口资格（e2e exit_wan 阶段 1 断言）
 
 **SIGTERM 优雅退出（REQ-070 开放问题 8，2026-10-01）**
 

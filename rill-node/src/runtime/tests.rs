@@ -117,6 +117,7 @@ fn node_config_caps(url: &str, ca_path: &str, seed: u8, routes: Vec<String>, cap
         coord: None,
         dn42: None,
         ts2021: None,
+        default_route_preference: Vec::new(),
     }
 }
 
@@ -930,6 +931,7 @@ async fn route_map_event_applies_dyn_dn42() {
             offline: false,
             identity_binding: vec![],
             binding_log_id: (0, 0),
+            exit: false,
         }],
         relay_roster: vec![],
         acl: None,
@@ -979,6 +981,7 @@ async fn dn42_events_enter_report_window() {
             coord: None,
             dn42: None,
             ts2021: None,
+            default_route_preference: Vec::new(),
         },
         fast_opts(),
     )

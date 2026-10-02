@@ -273,8 +273,12 @@ impl Node {
         let mut peer_endpoints: HashMap<u32, Vec<SocketAddr>> = HashMap::new();
         // mesh routes[] 汇总（TSL-05 subnet router 广播数据源：进自建 tailnet）
         let mut mesh_routes: Vec<String> = Vec::new();
+        // exit 候选收集（REQ-071，ROUTE_ENGINE §5）：在线 ∧ 标记；自身标记单记
+        let mut mesh_exits: Vec<u32> = Vec::new();
+        let mut self_exit = false;
         for entry in &netmap.entries {
             if Some(entry.node_id) == self.node_id {
+                self_exit = entry.exit;
                 continue;
             }
             fresh.insert(entry.node_id);
@@ -291,6 +295,9 @@ impl Node {
             }
             peer_endpoints.insert(entry.node_id, addrs.clone());
             self.mesh.set_endpoints(entry.node_id, addrs);
+            if entry.exit && !entry.offline {
+                mesh_exits.push(entry.node_id);
+            }
             // 离线条目（CTL-11）：路由不进路由表（可达性撤销）——对端身份/端点/
             // 密钥照常维护，节点回在线后随 netmap 刷新自动恢复路由
             if entry.offline {
@@ -317,6 +324,8 @@ impl Node {
                 self.request_paths_for(entry.node_id);
             }
         }
+        // exit 候选落位（REQ-071）：全量替换（netmap 原子语义；离线/撤销随版本收敛）
+        self.default_route.set_mesh_exits(mesh_exits, self_exit);
         for stale in self.netmap_peers.difference(&fresh) {
             self.mesh.remove_peer_static(*stale);
             self.mesh.remove_endpoint(*stale);

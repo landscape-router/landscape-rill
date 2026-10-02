@@ -11,12 +11,15 @@ use crate::tun::{TunConfig, TunDevice};
 use crate::BoxResult;
 use ed25519_dalek::VerifyingKey;
 use futures_util::StreamExt;
-use landscape_rill_core::control::acl::{AclPolicy, CAPABILITY_ACL};
+use landscape_rill_core::control::acl::AclPolicy;
 use landscape_rill_core::control::session::{SessionEvent, SessionState};
+use landscape_rill_core::control::CAPABILITY_ACL;
 use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::rate::{RateCounter, TokenBucket, RATE_SUMMARY_PERIOD};
-use landscape_rill_core::route::{RouteEngine, RouteEntry, RouteSource, RouteVia};
+use landscape_rill_core::route::{
+    DefaultRouteResolver, RouteEngine, RouteEntry, RouteSource, RouteVia,
+};
 use landscape_rill_mesh::control::{
     audit_binding, ControlEvent, ControlSession, MeshLegConfig, NetmapData, AUDIT_VERDICT_BEHIND,
     AUDIT_VERDICT_CONFLICT, AUDIT_VERDICT_UNKNOWN, AUDIT_VERDICT_VERIFIED,
@@ -150,6 +153,8 @@ pub struct Node {
     /// 对外通告 IP（UDP connect 探测路由表得真实出口；mesh socket 绑 0.0.0.0 需此通告）
     advertise_ips: Vec<IpAddr>,
     engine: RouteEngine,
+    /// 默认路由解析（ROUTE_ENGINE §5/§8，REQ-071）：LPM 未命中后的 exit 链
+    default_route: DefaultRouteResolver,
     control: Option<ControlSession>,
     /// LeaderRedirect 会话级覆盖（§3.6，Raft 期）：重连目标优先于配置地址；
     /// 空 = 用配置地址（重定向到选举中时不清除既有覆盖）
@@ -257,12 +262,14 @@ impl Node {
             Some((host.to_string(), port.parse::<u16>().ok()?))
         });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let default_route = DefaultRouteResolver::new(cfg.default_route_preference.clone());
         let mut node = Self {
             cfg,
             opts,
             mesh,
             advertise_ips,
             engine: RouteEngine::new(),
+            default_route,
             control: None,
             tun,
             node_id: None,

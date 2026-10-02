@@ -104,6 +104,9 @@ pub struct NetworkConfig {
     /// relay roster 硬约束（REQ-062，CONNECTIVITY §5）；缺省 = 自动策划（max_size 8）
     #[serde(default)]
     pub relay: RelayRosterConfig,
+    /// mesh 出口准入（REQ-071，ROUTE_ENGINE §5）；缺省 = 空（无人可为出口）
+    #[serde(default)]
+    pub exits: ExitAdmissionConfig,
 }
 
 /// relay roster 硬约束（REQ-062 模式 C：自动策划 + 配置约束）。
@@ -134,6 +137,17 @@ impl Default for RelayRosterConfig {
 
 fn default_relay_max_size() -> usize {
     8
+}
+
+/// mesh 出口准入（REQ-071，ROUTE_ENGINE §5）：授权集语义（非 roster 策划——
+/// exit 是授权问题不是池选拔；能力位只是必要条件）。
+/// `deny_unknown_fields` = fail-closed：未实现字段一律加载报错
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExitAdmissionConfig {
+    /// 允许充当 mesh 出口的 node_id 集；空 = 无人可为出口（fail-closed）
+    #[serde(default)]
+    pub allow: Vec<u32>,
 }
 
 /// ACL 策略配置（REQ-045 前缀级）。`deny_unknown_fields` = fail-closed：
@@ -359,6 +373,20 @@ impl CoordConfig {
                     net.name
                 )));
             }
+            // exit 准入（REQ-071）：allow 不得重复
+            if net.exits.allow.len()
+                != net
+                    .exits
+                    .allow
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            {
+                return Err(ConfigError(format!(
+                    "network {}: exits.allow has duplicates",
+                    net.name
+                )));
+            }
         }
         if let Some(p) = &self.storage_path {
             if p.trim().is_empty() {
@@ -420,6 +448,7 @@ impl CoordConfig {
             coord.set_announce_whitelist(&net.name, whitelist);
             coord.set_acl_policy(&net.name, net.acl.to_policy().expect("validated"));
             coord.set_relay_constraints(&net.name, net.relay.clone());
+            coord.set_exit_allow(&net.name, net.exits.allow.clone());
         }
     }
 }
@@ -660,6 +689,7 @@ mod tests {
                 announce_whitelist: vec![],
                 acl: AclConfig::default(),
                 relay: RelayRosterConfig::default(),
+                exits: ExitAdmissionConfig::default(),
             }],
             ..cfg.clone()
         };

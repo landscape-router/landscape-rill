@@ -148,7 +148,10 @@ impl Prefix {
     }
 }
 
+pub mod default;
 pub mod error;
+
+pub use default::{DefaultRouteResolver, ExitSource};
 pub use error::PrefixError;
 
 #[derive(Debug, Default)]

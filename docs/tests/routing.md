@@ -45,11 +45,11 @@
 
 ## RTE-06 exit 语义
 
-- 关联 REQ：REQ-005 / REQ-021
-- 测试层：集成 + e2e
-- 状态：`部分覆盖`（2026-10-02）
-- 证据：e2e/ts2021_register/run.sh、e2e/ts2021_runtime/run.sh
-- 缺口：ts2021 exit 使用/被用作已闭环（TSL-06/07）；**mesh exit WAN 透传不 NAT 未实现**（E2E-05 依赖；/0 不入前缀公告，走 exit 语义）
+- 关联 REQ：REQ-005 / REQ-021 / REQ-071
+- 测试层：单测 + 集成 + e2e
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-core/src/route/default.rs、rill-coord/src/coordinator/tests.rs、e2e/ts2021_register/run.sh、e2e/ts2021_runtime/run.sh、e2e/scenarios/exit_wan.sh
+- 说明：ts2021 exit 使用/被用作闭环（TSL-06/07）；mesh exit WAN 闭环（REQ-071：fail-closed 准入基线 → SIGHUP 运行时授权 → 双栈借道出口（ingress 计数证据）→ 出口停机租约过期回退丢弃）
 
 ## RTE-07 MTU/PTB
 
@@ -63,9 +63,9 @@
 
 - 关联 REQ：REQ-008 / REQ-014
 - 测试层：单测 + e2e
-- 状态：`部分覆盖`
-- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator/
-- 缺口：过短前缀不进前缀公告已闭环（CTL-10）；"过短前缀走 exit 语义"依赖 mesh exit（RTE-06 待实现）
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-core/src/control/registry.rs、rill-coord/src/coordinator/、e2e/scenarios/exit_wan.sh
+- 说明：过短前缀不进前缀公告闭环（CTL-10）；`/0` 走 exit 语义闭环（REQ-071，RTE-06/exit_wan：解析器 + 准入链 + 借道转发）
 
 ## 验收断言
 
@@ -74,6 +74,6 @@
 - [x] RTE-03：等长按来源优先级取路
 - [x] RTE-04：首选停机 → 自动切次选
 - [x] RTE-05：dn42 直连断 → mesh 出口 → 丢弃（单测 + DNL-14/16 跨腿 e2e）
-- [ ] RTE-06：exit 透传/使用/被用作语义（ts2021 已闭环；mesh exit WAN 待实现）
+- [x] RTE-06：exit 透传/使用/被用作语义（ts2021 TSL-06/07；mesh exit WAN exit_wan，REQ-071）
 - [x] RTE-07：大包不黑洞、MSS clamping 生效、PTB 透传（mtu 场景通过）
-- [ ] RTE-08：过短前缀不混入公告（已闭环 CTL-10）；走 exit 语义待 mesh exit
+- [x] RTE-08：过短前缀不混入公告（CTL-10）；/0 走 exit 语义（REQ-071）
