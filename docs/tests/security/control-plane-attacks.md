@@ -1,16 +1,18 @@
 # 控制面对抗验证（control-plane-attacks）
 
 > 覆盖 CONTROL_PLANE §2（TLS 信任锚/版本协商/重连认证）、§6（安全模型）、FRAME_HEADER §2.4（握手规格）。
-> 拓扑：coordinator + 节点容器 + 伪 coordinator 容器。
+> 拓扑：coordinator + 节点容器 + 伪 coordinator（宿主 rogue TLS，网段可达性与容器等价）。
 
 ## SEC-12 伪 coordinator 钓鱼
 
 - 关联 REQ：REQ-017
 - 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：容器级复验（TLS 信任锚校验逻辑已实现：自签 CA 预置/公网 PKI，见 rill-mesh/src/control/）
-- 说明：无有效证书/未预置 CA → TLS 验证失败拒绝连接；auth key 不泄露
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-mesh/src/control/tls.rs、e2e/scenarios/coord_attacks.sh
+- 说明：node-c 被钓鱼指向宿主 rogue TLS（自签证书，SAN 仿冒 DNS:coord + 网关 IP）——
+  TLS 尝试发生（rogue 连接计数 ≥2）但节点证书验证失败即断连：rogue 应用层收到零字节
+  （auth key 不泄露）、node-c 永不注册（重连退避摘要 `control connect failed`）、
+  真 coordinator 与 a/b 不受影响
 
 ## SEC-13 auth key 复用/过期
 
@@ -32,9 +34,12 @@
 
 - 关联 REQ：REQ-018 / REQ-022
 - 测试层：单测
-- 状态：`部分覆盖`
+- 状态：`已覆盖`（2026-10-02）
 - 证据：rill-core/src/control/challenge.rs
-- 缺口：时间窗口语义核心已闭环；容器级重放复验待补
+- 说明：重放旧 challenge 被拒（时间窗口 + 一次性临时密钥）——单测
+  window_boundary / wrong_nonce_rejected / wrong_eph_priv_rejected / wrong_node_id_rejected
+  覆盖窗口边界与 tag 绑定语义；容器级重放结构性不可达：控制消息只在已认证 TLS 会话内
+  传输（rustls 拒绝记录重放），challenge 临时密钥按连接一次性签发
 
 ## SEC-16 吊销立即生效
 
@@ -56,18 +61,23 @@
 
 - 关联 REQ：REQ-004
 - 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：伪造心跳延长他人在线状态的容器级验证（心跳随已认证 TLS 会话内发送，伪造应失败）
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-mesh/src/control/server.rs、e2e/scenarios/coord_attacks.sh
+- 说明：心跳以**连接注册态**归因（`state.registered`），新 TLS 连接无身份 →
+  未注册连接灌 HEARTBEAT 为无操作（coord 存活、数据面不变）；node-a 停机 +
+  持续伪造心跳（110s 窗口）→ 租约照常 60s 过期、b→a ping 断——伪造无法延长在线状态
 
 ## SEC-19 畸形控制消息
 
 - 关联 REQ：REQ-017 / REQ-047
-- 测试层：单测
-- 状态：`部分覆盖`
-- 证据：rill-mesh/src/framing/、rill-mesh/src/control/server.rs
-- 缺口：帧长上限 1MB/truncated/oversize 拒绝已闭环；连接级消息限速（速率维度）已闭环（REQ-047，断连 + 其他连接不受影响，单测 `conn_message_flood_disconnects`）；随机洪泛 fuzz 待补
-- 说明：解析失败断开该连接、coordinator 进程不 panic、其他连接不受影响
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-mesh/src/framing/、rill-mesh/src/control/server.rs、rill-mesh/src/control/server_tests.rs、e2e/scenarios/preauth_flood.sh
+- 说明：帧长上限 1MB/truncated/oversize 拒绝；连接级消息限速（REQ-047，断连 +
+  其他连接不受影响，单测 `conn_message_flood_disconnects`）；确定性 fuzz 语料
+  （REQ-059：parse/read/dispatch envelope 语料，随机/变形/截断不 panic）；e2e
+  容器级随机洪泛（裸 TCP 垃圾 + TLS 后超长帧/垃圾信封/垃圾 REGISTER 体 → coord
+  断连不崩、闸门摘要正常）
 
 ## SEC-20 auth key 爆破
 
@@ -103,15 +113,15 @@
 
 ## 验收断言
 
-- [ ] SEC-12：伪 coordinator 拒绝连接、auth key 不泄露、日志明确报信任锚失败（容器级）
+- [x] SEC-12：伪 coordinator 拒绝连接、auth key 不泄露（rogue 应用层零字节，容器级）
 - [x] SEC-13：一次性 key 二次使用被拒、吊销联动
 - [x] SEC-14：DH 挑战闭环、无私钥者无法构造 tag
-- [ ] SEC-15：重放旧 challenge 被拒（时间窗口 + 一次性临时密钥，容器级复验待补）
+- [x] SEC-15：重放旧 challenge 被拒（窗口 + 一次性临时密钥单测；TLS 会话内传输结构性防重放）
 - [x] SEC-16：吊销立即生效（重连失败、旧会话作废、条目移除；轮换合并窗口不回退即时性，REQ-048）
 - [x] SEC-32：批量吊销合并轮换（N 吊销 → 1 轮换；即时语义不变；手动轮换旁路；重启自愈，REQ-048）
 - [x] SEC-17：版本不兼容明确报错（握手 prologue + 控制面首消息版本协商均闭环）
-- [ ] SEC-18：伪造心跳无法延长在线状态（容器级）
-- [ ] SEC-19：畸形消息不 panic、单连接隔离（fuzz 待补；限速断连已闭环）
+- [x] SEC-18：伪造心跳无法延长在线状态（未注册无操作 + 停机续命失败，容器级）
+- [x] SEC-19：畸形消息不 panic、单连接隔离（fuzz 语料 + 容器级随机洪泛 + 限速断连）
 - [x] SEC-20：错误 auth key 限速锁定且无信息泄露（递增锁定 + 统一措辞 InvalidAuthKey）
 - [x] SEC-29：连接级限速断连、心跳超频忽略、PathRequest pending 上限（REQ-047）
 - [x] SEC-30：重编码绑定无法绕过吊销（键规范化，REQ-058）

@@ -45,6 +45,10 @@ elif [ "$SCENARIO" = "mtu" ]; then
 elif [ "$SCENARIO" = "frame_attacks" ]; then
   # 帧层对抗复验（SEC-01~04/11）：direct 拓扑 + 节点 debug 日志（dropped frame 原因断言）
   COMPOSE="docker compose -f $E2E_DIR/mesh/frame_attacks/docker-compose.yaml"
+elif [ "$SCENARIO" = "coord_attacks" ]; then
+  # 控制面对抗复验（SEC-12 伪 coord / SEC-18 租约欺骗）：direct 三件套 +
+  # node-c 指向宿主 192.168.240.1:9443 的伪 coordinator（场景脚本内起 rogue TLS）
+  COMPOSE="docker compose -f $E2E_DIR/mesh/coord_attacks/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
@@ -409,6 +413,11 @@ EOF
 # lab 主密钥落盘（frame_attacks 场景注入用）：成员攻击者 = 持 key_dst 的伪造方，
 # key_dst 可由主密钥派生（与 KeyDist 下发材料等价）；仅本机 e2e 构建产物，不入镜像
 echo "$MASTER_KEY" > "$BUILD_DIR/.lab_master_key"
+
+if [ "$SCENARIO" = "coord_attacks" ]; then
+  # SEC-12：node-c 被钓鱼指向宿主上的伪 coordinator（192.168.240.1 = 网桥网关）
+  gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY" 33 "https://192.168.240.1:9443"
+fi
 
 if [ "$SCENARIO" = "persist" ]; then
   # 持久化场景（REQ-037）：coord 落盘存储 + node-c 一次性 key（消费状态须跨重启存活）；

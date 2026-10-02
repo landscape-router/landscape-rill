@@ -21,6 +21,9 @@
 #            在途篡改 stale-mac / 非成员 random-key（送达+转发路径）→ BadRouteMac；
 #            成员（持 key_dst 等价材料）伪造源/重算 mac + 垃圾密文 → 越 route_mac、
 #            目的端 AEAD 拦截；2000 帧垃圾 AEAD 洪泛逐帧丢弃、容器存活、ping 收敛
+#   coord_attacks：控制面对抗复验（SEC-12/18）——node-c 被钓鱼指向宿主 rogue TLS
+#            （连接有、auth key 零泄露、永不注册）；未注册 TLS 连接灌 HEARTBEAT →
+#            coord 无操作；node-a 停机 + 持续伪造心跳 → 租约照常过期（ping 断）
 #   status：只读状态端点（REQ-051/052，CONTROL_PLANE §3.14/§3.15）——direct 拓扑 +
 #            coord status 段；认证（401/429/明文拒绝）、内容组齐全（含 REQ-052
 #            build_version）、遥测聚合（per-peer 计数 + 直连对 RTT）、SIGHUP 密码
