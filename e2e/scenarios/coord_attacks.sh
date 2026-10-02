@@ -41,6 +41,7 @@ srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("0.0.0.0", 9443))
 srv.listen(16)
+open(f"{rogue_dir}/ready", "w").write("1")
 srv.settimeout(1)
 conns, received = 0, b""
 end = time.time() + 300
@@ -63,6 +64,11 @@ while time.time() < end:
     os.replace(f"{rogue_dir}/received.bin.tmp", f"{rogue_dir}/received.bin")
 PYEOF
 ROGUE_PID=$!
+# rogue 就绪前 node-c 的退避可能已翻到 64s+ 长间隔（CI 慢机实测），固定窗口内不再
+# 重试；就绪后重启 node-c 重置退避时钟，连接节奏回到 1s/2s/4s… 的确定性序列
+for i in $(seq 1 15); do [ -f "$ROGUE_DIR/ready" ] && break; sleep 1; done
+[ -f "$ROGUE_DIR/ready" ] || { echo "FAIL: rogue 未就绪"; kill $ROGUE_PID 2>/dev/null; exit 1; }
+docker restart mesh-node-c >/dev/null
 # node-c 重连退避下持续尝试 rogue；等 ≥2 次连接 + connect failed 摘要
 ok=0
 for i in $(seq 1 45); do
