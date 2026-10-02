@@ -45,7 +45,9 @@ impl Node {
         }
         let via = {
             // 可达性谓词：mesh 会话存在即可达；dn42 peer 以 BGP 会话建立为准（DN42_LEG §5）；
-            // tailnet peer 在表即可达（WG 封装懒握手，无需预建会话）
+            // tailnet peer 在表且源可受理（官方对端按 allowed-ips 过滤源，
+            // TS2021_LEG accepts_source——不符时 LPM 顺延 mesh 回程）；
+            // Direct = 本机前缀本地投递，恒可达
             let dn42_up = &self.dn42_peers;
             let reachable = |via: &RouteVia| match via {
                 RouteVia::Mesh(_) => true,
@@ -53,8 +55,11 @@ impl Node {
                     .iter()
                     .find(|l| l.name == *name)
                     .is_some_and(|l| l.established()),
-                RouteVia::Tailnet(id) => self.ts2021.as_ref().is_some_and(|l| l.has_peer(id)),
-                RouteVia::Direct(_) => false,
+                RouteVia::Tailnet(id) => self
+                    .ts2021
+                    .as_ref()
+                    .is_some_and(|l| l.has_peer(id) && l.accepts_source(&info.src)),
+                RouteVia::Direct(_) => true,
             };
             let entry = self.engine.lookup_best(&info.dst, &|e| reachable(&e.via));
             match entry {
@@ -149,9 +154,9 @@ impl Node {
                 }
             }
             RouteVia::Tailnet(id) => {
-                // 包进 ts2021 出站通道（peer 匹配/封装在数据面任务内，TS2021_LEG §3.3.2）
+                // 显式 peer 进 ts2021 出站通道（封装在数据面任务内，TS2021_LEG §3.3.2）
                 let sent = match self.ts2021.as_ref() {
-                    Some(leg) => leg.send(packet).await,
+                    Some(leg) => leg.send_to(&id, packet).await,
                     None => false,
                 };
                 if sent {
@@ -211,8 +216,13 @@ impl Node {
                     .iter()
                     .find(|l| l.name == *name)
                     .is_some_and(|l| l.established()),
-                RouteVia::Tailnet(id) => self.ts2021.as_ref().is_some_and(|l| l.has_peer(id)),
-                RouteVia::Direct(_) => false,
+                RouteVia::Tailnet(id) => self
+                    .ts2021
+                    .as_ref()
+                    .is_some_and(|l| l.has_peer(id) && l.accepts_source(&info.src)),
+                // Direct = 本机前缀本地投递，恒可达（ROUTE_ENGINE §3：本地 >
+                // tailnet——外部腿学到的同前缀路由不得遮蔽本网段）
+                RouteVia::Direct(_) => true,
             };
             let Some(entry) = self.engine.lookup_best(&info.dst, &reachable) else {
                 debug!(
@@ -287,7 +297,7 @@ impl Node {
             // 回程（ROUTE_ENGINE §3）：mesh 入站 dst 命中 tailnet 路由 → ts2021 出站
             (RouteVia::Tailnet(id), TransitFrom::Mesh) => {
                 let sent = match self.ts2021.as_ref() {
-                    Some(leg) => leg.send(packet).await,
+                    Some(leg) => leg.send_to(id, packet).await,
                     None => false,
                 };
                 if sent {
@@ -302,6 +312,8 @@ impl Node {
             }
             // dn42 → tailnet 不在 v1 边集（dn42 侧可达 tailnet 经 mesh 中转）
             (RouteVia::Tailnet(_), TransitFrom::Dn42) => false,
+            // 本机前缀（Lan/Direct）：本地投递——返回 false 交调用方写 TUN
+            (RouteVia::Direct(_), _) => false,
             // 同腿进出（mesh→mesh / dn42→dn42）不存在于边集；Local 出口走 TUN
             _ => {
                 let cands: Vec<(u8, std::string::String)> = self

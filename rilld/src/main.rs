@@ -180,6 +180,8 @@ struct Ts2021File {
     advertise_routes: Vec<String>,
     #[serde(default)]
     advertise_exit: bool,
+    #[serde(default)]
+    advertise_mesh_routes: bool,
 }
 
 fn default_ts2021_hostname() -> String {

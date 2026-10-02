@@ -18,7 +18,7 @@ use landscape_rill_core::frame::VERSION;
 use landscape_rill_core::handshake::HandshakeContext;
 use landscape_rill_core::rate::{RateCounter, TokenBucket, RATE_SUMMARY_PERIOD};
 use landscape_rill_core::route::{
-    DefaultRouteResolver, RouteEngine, RouteEntry, RouteSource, RouteVia,
+    DefaultRouteResolver, Prefix, RouteEngine, RouteEntry, RouteSource, RouteVia,
 };
 use landscape_rill_mesh::control::{
     audit_binding, ControlEvent, ControlSession, MeshLegConfig, NetmapData, AUDIT_VERDICT_BEHIND,
@@ -96,6 +96,24 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// tun 地址前缀 → Lan/Direct 路由入表（主机位归零）。I/O-free
+fn insert_lan_routes(engine: &mut RouteEngine, tun_cfg: &TunConfig) {
+    let addrs = [
+        tun_cfg.address4.map(|(a, l)| (IpAddr::from(a), l)),
+        tun_cfg.address6.map(|(a, l)| (IpAddr::from(a), l)),
+    ];
+    for (addr, len) in addrs.into_iter().flatten() {
+        if let Ok(prefix) = Prefix::parse(&format!("{addr}/{len}")) {
+            engine.insert(RouteEntry {
+                prefix,
+                source: RouteSource::Lan,
+                via: RouteVia::Direct(tun_cfg.name.clone()),
+                metric: None,
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +330,12 @@ impl Node {
             ca_pem: None,
             route_report: route_report::RouteReporter::default(),
         };
+        // 本机前缀入表（ROUTE_ENGINE §3：本地最高优先级）：tun 地址前缀
+        // 落位 Lan/Direct——外部腿学到的同前缀路由（如 ext 广播的 mesh
+        // 汇总）不得遮蔽本网段，遮蔽 = mesh 入站帧按影子路由回发，跨腿互转环
+        if let Some(tun_cfg) = &node.opts.tun {
+            insert_lan_routes(&mut node.engine, tun_cfg);
+        }
         // dn42 接入（DN42_LEG）：配置启用即 spawn peer 会话任务
         if let Some(dn42_cfg) = node.cfg.dn42.clone() {
             node.spawn_dn42_legs(&dn42_cfg).await?;

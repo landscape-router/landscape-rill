@@ -129,11 +129,16 @@ fn auth_test_key() -> String {
 }
 
 fn v4_packet(dst: [u8; 4]) -> Vec<u8> {
+    v4_packet_src([10, 0, 0, 1], dst)
+}
+
+/// IPv4/UDP 包（指定 src；tailnet 源受理性用例需要可控源）
+fn v4_packet_src(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
     let mut p = vec![0u8; 20];
     p[0] = 0x45;
     p[2..4].copy_from_slice(&20u16.to_be_bytes());
     p[9] = 17;
-    p[12..16].copy_from_slice(&[10, 0, 0, 1]);
+    p[12..16].copy_from_slice(&src);
     p[16..20].copy_from_slice(&dst);
     p
 }
@@ -516,7 +521,9 @@ async fn lan_packet_to_tailnet_goes_outbound() {
     let mut node = Node::new(node_config(&url, &ca, 3, vec![]), fast_opts())
         .await
         .unwrap();
-    let (leg, mut th) = ts2021::Ts2021Leg::test_leg();
+    // 源受理性前提：本节点 tailnet 地址（服务端分配的等价物）入腿
+    let (leg, mut th) =
+        ts2021::Ts2021Leg::test_leg_static(vec![], vec!["100.64.0.1/32".into()], false);
     node.ts2021 = Some(leg);
     let id = ts_peer(7, &["100.64.0.7/32"]).id;
     th.events
@@ -526,11 +533,14 @@ async fn lan_packet_to_tailnet_goes_outbound() {
         .await
         .unwrap();
     node.pump_ts2021().await;
-    let pkt = v4_packet([100, 64, 0, 7]);
+    let pkt = v4_packet_src([100, 64, 0, 1], [100, 64, 0, 7]);
     let outcome = node.pump_lan_packet(&pkt).await;
-    assert_eq!(outcome, LanOutcome::SentTailnet { peer: id });
+    assert_eq!(
+        outcome.clone(),
+        LanOutcome::SentTailnet { peer: id.clone() }
+    );
     // 出站通道收到原包（peer 匹配/封装在数据面任务内）
-    assert_eq!(th.outbound.recv().await.unwrap(), pkt);
+    assert_eq!(th.outbound.recv().await.unwrap(), (id, pkt));
 }
 
 #[tokio::test]
@@ -598,6 +608,152 @@ async fn tailnet_ingress_transits_to_mesh_and_reflection_dropped() {
         Ok(ev) => panic!("reflection leaked to mesh: {ev:?}"),
     }
     assert!(th.outbound.try_recv().is_err(), "反射包不得回 tailnet 出站");
+}
+
+/// 本机前缀入表：主机位归零 + Lan 优先级压过外部腿同前缀路由（§3）
+#[test]
+fn lan_routes_mask_host_bits_and_shadow_external() {
+    let mut engine = RouteEngine::new();
+    insert_lan_routes(
+        &mut engine,
+        &TunConfig {
+            address4: Some(("10.43.0.1".parse().unwrap(), 24)),
+            ..Default::default()
+        },
+    );
+    // 主机位归零：同网段任意地址命中 Lan 条目（非 /32 主机前缀）
+    let any: IpAddr = "10.43.0.9".parse().unwrap();
+    assert!(engine
+        .lookup(&any)
+        .iter()
+        .any(|(e, _)| e.source == RouteSource::Lan && e.prefix.len() == 24));
+    // 外部腿影子路由同前缀：Lan 优先（本地 > tailnet）
+    engine.insert(RouteEntry {
+        prefix: Prefix::parse("10.43.0.0/24").unwrap(),
+        source: RouteSource::Tailnet,
+        via: RouteVia::Tailnet("shadow".into()),
+        metric: None,
+    });
+    let best = engine.lookup_best(&any, &|_| true).unwrap();
+    assert_eq!(best.source, RouteSource::Lan);
+}
+
+/// 回归（E2E-07 首跑暴露的跨腿互转环）：本机 tun 前缀被 tailnet 学到的
+/// 同前缀路由（ext 广播的 mesh 汇总）遮蔽时，mesh 入站帧曾按影子路由回发
+/// tailnet。Lan/Direct 入表后本地优先（ROUTE_ENGINE §3），
+/// forward_transit 返回 false（本地投递，调用方写 TUN）
+#[tokio::test]
+async fn mesh_ingress_to_local_prefix_delivers_locally() {
+    let (url, ca) = start_coord().await;
+    let mut a = Node::new(node_config(&url, &ca, 1, vec![]), fast_opts())
+        .await
+        .unwrap();
+    // 本机前缀入表（tests 无 tun 设备，手插 insert_lan_routes 等价条目）
+    a.engine.insert(RouteEntry {
+        prefix: Prefix::parse("10.43.0.0/24").unwrap(),
+        source: RouteSource::Lan,
+        via: RouteVia::Direct("land0".into()),
+        metric: None,
+    });
+    // tailnet 影子：ext 广播 mesh 汇总含本机前缀 → 同前缀 Tailnet 条目
+    let (leg, mut th) = ts2021::Ts2021Leg::test_leg();
+    a.ts2021 = Some(leg);
+    th.events
+        .send(ts2021::Ts2021Event::Netmap {
+            peers: vec![ts_peer(9, &["10.43.0.0/24"])],
+        })
+        .await
+        .unwrap();
+    a.pump_ts2021().await;
+    let dst: IpAddr = "10.43.0.1".parse().unwrap();
+    assert!(
+        a.engine
+            .lookup_best(&dst, &|e| e.source == RouteSource::Tailnet)
+            .is_some(),
+        "前置：影子 tailnet 路由在场且可达"
+    );
+    let pkt = v4_packet([10, 43, 0, 1]);
+    assert!(
+        !a.forward_transit(&pkt, lan::TransitFrom::Mesh).await,
+        "本机前缀必须本地投递，不得按影子路由转发"
+    );
+    assert!(th.outbound.try_recv().is_err(), "不得回发 tailnet 出站");
+}
+
+/// 回程反向约束（E2E-07 二轮排障闭环）：tailnet 直发仅承载 tailnet 侧认可的
+/// 源（本节点分配地址 ∪ 已广播前缀）；mesh 侧源直发必被对端 allowed-ips
+/// 过滤静默丢弃——LPM 顺延 mesh 路由经 ext 回程（ROUTE_ENGINE §3 tailnet 回程）
+#[tokio::test]
+async fn unacceptable_tailnet_source_falls_to_mesh_return() {
+    let (url, ca) = start_coord().await;
+    // a：双成员节点（无广播）；b：ext 形（tailnet 池公告进 mesh）
+    let mut a = Node::new(node_config(&url, &ca, 1, vec![]), fast_opts())
+        .await
+        .unwrap();
+    let mut b = Node::new(
+        node_config(&url, &ca, 2, vec!["10.100.0.0/16".into()]),
+        fast_opts(),
+    )
+    .await
+    .unwrap();
+    // a 的 tailnet 视图：node-c 形 peer（100.64.0.3/32 直发路由）
+    let (leg, mut th) =
+        ts2021::Ts2021Leg::test_leg_static(vec![], vec!["100.64.0.1/32".into()], false);
+    a.ts2021 = Some(leg);
+    th.events
+        .send(ts2021::Ts2021Event::Netmap {
+            peers: vec![ts_peer(9, &["10.100.0.3/32"])],
+        })
+        .await
+        .unwrap();
+    a.pump_ts2021().await;
+
+    // a↔b mesh 会话收敛（b 公告 tailnet 池 → a 引擎 Mesh 路由）
+    a.connect_control().await.unwrap();
+    b.connect_control().await.unwrap();
+    pump_until_all(&mut [&mut a, &mut b], "registered", |n| n.registered()).await;
+    let b_id = b.node_id().unwrap();
+    let tailnet_dst: IpAddr = "10.100.0.3".parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "route convergence timeout");
+        for n in [&mut a, &mut b] {
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_control()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(100), n.pump_mesh()).await;
+            n.pump_timers().await;
+        }
+        let mesh_route = a
+            .engine
+            .lookup(&tailnet_dst)
+            .iter()
+            .any(|(e, _)| e.source == RouteSource::Mesh);
+        if a.mesh.has_key_dst(b_id) && b.mesh.has_key_dst(a.node_id().unwrap()) && mesh_route {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let probe = v4_packet_src([10, 42, 0, 1], [10, 100, 0, 3]);
+    establish_session(&mut a, &mut b, &probe, b_id).await;
+
+    // mesh 侧源（10.42.0.1）：直发必被丢 → 顺延 mesh 路由经 b（ext 回程）
+    let outcome = a.pump_lan_packet(&probe).await;
+    assert_eq!(
+        outcome,
+        LanOutcome::Sent { peer: b_id },
+        "不可受理源必须经 mesh 回程，不得直发 tailnet"
+    );
+
+    // 本节点分配地址（100.64.0.1）：可受理 → 直发 tailnet
+    let direct = v4_packet_src([100, 64, 0, 1], [10, 100, 0, 3]);
+    let outcome = a.pump_lan_packet(&direct).await;
+    let direct_peer = ts_peer(9, &[]).id;
+    assert_eq!(
+        outcome,
+        LanOutcome::SentTailnet {
+            peer: direct_peer.clone()
+        }
+    );
+    assert_eq!(th.outbound.recv().await.unwrap(), (direct_peer, direct));
 }
 
 // ==================== ACL 前缀级裁决（REQ-045，SEC-28/31） ====================

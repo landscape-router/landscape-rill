@@ -68,6 +68,9 @@ pub struct Ts2021Config {
     pub advertise_routes: Vec<String>,
     /// 广播 exit（0.0.0.0/0 + ::/0，TSL-07）
     pub advertise_exit: bool,
+    /// mesh routes[] 汇总注入广播（TS2021_LEG §3.3.2 汇总门控）：仅 ext 形
+    /// 节点开启——普通成员注入会把 tailnet 池/他人前缀泄漏回 tailnet
+    pub advertise_mesh_routes: bool,
 }
 
 impl Config {

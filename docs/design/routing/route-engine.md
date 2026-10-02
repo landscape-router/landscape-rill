@@ -1,7 +1,7 @@
 # 路由策略引擎（ROUTE_ENGINE）
 
 > landscape-rill 的转发决策核心：单 TUN 汇合点，统一裁决流量走哪条接入。
-> 版本：v0.8（2026-10-02 修订：§5.1 默认路由解析定稿（REQ-071）——mesh exit 准入链（能力位 0x08 ∧ exits.allow）+ 节点偏好序 `default_route_preference` + 无环不变量，§4 默认路由链与 §8 未决项同步收敛；v0.7 为 §3/§6.3 来源优先级链插入 dyn-dn42（REQ-065））｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023 / REQ-065 / REQ-071
+> 版本：v0.9（2026-10-02 修订：§3 本机前缀落位 Lan/Direct——tun 地址入表为显式最高优先级条目，闭合 ext mesh 汇总影子路由导致的跨腿互转环（E2E-07 首跑暴露）；§3 回程源约束——tailnet 直发臂按源受理性判可达，不可受理源顺延 mesh 经 ext 回程（E2E-07 二轮闭环）；v0.8 为 §5.1 默认路由解析定稿（REQ-071）——mesh exit 准入链（能力位 0x08 ∧ exits.allow）+ 节点偏好序 `default_route_preference` + 无环不变量，§4 默认路由链与 §8 未决项同步收敛）｜ 相关需求：REQ-005 / REQ-008 / REQ-009 / REQ-014 / REQ-017 / REQ-020 / REQ-021 / REQ-023 / REQ-065 / REQ-071
 
 ## 1. 定位
 
@@ -39,6 +39,8 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 
 **tailnet 回程（定稿）**：rill ext 节点把 tailnet 地址池（如自建 tailnet 的 100.64/10 段）作为 `routes[]` **公告进 mesh**（白名单允许，CONTROL_PLANE §3.8）——rill 节点学到 `tailnet 空间 → rill ext 节点`，手机流量回程精确路由；公告主体是 rill ext 节点（仍是"仅 rill ext 持有"模型）。这是**手机↔mesh 双向可达的必要条件**（手机 → rill ext → mesh 帧 → 节点；节点回包 → rill ext → WG → 手机）。
 
+**回程源约束（E2E-07 二轮闭环，2026-10-02）**：双成员节点（mesh + tailnet 直连）同时持有 tailnet 对端 /32（更specific）与 mesh 学到的 tailnet 池路由——LPM 按最长前缀会把回包直发 tailnet，但 tailnet 侧（官方 tailscaled）按 allowed-ips **过滤源**：非本节点分配地址/已广播前缀的源直发必被静默丢弃。可达性谓词因此对 Tailnet 臂附加**源受理性**（本节点 tailnet 地址 ∪ 已广播前缀，TS2021_LEG §3.3.2 accepts_source）：源不可受理 → Tailnet 候选判不可达 → LPM 顺延 mesh 路由经 ext 回程，与上面的回程模型闭环。已广播自家 LAN 的子网路由成员不受影响（源可受理，直发合法）。
+
 **全端口可达语义（有意设计）**：公告前缀后，mesh 内对目标网段**全端口可达**（L3 透传的自然结果，如 telnet 1-65535 全通）——这是**有意语义**，与 mesh exit 透传哲学一致（L3 透传、不引入 L4 状态）；ACL/stateful 过滤为 **v2 候选**（管理面控制），v1 不实现。
 
 **源身份约束（v2 设计前提）**：ACL 裁决依赖可靠源身份，而 route_mac **不认证源**（FRAME_HEADER §5：成员可伪造 from_node_id）——v1 唯一能认证源的机制是**点对点 AEAD 会话密钥**（目标节点解密载荷即认证源，握手层身份绑定兜底）。故 **ACL v2 默认在目标节点侧裁决**；中间转发节点无源认证能力，不做 ACL（若 v2 需中间裁决，须先引入逐跳源认证机制，另行设计）。注：v2 路径级授权（CONTROL_PLANE §3.11.6）下 relay 可校验"帧使用的路径是否合法"，但路径内成员仍可伪造 `from_node_id`——源认证仍由 AEAD 兜底，目标节点侧裁决原则不变。
@@ -50,6 +52,8 @@ tun0 ◄──────► ROUTE ENGINE ◄──────► legs（mesh 
 **tun0 信任边界（LAN 侧设备视为可信）**：tun0 是物理 LAN 的延伸，LAN 内设备可无认证直入 overlay——信任边界在物理/管理面（LAN 是可信网络）；mesh 成员侧逐身份认证 + 吊销；v2 候选：tun0 源白名单（管理面配置允许的源地址）。
 
 **冲突消解（定稿，REQ-021；REQ-065 增补 dyn-dn42）**：固定来源优先级 `LAN > mesh > dn42 > dyn-dn42 > tailnet`——等长前缀时按此顺序取。依据：各接入地址空间天然不重叠（dn42 172.20/14、tailnet 100.64/10、mesh 自定义段），实际冲突 = 同源多 via（多 rill ext 出口公告同一前缀），已由 §2 多网关冗余机制处理；逐条配置 metric 挂 v2（需要管理语义）。`dyn-dn42`（RouteMap 派生，CONTROL_PLANE §3.17）插在中间：**本地 BGP 学习 > 远端 ext 动态路由**（ext 自身本地路径优先）、**静态 mesh 公告（注册 routes[]）> 动态路由**（coordinator 权威静态信息优先，同 DNL-15 跨腿仲裁语义）、动态 > tailnet。
+
+**本机前缀落位（E2E-07 首跑闭环，2026-10-02）**：tun 地址前缀在 Node 启动时即入表为 `Lan/Direct`（主机位归零）——"本地"不再是表外隐含，而是显式最高优先级条目。**动机是环路**：ext 节点广播 mesh `routes[]` 汇总进 tailnet 时，节点自家前缀也在汇总内；对自家前缀而言，tailnet 侧学到的同前缀路由是**影子路由**——若 LPM 表内无本地条目，mesh 入站帧（dst = 本网段地址）按影子路由回发 tailnet，对端再 transit 回 mesh，**跨腿互转环**（v1 帧不减 TTL，环不衰减）。落位后：`forward_transit` 命中 `Direct` = 本地投递（返回 false，调用方写 TUN），`本地 > tailnet` 由 LPM 优先级机制自然生效，无需旁路特判。
 
 ## 4. Fallback 链
 

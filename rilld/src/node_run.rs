@@ -24,6 +24,7 @@ fn ts2021_config_from_file(t: &crate::Ts2021File) -> Ts2021Config {
         state_path: t.state_path.clone(),
         advertise_routes: t.advertise_routes.clone(),
         advertise_exit: t.advertise_exit,
+        advertise_mesh_routes: t.advertise_mesh_routes,
     }
 }
 

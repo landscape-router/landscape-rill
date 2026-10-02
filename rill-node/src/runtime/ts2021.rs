@@ -49,7 +49,7 @@ pub enum Ts2021Event {
 pub(crate) struct Ts2021TestHandles {
     pub events: mpsc::Sender<Ts2021Event>,
     pub plaintext: mpsc::Sender<Vec<u8>>,
-    pub outbound: mpsc::Receiver<Vec<u8>>,
+    pub outbound: mpsc::Receiver<(String, Vec<u8>)>,
 }
 
 /// 数据面内部命令（控制面任务 → 数据面任务）
@@ -66,23 +66,9 @@ struct PeerSess {
     tunnel: WgTunnel,
 }
 
-impl PeerSess {
-    /// 发送侧 dst 匹配：AllowedIPs 含 dst 即选此 peer。
-    /// 默认路由（0.0.0.0/0、::/0）不匹配——那是"把对端当 exit"的方向，
-    /// 反向（我们持有对端全量路由）不成立
-    fn match_dst(&self, packet: &[u8]) -> bool {
-        let Ok(info) = crate::packet::parse_packet(packet) else {
-            return false;
-        };
-        self.allowed_ips.iter().any(|cidr| {
-            !cidr.ends_with("/0") && Prefix::parse(cidr).is_ok_and(|p| p.matches(&info.dst))
-        })
-    }
-}
-
 /// Node 侧句柄（任务侧通道端点的持有者）
 pub struct Ts2021Leg {
-    outbound: mpsc::Sender<Vec<u8>>,
+    outbound: mpsc::Sender<(String, Vec<u8>)>,
     events: mpsc::Receiver<Ts2021Event>,
     plaintext: mpsc::Receiver<Vec<u8>>,
     /// 广播前缀（subnet routes / exit）：静态（配置）++ mesh routes[] 汇总
@@ -90,23 +76,52 @@ pub struct Ts2021Leg {
     advertise_poke: tokio::sync::watch::Sender<u64>,
     /// 静态部分（自家 LAN / exit 开关；mesh 汇总经 set_mesh_routes 并入）
     static_advertise: Vec<String>,
+    /// mesh routes[] 汇总开关（advertise_mesh_routes）：仅 ext 形节点开启
+    summarize_mesh: bool,
+    /// 本节点 tailnet 地址（netmap 全量帧 Node 条目，服务端分配）：
+    /// tailnet 侧对本节点的源认可集 = 此地址 ∪ 已广播前缀
+    self_addrs: Arc<std::sync::Mutex<Vec<String>>>,
     /// Node 侧镜像（可达性谓词/观测）
     pub(crate) peers: HashMap<String, Ts2021Peer>,
 }
 
 impl Ts2021Leg {
-    /// 包进 ts2021 出站通道（发送侧 peer 匹配在数据面任务内做）
-    pub async fn send(&self, packet: &[u8]) -> bool {
-        self.outbound.send(packet.to_vec()).await.is_ok()
+    /// 按显式 peer 出站（封装在数据面任务内做）。裁决在引擎（LPM / exit
+    /// 解析器）——数据面不做 dst 匹配：exit（对端 0/0 广播）方向 dst 不落在
+    /// 对端任何具体前缀内，dst 匹配无法表达"把对端当 exit"的本端决策
+    pub async fn send_to(&self, peer: &str, packet: &[u8]) -> bool {
+        self.outbound
+            .send((peer.to_string(), packet.to_vec()))
+            .await
+            .is_ok()
     }
 
     pub fn has_peer(&self, id: &str) -> bool {
         self.peers.contains_key(id)
     }
 
+    /// 直发源可受理性（tailnet allowed-ips 反向约束）：对端（官方 tailscaled）
+    /// 按源地址过滤解包后的内层包——仅接受本节点服务端分配地址与已广播前缀
+    /// 为源。源不符时直发必被静默丢弃，调用方可达性谓词应判不可达，
+    /// LPM 顺延下一候选（如经 ext 回程，ROUTE_ENGINE §3 tailnet 回程模型）
+    pub fn accepts_source(&self, src: &IpAddr) -> bool {
+        let self_addrs = self.self_addrs.lock().unwrap().clone();
+        let adv = self.advertise.lock().unwrap().clone();
+        self_addrs
+            .iter()
+            .chain(adv.iter())
+            .any(|cidr| Prefix::parse(cidr).is_ok_and(|p| p.matches(src)))
+    }
+
     /// mesh routes[] 汇总注入（netmap 联动重广播，TSL-05）：静态前缀合并去重，
     /// 变更 poke 控制面任务重发长轮询（Hostinfo 只在新 MapRequest 生效）
     pub fn set_mesh_routes(&self, mesh_routes: Vec<String>) {
+        // 汇总门控（TS2021_LEG §3.3.2：广播主体是 ext 节点，advertise_mesh_routes
+        // 显式开启）：普通成员注入会把 tailnet 池/他人前缀泄漏回 tailnet，
+        // 且自家前缀经 tailnet 绕回成影子路由与本地网段冲突（跨腿互转环）
+        if !self.summarize_mesh {
+            return;
+        }
         let mut merged = self.static_advertise.clone();
         for r in mesh_routes {
             if !merged.contains(&r) {
@@ -123,7 +138,17 @@ impl Ts2021Leg {
     /// 测试形态：不 spawn 任务，通道端点交测试单步驱动
     #[cfg(test)]
     pub(crate) fn test_leg() -> (Self, Ts2021TestHandles) {
-        let (out_tx, out_rx) = mpsc::channel(64);
+        Self::test_leg_static(Vec::new(), Vec::new(), false)
+    }
+
+    /// 同 test_leg，携带静态广播/本节点地址/汇总开关（门控与源受测试例）
+    #[cfg(test)]
+    pub(crate) fn test_leg_static(
+        advertise: Vec<String>,
+        self_addrs: Vec<String>,
+        summarize_mesh: bool,
+    ) -> (Self, Ts2021TestHandles) {
+        let (out_tx, out_rx) = mpsc::channel::<(String, Vec<u8>)>(64);
         let (ev_tx, ev_rx) = mpsc::channel(64);
         let (pt_tx, pt_rx) = mpsc::channel(64);
         let (poke_tx, _poke_rx) = tokio::sync::watch::channel(0u64);
@@ -132,9 +157,11 @@ impl Ts2021Leg {
                 outbound: out_tx,
                 events: ev_rx,
                 plaintext: pt_rx,
-                advertise: Arc::new(std::sync::Mutex::new(Vec::new())),
+                advertise: Arc::new(std::sync::Mutex::new(advertise.clone())),
                 advertise_poke: poke_tx,
-                static_advertise: Vec::new(),
+                static_advertise: advertise,
+                summarize_mesh,
+                self_addrs: Arc::new(std::sync::Mutex::new(self_addrs)),
                 peers: HashMap::new(),
             },
             Ts2021TestHandles {
@@ -168,6 +195,8 @@ pub(crate) async fn spawn_ts2021_leg(cfg: &Ts2021Config) -> BoxResult<Ts2021Leg>
         }
     }
     let advertise = Arc::new(std::sync::Mutex::new(static_advertise.clone()));
+    let self_addrs: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     let (poke_tx, poke_rx) = tokio::sync::watch::channel(0u64);
 
     // 数据面 UDP socket（直连路径）先绑定，端点交控制面任务上报。
@@ -189,7 +218,7 @@ pub(crate) async fn spawn_ts2021_leg(cfg: &Ts2021Config) -> BoxResult<Ts2021Leg>
         None => format!("0.0.0.0:{port}"),
     };
 
-    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(128);
+    let (out_tx, out_rx) = mpsc::channel::<(String, Vec<u8>)>(128);
     let (ev_tx, ev_rx) = mpsc::channel::<Ts2021Event>(16);
     let (pt_tx, pt_rx) = mpsc::channel::<Vec<u8>>(128);
     let (cmd_tx, cmd_rx) = mpsc::channel::<DataCmd>(16);
@@ -219,6 +248,7 @@ pub(crate) async fn spawn_ts2021_leg(cfg: &Ts2021Config) -> BoxResult<Ts2021Leg>
         disco_pub,
         udp_endpoint,
         advertise.clone(),
+        self_addrs.clone(),
         poke_rx,
         derp_lost_rx,
         ev_tx,
@@ -232,6 +262,8 @@ pub(crate) async fn spawn_ts2021_leg(cfg: &Ts2021Config) -> BoxResult<Ts2021Leg>
         advertise,
         advertise_poke: poke_tx,
         static_advertise,
+        summarize_mesh: cfg.advertise_mesh_routes,
+        self_addrs,
         peers: HashMap::new(),
     })
 }
@@ -291,22 +323,12 @@ fn merge_sessions(
     fresh
 }
 
-/// 出站明文封装（peer 匹配）或定时器帧（全 peer）；std Mutex 不跨 await
-fn collect_emit(
-    sessions: &Arc<std::sync::Mutex<HashMap<String, PeerSess>>>,
-    packet: &[u8],
-    timer: bool,
-) -> Vec<Emit> {
+/// 定时器帧（全 peer：握手重传/keepalive/rekey）；std Mutex 不跨 await
+fn collect_timer(sessions: &Arc<std::sync::Mutex<HashMap<String, PeerSess>>>) -> Vec<Emit> {
     let mut out = Vec::new();
     let mut s = sessions.lock().unwrap();
     for sess in s.values_mut() {
-        let frames = if timer {
-            sess.tunnel.update_timers()
-        } else if sess.match_dst(packet) {
-            sess.tunnel.encapsulate(packet)
-        } else {
-            continue;
-        };
+        let frames = sess.tunnel.update_timers();
         if !frames.is_empty() {
             out.push((sess.key, sess.endpoints.clone(), frames));
         }
@@ -356,7 +378,7 @@ async fn run_data_plane(
     udp: Arc<tokio::net::UdpSocket>,
     sessions: Arc<std::sync::Mutex<HashMap<String, PeerSess>>>,
     derp: Arc<AsyncMutex<Option<Derp>>>,
-    mut outbound: mpsc::Receiver<Vec<u8>>,
+    mut outbound: mpsc::Receiver<(String, Vec<u8>)>,
     mut cmd: mpsc::Receiver<DataCmd>,
     plaintext_tx: mpsc::Sender<Vec<u8>>,
     derp_lost_tx: mpsc::Sender<()>,
@@ -375,9 +397,20 @@ async fn run_data_plane(
                 Err(_) => break,
             }
         }
-        // 出站包（LAN/mesh → tailnet）
-        while let Ok(pkt) = outbound.try_recv() {
-            for (key, endpoints, frames) in collect_emit(&sessions, &pkt, false) {
+        // 出站包（LAN/mesh → tailnet）：显式 peer 封装（裁决在引擎，
+        // exit 0/0 方向不经 dst 匹配）
+        while let Ok((peer, pkt)) = outbound.try_recv() {
+            let mut target: Option<Emit> = None;
+            {
+                let mut s = sessions.lock().unwrap();
+                if let Some(sess) = s.get_mut(&peer) {
+                    let frames = sess.tunnel.encapsulate(&pkt);
+                    if !frames.is_empty() {
+                        target = Some((sess.key, sess.endpoints.clone(), frames));
+                    }
+                }
+            }
+            if let Some((key, endpoints, frames)) = target {
                 for b in frames {
                     send_wg(&udp, &derp, &key, &endpoints, &b).await;
                 }
@@ -387,7 +420,7 @@ async fn run_data_plane(
         let now = Instant::now();
         if now.duration_since(last_timer) >= Duration::from_secs(1) {
             last_timer = now;
-            for (key, endpoints, frames) in collect_emit(&sessions, &[], true) {
+            for (key, endpoints, frames) in collect_timer(&sessions) {
                 for b in frames {
                     send_wg(&udp, &derp, &key, &endpoints, &b).await;
                 }
@@ -549,6 +582,7 @@ async fn run_control(
     disco_pub: [u8; 32],
     udp_endpoint: String,
     advertise: Arc<std::sync::Mutex<Vec<String>>>,
+    self_addrs: Arc<std::sync::Mutex<Vec<String>>>,
     mut poke_rx: tokio::sync::watch::Receiver<u64>,
     mut derp_lost_rx: mpsc::Receiver<()>,
     ev_tx: mpsc::Sender<Ts2021Event>,
@@ -607,7 +641,7 @@ async fn run_control(
                             apply_netmap(
                                 &map, &mut client, &connector, &node_pub, &node_priv,
                                 &disco_pub, &cfg.hostname, &host_port, &udp_endpoint,
-                                &advertise, &mut preferred_derp, &ev_tx, &cmd_tx,
+                                &advertise, &self_addrs, &mut preferred_derp, &ev_tx, &cmd_tx,
                                 &mut snapshot,
                             )
                             .await;
@@ -682,12 +716,17 @@ async fn apply_netmap(
     host_port: &str,
     udp_endpoint: &str,
     advertise: &Arc<std::sync::Mutex<Vec<String>>>,
+    self_addrs: &Arc<std::sync::Mutex<Vec<String>>>,
     preferred_derp: &mut Option<u16>,
     ev_tx: &mpsc::Sender<Ts2021Event>,
     cmd_tx: &mpsc::Sender<DataCmd>,
     snapshot: &mut HashMap<i64, Ts2021Peer>,
 ) {
     if let Some(map_peers) = map.peers.as_ref() {
+        // 本节点 tailnet 地址（服务端分配）：源受理性判定的基准
+        if let Some(n) = map.node.as_ref() {
+            *self_addrs.lock().unwrap() = n.addresses.clone();
+        }
         let mut synth = 0i64;
         let peers: Vec<Ts2021Peer> = map_peers
             .iter()
@@ -1116,5 +1155,63 @@ mod tests {
         let fresh = merge_sessions(&mut merged, vec![gone], &our_priv);
         assert!(!fresh.contains_key(&id));
         assert!(fresh.len() == 1);
+    }
+
+    /// 汇总门控：未开启 advertise_mesh_routes 的普通成员不注入 mesh 汇总
+    /// （防 tailnet 池/他人前缀泄漏 + 影子路由诱导环）；ext 形节点正常合并去重
+    #[test]
+    fn set_mesh_routes_gated_to_announcer_shape() {
+        let (member, _th) = Ts2021Leg::test_leg_static(
+            vec!["10.42.0.0/24".into()],
+            vec!["100.64.0.1/32".into()],
+            false,
+        );
+        member.set_mesh_routes(vec!["100.64.0.0/10".into()]);
+        assert_eq!(
+            *member.advertise.lock().unwrap(),
+            vec!["10.42.0.0/24".to_owned()],
+            "普通成员（静态广播非空）仍不得注入 mesh 汇总"
+        );
+
+        let (ext, _th) = Ts2021Leg::test_leg_static(
+            vec!["10.43.0.0/24".into(), "0.0.0.0/0".into()],
+            vec!["100.64.0.2/32".into()],
+            true,
+        );
+        ext.set_mesh_routes(vec!["10.42.0.0/24".into(), "10.43.0.0/24".into()]);
+        assert_eq!(
+            *ext.advertise.lock().unwrap(),
+            vec![
+                "10.43.0.0/24".to_owned(),
+                "0.0.0.0/0".to_owned(),
+                "10.42.0.0/24".to_owned()
+            ]
+        );
+    }
+
+    /// 直发源可受理性：tailnet 侧仅认可本节点分配地址与已广播前缀为源
+    #[test]
+    fn accepts_source_scopes_to_assigned_and_advertised() {
+        // 无广播成员：仅本节点 tailnet 地址可直发
+        let (member, _th) = Ts2021Leg::test_leg_static(vec![], vec!["100.64.0.1/32".into()], false);
+        assert!(member.accepts_source(&"100.64.0.1".parse().unwrap()));
+        assert!(!member.accepts_source(&"10.42.0.1".parse().unwrap()));
+
+        // 子网路由成员：自家 LAN 前缀亦可直发
+        let (subnet, _th) = Ts2021Leg::test_leg_static(
+            vec!["10.42.0.0/24".into()],
+            vec!["100.64.0.1/32".into()],
+            false,
+        );
+        assert!(subnet.accepts_source(&"10.42.0.1".parse().unwrap()));
+        assert!(!subnet.accepts_source(&"10.43.0.9".parse().unwrap()));
+
+        // exit 成员：0.0.0.0/0 广播 = 任意 v4 源可直发
+        let (exit_node, _th) = Ts2021Leg::test_leg_static(
+            vec!["0.0.0.0/0".into()],
+            vec!["100.64.0.2/32".into()],
+            true,
+        );
+        assert!(exit_node.accepts_source(&"192.0.2.9".parse().unwrap()));
     }
 }
