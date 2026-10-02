@@ -3,6 +3,7 @@
 # + recover（注册响应丢失恢复，REQ-056/057）+ dn42（dn42 接入互操作：boringtun⇄内核 WG、eBGP-lite⇄FRR，DN42_LEG）
 # + tenancy（单 coordinator 双网络隔离 + 跨网伪造帧注入，CONTROL_PLANE §1.5，SEC-21~25）
 # + probe（UDP 回显/互探/中继挂靠与故障切换 + 回显限速，CONNECTIVITY §2/§4/§5）
+# + frame_attacks（帧层对抗容器级复验：篡改/伪造 route_mac + 成员伪造源/重算 mac + AEAD 洪泛，SEC-01~04/11）
 # build job 编译一次：编译 cache（~/.cargo + target，内容键，失效时机确定）加速增量编译 →
 # release 二进制进 artifact → matrix 场景 job 下载二进制（E2E_SKIP_BUILD=1）不再编译。
 # PR 也触发但不设 required；场景目录约定见 docs/ci/README.md §1
@@ -61,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu, acl, status, ha]
+        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu, acl, status, ha, frame_attacks]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

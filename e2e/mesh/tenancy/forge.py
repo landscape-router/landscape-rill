@@ -11,6 +11,7 @@
 """
 import hashlib
 import hmac
+import os
 import socket
 import struct
 import sys
@@ -138,24 +139,30 @@ def build_frame(
 
 
 def main() -> int:
-    if len(sys.argv) != 8:
+    if len(sys.argv) < 8 or len(sys.argv) > 10:
         print(
             "usage: forge.py <target-ip> <target-port> <from_node_id> <to_node_id> "
-            "<master-key-hex> <seq> <ttl>",
+            "<master-key-hex|random> <seq> <ttl> [count] [tamper]",
             file=sys.stderr,
         )
         return 2
-    target_ip, target_port, from_id, to_id, key_hex, seq, ttl = sys.argv[1:]
-    frame = build_frame(
-        bytes.fromhex(key_hex),
-        int(to_id),
-        int(from_id),
-        int(seq),
-        int(ttl),
-    )
+    target_ip, target_port, from_id, to_id, key_hex, seq, ttl = sys.argv[1:8]
+    count = int(sys.argv[8]) if len(sys.argv) > 8 else 1
+    # tamper：先按正确 key 构帧，再翻转 from_node_id 首字节且不重算 route_mac——
+    # 模拟在途帧头篡改（route_mac 与帧头绑定 → 必 BadRouteMac）
+    tamper = len(sys.argv) > 9 and sys.argv[9] == "tamper"
+    key = os.urandom(32) if key_hex == "random" else bytes.fromhex(key_hex)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(frame, (target_ip, int(target_port)))
-    print(f"forged frame sent: to_node={to_id} from_node={from_id} len={len(frame)}")
+    for i in range(count):
+        frame = build_frame(key, int(to_id), int(from_id), int(seq) + i, int(ttl))
+        if tamper:
+            frame = frame[:8] + bytes([frame[8] ^ 0x01]) + frame[9:]
+        sock.sendto(frame, (target_ip, int(target_port)))
+    print(
+        f"forged frames sent: count={count} to_node={to_id} from_node={from_id} "
+        f"len={len(frame)} key={'random' if key_hex == 'random' else 'given'}"
+        f"{' tampered' if tamper else ''}"
+    )
     return 0
 
 

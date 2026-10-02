@@ -17,6 +17,10 @@
 #            （随机/变形帧头/probe 全 type）、向 coord:8443 灌裸 TCP 垃圾 + TLS 后
 #            超长帧/垃圾信封/REGISTER 垃圾消息体 → 三容器存活不 panic、node-a 丢帧
 #            摘要出现（fail-closed）、洪泛后 b→a 双栈 ping 收敛（已认证流量不受影响）
+#   frame_attacks：帧层对抗容器级复验（SEC-01~04/11）——direct 拓扑 + forge.py 注入：
+#            在途篡改 stale-mac / 非成员 random-key（送达+转发路径）→ BadRouteMac；
+#            成员（持 key_dst 等价材料）伪造源/重算 mac + 垃圾密文 → 越 route_mac、
+#            目的端 AEAD 拦截；2000 帧垃圾 AEAD 洪泛逐帧丢弃、容器存活、ping 收敛
 #   status：只读状态端点（REQ-051/052，CONTROL_PLANE §3.14/§3.15）——direct 拓扑 +
 #            coord status 段；认证（401/429/明文拒绝）、内容组齐全（含 REQ-052
 #            build_version）、遥测聚合（per-peer 计数 + 直连对 RTT）、SIGHUP 密码

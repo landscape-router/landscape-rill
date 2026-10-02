@@ -42,6 +42,9 @@ elif [ "$SCENARIO" = "mtu" ]; then
   # MTU 场景（ROUTE_ENGINE §6，RTE-07）：direct 拓扑 + 底网 MTU 1400
   #（tun 配置仍 1420 → 断言 MSS clamp 与伪造 PTB；路由注入走 direct 分支）
   COMPOSE="docker compose -f $E2E_DIR/mesh/mtu/docker-compose.yaml"
+elif [ "$SCENARIO" = "frame_attacks" ]; then
+  # 帧层对抗复验（SEC-01~04/11）：direct 拓扑 + 节点 debug 日志（dropped frame 原因断言）
+  COMPOSE="docker compose -f $E2E_DIR/mesh/frame_attacks/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
@@ -402,6 +405,10 @@ cat > "$BUILD_DIR/coord.json" <<EOF
   }
 }
 EOF
+
+# lab 主密钥落盘（frame_attacks 场景注入用）：成员攻击者 = 持 key_dst 的伪造方，
+# key_dst 可由主密钥派生（与 KeyDist 下发材料等价）；仅本机 e2e 构建产物，不入镜像
+echo "$MASTER_KEY" > "$BUILD_DIR/.lab_master_key"
 
 if [ "$SCENARIO" = "persist" ]; then
   # 持久化场景（REQ-037）：coord 落盘存储 + node-c 一次性 key（消费状态须跨重启存活）；

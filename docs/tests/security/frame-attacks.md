@@ -1,39 +1,49 @@
 # 帧层对抗验证（frame-attacks）
 
-> 覆盖 FRAME_HEADER §3/§5 的安全声明。拓扑：≥2 节点 + 1 个非成员攻击者容器 + 1 个成员攻击者容器。
+> 覆盖 FRAME_HEADER §3/§5 的安全声明。拓扑：≥2 节点 + 攻击者注入（宿主进程，
+> 网段可达性与容器等价）：非成员 = 无密钥材料；成员 = 持 key_dst
+> （由主密钥派生，与 KeyDist 下发材料等价）。注入器：e2e/mesh/tenancy/forge.py。
 
 ## SEC-01 非成员帧头篡改
 
 - 关联 REQ：REQ-016 / REQ-017
-- 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：容器级复验（核心单测已覆盖校验逻辑，见 SEC-05 说明）
-- 说明：攻击者截获/改写帧头字段（to/from/seq/len）→ 转发节点 route_mac 校验失败丢弃
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-core/src/frame/、e2e/scenarios/frame_attacks.sh、e2e/mesh/tenancy/forge.py
+- 说明：在途篡改模型 = 正确 key 构帧后翻转 from_node_id 字节且不重算 route_mac →
+  帧头与 route_mac 绑定破坏 → 目的端 `dropped frame: BadRouteMac`（容器级）；
+  核心语义单测 route_mac_rejects_tamper / route_mac_path_rejects_path_id_tamper
 
 ## SEC-02 非成员伪造完整帧头
 
 - 关联 REQ：REQ-016 / REQ-017
-- 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：容器级复验（无 key_dst 无法生成合法 route_mac 的核心语义已由 FRM-02 单测覆盖）
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-core/src/frame/、rill-mesh/src/data/、e2e/scenarios/frame_attacks.sh、e2e/mesh/tenancy/forge.py
+- 说明：random key 伪造（无 key_dst 无法生成合法 route_mac）→ 送达路径（to=本节点）
+  与转发路径（to=他节点，转发节点以 key_dst(to) 校验）均 `dropped frame: BadRouteMac`；
+  核心语义（FRM-02 单测）+ 跨网密钥分域负对照（tenancy SEC-22）
 
 ## SEC-03 成员伪造 from_node_id（数据帧）
 
 - 关联 REQ：REQ-016
-- 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：成员伪装 A 发往 B 的容器级复验；核心语义（AEAD 解密失败丢弃）由单测覆盖
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-mesh/src/data/、e2e/scenarios/frame_attacks.sh
+- 说明：成员（持 key_dst 等价材料）伪造 from=受害者：route_mac 合法（正对照——
+  BadRouteMac 计数不增长）→ 越过转发面校验 → 目的端会话层拦截
+  （`dropped frame: Aead|NoSession|Replay`，载荷 AEAD 无法伪造）；
+  握手层冒充单测 bad_binding_rejected_over_wire
 
 ## SEC-04 成员篡改 in-flight 帧头并重算 route_mac
 
 - 关联 REQ：REQ-016
-- 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：容器级复验（AAD 破坏 → 目的端 AEAD 失败的核心语义已由 FRM-02 单测覆盖）
+- 测试层：单测 + docker e2e
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-core/src/frame/、e2e/scenarios/frame_attacks.sh
+- 说明：持 key_dst 者可重算 route_mac 骗过转发面（文档化的有限破坏：转发面 DoS 等价），
+  但 AAD = 帧头[0..18]+path_id 与 AEAD 绑定 → 目的端解密失败拦截——容器级以
+  正确 key + 垃圾密文注入断言（会话层计数增长 + BadRouteMac 不增长）
 
 ## SEC-05 重放攻击
 
@@ -87,20 +97,22 @@
 
 - 关联 REQ：REQ-017
 - 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：成员向目的端灌未知会话密文的容器级验证；接收端限速生效验证
+- 状态：`已覆盖`（2026-10-02）
+- 证据：e2e/scenarios/frame_attacks.sh、e2e/mesh/tenancy/forge.py
+- 说明：成员向目的端灌 2000 帧未知会话密文（route_mac 合法、载荷垃圾）→ 逐帧
+  计数丢弃（会话层计数增长）、三容器存活不 panic、洪泛后已认证流量双栈收敛；
+  连接/注册面的限速隔离另见 SEC-20/SEC-29（REQ-047）
 
 ## 验收断言
 
-- [ ] SEC-01：篡改帧头被转发节点丢弃，目的端无感知（容器级）
-- [ ] SEC-02：无 key_dst 无法伪造合法 route_mac（容器级）
-- [ ] SEC-03：成员伪装源被目的端 AEAD 拦截（容器级）
-- [ ] SEC-04：重算 route_mac 的篡改帧被目的端 AEAD 拦截（容器级）
+- [x] SEC-01：篡改帧头被转发节点丢弃，目的端无感知（容器级）
+- [x] SEC-02：无 key_dst 无法伪造合法 route_mac（容器级，送达+转发路径）
+- [x] SEC-03：成员伪装源被目的端 AEAD 拦截（容器级）
+- [x] SEC-04：重算 route_mac 的篡改帧被目的端 AEAD 拦截（容器级）
 - [x] SEC-05：重放窗口拦截（含 rekey 残留期双窗口）
 - [x] SEC-06：rekey 交叠 5s 窗口语义
 - [x] SEC-07：非帧/非 probe 字节丢弃（端口分派 fail-closed，CON-08）
 - [x] SEC-08：畸形输入不 panic（fuzz 语料 + e2e 洪泛，REQ-059）
 - [x] SEC-09：握手重定向拒绝（msg1 目标校验）
 - [x] SEC-10：身份绑定验证拒绝冒充 + prologue 混淆拒绝
-- [ ] SEC-11：垃圾 AEAD 洪泛被限速丢弃（容器级）
+- [x] SEC-11：垃圾 AEAD 洪泛逐帧丢弃、进程存活、已认证流量收敛（容器级）

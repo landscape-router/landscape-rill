@@ -66,8 +66,8 @@
 | REQ-013 | CTL-13 | 已覆盖 | rill-core/src/control/ |
 | REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | rill-mesh/src/data/、rill-core/src/probe.rs（CON-08 已闭环；RTE-08 exit 语义待 mesh exit） |
 | REQ-015 | DNL-01 ~ DNL-16 | 已覆盖 | rill-dn42/src/、rill-node/src/runtime/dn42.rs、e2e/mesh/dn42/、e2e/scenarios/dn42.sh |
-| REQ-016 | SEC-03 / SEC-04 / SEC-09 / SEC-10 | 部分覆盖 | SEC-09/10 单测已闭环（rill-core/src/handshake/）；SEC-03/04 容器级复验待补 |
-| REQ-017 | SEC-01 / SEC-02 / FRM-07 | 部分覆盖 | SEC-05/07/08 单测已闭环（rill-mesh/src/data/、rill-core/src/frame/）；SEC-01/02/11 容器级复验待补 |
+| REQ-016 | SEC-03 / SEC-04 / SEC-09 / SEC-10 | 已覆盖 | rill-core/src/handshake/（SEC-09/10 单测）、e2e/scenarios/frame_attacks.sh（SEC-03/04 容器级，forge.py 注入） |
+| REQ-017 | SEC-01 / SEC-02 / FRM-07 | 已覆盖 | rill-mesh/src/data/、rill-core/src/frame/（SEC-05/07/08）、e2e/scenarios/frame_attacks.sh（SEC-01/02/11 容器级） |
 | REQ-018 | CTL-13 | 已覆盖 | rill-core/src/control/challenge.rs |
 | REQ-019 | — | — | — |
 | REQ-020 | SEC-28 | 已覆盖 | rill-core/src/route/、rill-coord/src/coordinator/ |
