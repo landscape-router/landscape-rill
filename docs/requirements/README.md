@@ -42,7 +42,7 @@ proposed（提出：日期 + 动机 + 验收草案）
 | [REQ-044](./REQ-044.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
 | [REQ-045](./REQ-045-acl-policy.md) | 需求 | ✅ merged | — | 09-30 | CONTROL_PLANE §3.10 |
 | [REQ-048](./REQ-048-batch-revoke-rotation.md) | 需求 | ✅ merged | — | 09-01 | CONTROL_PLANE §5.5 |
-| [REQ-050](./REQ-050-reproducible-build.md) | 需求 | 📌 proposed | P2 | 09-01 | — |
+| [REQ-050](./REQ-050-reproducible-build.md) | 需求 | ✅ merged | — | 09-01 | RELEASE §2~§4 |
 | [REQ-067](./REQ-067-mapresponse-incremental-peers.md) | 需求 | ✅ merged | — | 09-30 | TS2021_LEG §3.3.2 |
 | [REQ-068](./REQ-068-ts2021-server.md) | 需求 | ✅ merged（TS2021_LEG §4，TSL-12） | P3 | 09-30 | REQ-067 |
 | [REQ-069](./REQ-069-web-admin-api.md) | 需求 | ✅ merged | — | 10-01 | CONTROL_PLANE §3.14 |
