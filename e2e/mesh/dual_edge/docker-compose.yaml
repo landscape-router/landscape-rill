@@ -1,0 +1,82 @@
+# mesh e2e 拓扑：dual_edge（E2E-06 多 rill ext 冗余容器级）——node-a/node-c
+# 公告同前缀 10.42.0.0/24（双边缘，tun 同 IP 10.42.0.1），节点 debug 日志（ingress 归属判定）
+# 网络：bridge 互通；节点 privileged + /dev/net/tun（用户态 tun0 = LAN 侧）
+# 网段：RFC 1918 192.168.240.0/23（mesh e2e 专用段，避开 docker 默认池与 CGNAT；
+#       192.168.242.0/24 起预留 headscale/ts2021 集成）
+# 配置：镜像内置二进制/CA/证书，config.json 每服务挂载（build/ 下生成）
+services:
+  coord:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-coord
+    volumes:
+      - ../../build/coord.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.10
+
+  node-a:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-a
+    command: ["--log-level", "debug"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-a.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.11
+
+  node-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-b
+    command: ["--log-level", "debug"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-b.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.21
+
+  # 第二边缘：与 node-a 同 LAN 前缀/同 IP（active-backup 冗余模型）
+  node-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: mesh-node-c
+    command: ["--log-level", "debug"]
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    volumes:
+      - ../../build/node-c.json:/etc/landscape/overlay.json
+    networks:
+      mesh:
+        ipv4_address: 192.168.240.31
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24

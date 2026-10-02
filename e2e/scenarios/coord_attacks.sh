@@ -13,7 +13,7 @@ ROGUE_DIR=$(mktemp -d /tmp/coord_rogue.XXXX)
 echo "==> coord_attacks 阶段 1/5：注册 + 基线连通"
 for c in mesh-node-a mesh-node-b; do
   for i in $(seq 1 30); do
-    logs $c | grep -q 'registered:' && break
+    if logs $c | grep 'registered:' >/dev/null; then break; fi
     sleep 2
     [ "$i" = "30" ] && { echo "FAIL: $c 未注册"; logs $c | tail -10; exit 1; }
   done

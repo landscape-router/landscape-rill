@@ -6,6 +6,7 @@
 # 与自家 LAN（10.43.0.0/24）广播进 tsrv（RoutableIPs 汇总 + 广播变更 poke 重发
 # MapRequest），白名单自动审批后 node-c（官方 tailscaled --accept-routes）：
 #   TSL-05：ping 10.42.0.1（mesh 资源经 subnet router）+ ping 10.43.0.1（自家 LAN）
+#   E2E-08：tailnet 段大包——DF @ tailscale0 MTU 上限整包双向通（mesh 段由 mtu.sh 闭环）
 #   TSL-07：--exit-node=rill-ext 后 ping 独立网络网关（allow_exit 放行的 0.0.0.0/0）
 #   TSL-11：node-d 入网 → rill-ext 持有流收到 PeersChanged（+1，无重轮询/重启）；
 #           驱逐 node-d（e2e 注入 marker）→ PeersRemoved（-1）——REQ-068 增量推送实证
@@ -293,6 +294,21 @@ if [ "$ok" != "yes" ]; then
 fi
 echo "TSL-05 OK: node-c ping 10.42.0.1（mesh 资源）+ 10.43.0.1（自家 LAN）"
 
+# E2E-08 tailnet 段大包（REQ-009/012）：整链 DF @ 手机侧上限。上限由官方
+# tailscale0 MTU（1280）决定——"1500 级大包"在手机内核即被本地拒收，能进入
+# 隧道的最大整包就是该 MTU；断言取实际上限整包 DF 双向穿透（WG 段 1280+60、
+# mesh 段 1280+86 均低于 1500 底网，全程无需 PTB）。mesh 段 MSS clamp/PTB
+# 语义已由 mtu.sh（RTE-07）容器级闭环；TCP MSS 在手机侧由内核按 tailscale0
+# MTU 自derive，mesh→LAN 侧压 MSS 由 write_lan 承担（RTE-07 已验）
+TS_MTU=$(docker exec tsrt-node-c ip link show tailscale0 | grep -o 'mtu [0-9]*' | grep -o '[0-9]*$')
+BIGPAY=$((TS_MTU - 28))
+if ! docker exec tsrt-node-c ping -c3 -W3 -M do -s "$BIGPAY" 10.42.0.1 >/dev/null 2>&1; then
+  echo "FAIL: E2E-08 tailnet 段大包不通（DF ${TS_MTU}B = tailscale0 上限整包）"
+  dump
+  exit 1
+fi
+echo "E2E-08 OK: tailnet 段大包 DF 整包 ${TS_MTU}B 双向通（payload $BIGPAY，全程无 PTB）"
+
 # TSL-11a（REQ-067）：对端重启 → 旧 WG 会话失效经 rekey 重建（ping 恢复，不重注册）
 docker restart tsrt-node-c >/dev/null
 for i in $(seq 1 30); do
@@ -368,4 +384,4 @@ if [ "$ok" != "yes" ]; then
 fi
 docker exec tsrt-node-c ping -c3 192.168.245.1 || true
 
-echo "PASS: TSL-05 subnet router（自研 ts2021 服务端：mesh routes[] 汇总 + 自家 LAN 广播）+ TSL-11 持有流增量推送（+1/-1，REQ-068）+ TSL-07 exit 被用作（allow_exit 审批 + 内核转发回程）"
+echo "PASS: TSL-05 subnet router（自研 ts2021 服务端：mesh routes[] 汇总 + 自家 LAN 广播）+ E2E-08 tailnet 段大包（DF @ MTU 上限双向）+ TSL-11 持有流增量推送（+1/-1，REQ-068）+ TSL-07 exit 被用作（allow_exit 审批 + 内核转发回程）"

@@ -3,6 +3,7 @@
 # 双节点同 tailnet 注册（TSL-04/TSL-06/TSL-08/TSL-10）；
 # runtime 场景（TSL-05/TSL-07）：rilld 节点（mesh + ts2021 腿）作 subnet router/exit，
 # node-c（官方 tailscaled）消费——mesh routes[] 汇总广播进 tailnet + exit 被用作。
+# dn42 组合场景（E2E-03）：node-c → ts2021 → rill-ext 引擎裁决 → boringtun → 内核 WG/FRR peer。
 # 场景目录约定见 docs/ci/README.md §1
 name: e2e-ts2021
 
@@ -25,3 +26,6 @@ jobs:
       # register 先跑：headscale/tailscale 二进制下载进其 build/ 缓存，runtime 场景复用
       - name: ts2021 runtime e2e
         run: ./e2e/ts2021_runtime/run.sh
+      # runtime 先跑：tailscale 二进制进其 build/ 缓存，dn42 组合场景复用
+      - name: ts2021 dn42 e2e (E2E-03)
+        run: ./e2e/ts2021_dn42/run.sh

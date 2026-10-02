@@ -62,7 +62,7 @@
 | REQ-009 | RTE-07 | 已覆盖 | rill-node/src/packet/mtu.rs、e2e/scenarios/mtu.sh |
 | REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/tenancy/、rill-coord/src/domain.rs、rill-coord/src/coordinator/ |
 | REQ-011 | FRM-06 | 已覆盖 | rill-core/src/handshake/ |
-| REQ-012 | E2E-01 ~ E2E-08 | 部分覆盖 | E2E-01/02/04 经 TSL-05、TSL-06/07、DNL-14/16 覆盖（e2e/ts2021_*、e2e/scenarios/dn42.sh）；E2E-03/05~08 待补 |
+| REQ-012 | E2E-01 ~ E2E-08 | 部分覆盖 | E2E-01/02 经 TSL-05、TSL-06/07；E2E-03/04 经 e2e/ts2021_dn42、e2e/scenarios/dn42.sh；E2E-06 经 e2e/scenarios/dual_edge.sh；E2E-08 经 mtu.sh + ts2021_runtime E2E-08 断言；E2E-05/07 待 mesh exit WAN 实现 |
 | REQ-013 | CTL-13 | 已覆盖 | rill-core/src/control/ |
 | REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 部分覆盖 | rill-mesh/src/data/、rill-core/src/probe.rs（CON-08 已闭环；RTE-08 exit 语义待 mesh exit） |
 | REQ-015 | DNL-01 ~ DNL-16 | 已覆盖 | rill-dn42/src/、rill-node/src/runtime/dn42.rs、e2e/mesh/dn42/、e2e/scenarios/dn42.sh |

@@ -24,6 +24,8 @@
 #   coord_attacks：控制面对抗复验（SEC-12/18）——node-c 被钓鱼指向宿主 rogue TLS
 #            （连接有、auth key 零泄露、永不注册）；未注册 TLS 连接灌 HEARTBEAT →
 #            coord 无操作；node-a 停机 + 持续伪造心跳 → 租约照常过期（ping 断）
+#   dual_edge：双边缘冗余（E2E-06）——node-a/c 同前缀同 IP 双公告（active-backup）：
+#            ingress 归属判定活跃边缘 → 停机 → 租约过期撤销 → 引擎切 standby 收敛
 #   status：只读状态端点（REQ-051/052，CONTROL_PLANE §3.14/§3.15）——direct 拓扑 +
 #            coord status 段；认证（401/429/明文拒绝）、内容组齐全（含 REQ-052
 #            build_version）、遥测聚合（per-peer 计数 + 直连对 RTT）、SIGHUP 密码

@@ -4,6 +4,8 @@
 # + tenancy（单 coordinator 双网络隔离 + 跨网伪造帧注入，CONTROL_PLANE §1.5，SEC-21~25）
 # + probe（UDP 回显/互探/中继挂靠与故障切换 + 回显限速，CONNECTIVITY §2/§4/§5）
 # + frame_attacks（帧层对抗容器级复验：篡改/伪造 route_mac + 成员伪造源/重算 mac + AEAD 洪泛，SEC-01~04/11）
+# + coord_attacks（控制面对抗复验：rogue TLS 钓鱼 + 未注册灌心跳 + 停机后伪造心跳，SEC-12/18）
+# + dual_edge（双边缘冗余：同前缀双公告 active-backup，停机租约过期切换，E2E-06）
 # build job 编译一次：编译 cache（~/.cargo + target，内容键，失效时机确定）加速增量编译 →
 # release 二进制进 artifact → matrix 场景 job 下载二进制（E2E_SKIP_BUILD=1）不再编译。
 # PR 也触发但不设 required；场景目录约定见 docs/ci/README.md §1
@@ -62,7 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu, acl, status, ha, frame_attacks, coord_attacks]
+        scenario: [direct, relay, persist, log, reload, tenancy, probe, recover, dn42, mtu, acl, status, ha, frame_attacks, coord_attacks, dual_edge]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

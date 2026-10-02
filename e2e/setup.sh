@@ -49,6 +49,9 @@ elif [ "$SCENARIO" = "coord_attacks" ]; then
   # 控制面对抗复验（SEC-12 伪 coord / SEC-18 租约欺骗）：direct 三件套 +
   # node-c 指向宿主 192.168.240.1:9443 的伪 coordinator（场景脚本内起 rogue TLS）
   COMPOSE="docker compose -f $E2E_DIR/mesh/coord_attacks/docker-compose.yaml"
+elif [ "$SCENARIO" = "dual_edge" ]; then
+  # 双边缘冗余（E2E-06）：node-a/node-c 同前缀同 IP 双公告，节点 debug 日志（ingress 归属）
+  COMPOSE="docker compose -f $E2E_DIR/mesh/dual_edge/docker-compose.yaml"
 elif [ "$SCENARIO" = "iperf" ]; then
   # 性能场景（docs/perf.md §2.4）：拓扑由 MESH_E2E_TOPOLOGY 决定（默认 direct；relay 经中继）
   if [ "${MESH_E2E_TOPOLOGY:-direct}" = "relay" ]; then
@@ -417,6 +420,11 @@ echo "$MASTER_KEY" > "$BUILD_DIR/.lab_master_key"
 if [ "$SCENARIO" = "coord_attacks" ]; then
   # SEC-12：node-c 被钓鱼指向宿主上的伪 coordinator（192.168.240.1 = 网桥网关）
   gen_node_config node-c.json "$NODE_C_KEY" "10.44.0.1/24" "fd00:4::1/64" '["10.44.0.0/24", "fd00:4::/64"]' "$NODE_C_AUTHKEY" 33 "https://192.168.240.1:9443"
+fi
+
+if [ "$SCENARIO" = "dual_edge" ]; then
+  # E2E-06：node-c = 第二边缘，与 node-a 同前缀同 tun IP（active-backup）
+  gen_node_config node-c.json "$NODE_C_KEY" "10.42.0.1/24" "fd00:2::1/64" '["10.42.0.0/24", "fd00:2::/64"]' "$NODE_C_AUTHKEY"
 fi
 
 if [ "$SCENARIO" = "persist" ]; then
@@ -829,6 +837,15 @@ elif [ "$SCENARIO" = "tenancy" ]; then
   docker exec mesh-node-a2 ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
   docker exec mesh-node-b1 ip -6 route add fd00:6::/64 dev land0 2>/dev/null || true
   docker exec mesh-node-b2 ip -6 route add fd00:5::/64 dev land0 2>/dev/null || true
+elif [ "$SCENARIO" = "dual_edge" ]; then
+  # 双边缘（E2E-06）：a/b 同 direct（互指对方前缀）；node-c = 第二边缘，
+  # 同样需要 node-b 前缀的回程路由（否则切换到 c 后内核回包走默认路由出 eth0）
+  docker exec mesh-node-a ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
+  docker exec mesh-node-a ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-b ip -6 route add fd00:2::/64 dev land0 2>/dev/null || true
+  docker exec mesh-node-c ip -6 route add fd00:3::/64 dev land0 2>/dev/null || true
 else
   docker exec mesh-node-a ip route add 10.43.0.0/24 dev land0 2>/dev/null || true
   docker exec mesh-node-b ip route add 10.42.0.0/24 dev land0 2>/dev/null || true

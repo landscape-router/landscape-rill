@@ -1,0 +1,90 @@
+# ts2021×dn42 组合 e2e（E2E-03，REQ-012）——手机 → dn42 空间全链路：
+#   node-c（官方 tailscaled --accept-routes）→ WG(ts2021) → rill-ext
+#   → 引擎裁决 dn42 接入（Tailnet→Dn42 转发边）→ boringtun → peer-r（内核 WG + FRR）
+#   回程：peer-r → dn42 腿 → transit 落空写 TUN → 内核 100.64.0.0/10 → land0
+#   → LAN 泵 → ts2021 腿（dn42→tailnet 不在 v1 边集，经 TUN 回环桥接）
+# 单网桥：tsrv（自研 ts2021 服务端）+ coord + rill-ext + node-c + peer-r
+# 网段：192.168.246.0/24（mesh 240-243 / ts2021_runtime 242/244/245 之外）
+services:
+  tsrv:
+    image: tsd-base
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    container_name: tsd-tsrv
+    command: ["sh", "-c", "mkdir -p /var/lib/rill && exec lrill run /etc/landscape/overlay.json"]
+    environment:
+      RUST_LOG: "${TSRT_RUST_LOG:-info}"
+    volumes:
+      - ./build/tsrv.json:/etc/landscape/overlay.json
+    networks:
+      tsdnet:
+        ipv4_address: 192.168.246.10
+
+  coord:
+    image: tsd-base
+    container_name: tsd-coord
+    command: ["lrill", "run", "/etc/landscape/overlay.json"]
+    volumes:
+      - ./build/coord.json:/etc/landscape/overlay.json
+    networks:
+      tsdnet:
+        ipv4_address: 192.168.246.11
+
+  rill-ext:
+    image: tsd-base
+    container_name: tsd-rill-ext
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["/usr/local/bin/entry-rill.sh"]
+    environment:
+      RUST_LOG: "${TSRT_RUST_LOG:-info}"
+    volumes:
+      - ./build/rill-ext.json:/etc/landscape/overlay.json
+    networks:
+      tsdnet:
+        ipv4_address: 192.168.246.12
+
+  node-c:
+    image: tsd-base
+    container_name: tsd-node-c
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY}"
+      TS_HOSTNAME: node-c
+    command: ["/usr/local/bin/entry-node.sh"]
+    networks:
+      tsdnet:
+        ipv4_address: 192.168.246.13
+
+  peer-r:
+    image: mesh-dn42-peer-img
+    container_name: tsd-peer-r
+    hostname: peer-r
+    privileged: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - ../mesh/dn42/peer/entrypoint.sh:/entrypoint.sh
+      - ./build/wg0.conf:/etc/wireguard/wg0.conf
+      - ./build/bgpd.conf:/etc/frr/bgpd.conf
+      - ./build/zebra.conf:/etc/frr/zebra.conf
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    networks:
+      tsdnet:
+        ipv4_address: 192.168.246.14
+
+networks:
+  tsdnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.246.0/24
