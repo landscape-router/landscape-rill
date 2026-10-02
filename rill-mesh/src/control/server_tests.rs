@@ -262,6 +262,55 @@ async fn register_failures_lockout_after_repeated_bad_keys() {
     server.await.unwrap();
 }
 
+/// SEC-17 版本协商：首消息 protocol_version 不匹配 → 明确报错断连（非静默半工作），
+/// 不计入 auth key 失败锁定（升级节点不是攻击者）
+#[tokio::test]
+async fn register_rejects_protocol_version_mismatch() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (ca_cert, cert, key) = ca_pair();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut listener = listener;
+        let mut server = CoordinatorServer::new([0x11; 32], [0x22; 32]);
+        for _ in 0..2 {
+            let mut tls = server_tls_stream(&mut listener, &cert, &key).await.unwrap();
+            let err = server.handle_connection(&mut tls).await.unwrap_err();
+            assert!(
+                err.to_string().contains("protocol version mismatch"),
+                "明确报错：{}",
+                err
+            );
+        }
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(
+            !server.register_locked(ip, std::time::Instant::now()),
+            "版本不匹配不计入 auth key 失败锁定"
+        );
+    });
+    let host = addr.ip().to_string();
+    for v in [PROTOCOL_VERSION + 1, 1] {
+        let mut tls = client_tls_stream(&host, addr.port(), &ca_cert)
+            .await
+            .unwrap();
+        let req = RegisterRequest {
+            auth_key: Cow::Borrowed("lrk-lab-0-any"),
+            static_pubkey: Cow::Owned([0x33; 32].to_vec()),
+            capabilities: 0x01,
+            protocol_version: v,
+            hostname: Cow::Borrowed(""),
+            os: Cow::Borrowed(""),
+            routes: Vec::new(),
+            version: Cow::Borrowed(""),
+        };
+        framing::write_frame(&mut tls, &envelope_bytes(MsgType::REGISTER, &req))
+            .await
+            .unwrap();
+        assert!(read_envelope(&mut tls).await.is_err(), "版本不匹配应被断连");
+    }
+    server.await.unwrap();
+}
+
 /// 心跳超频忽略（REQ-047）：间隔不足 → 零成本跳过（无快照/LEASE 推送），
 /// 正常心跳（≥ 最小间隔）照常处理
 #[tokio::test]

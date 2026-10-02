@@ -3,7 +3,7 @@
 use crate::control::codec::{envelope_body, read_envelope, write_msg};
 use crate::control::{
     BoxResult, AUDIT_VERDICT_BEHIND, AUDIT_VERDICT_CONFLICT, AUDIT_VERDICT_UNKNOWN,
-    AUDIT_VERDICT_VERIFIED,
+    AUDIT_VERDICT_VERIFIED, PROTOCOL_VERSION,
 };
 use landscape_rill_coord::config::CoordConfig;
 use landscape_rill_coord::coordinator::Coordinator;
@@ -574,6 +574,19 @@ impl CoordinatorServer {
                 }
                 let mut reader = BytesReader::from_bytes(body);
                 let req = RegisterRequest::from_reader(&mut reader, body)?;
+                // 版本协商（§2 首消息协商，SEC-17）：不兼容明确拒收断连，
+                // 不进半工作状态；不计入 auth key 失败锁定（升级节点非攻击者）
+                if req.protocol_version != PROTOCOL_VERSION {
+                    self.register_rejected.tick();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!(
+                            "protocol version mismatch: client {} server {}",
+                            req.protocol_version, PROTOCOL_VERSION
+                        ),
+                    )
+                    .into());
+                }
                 let mut pubkey = [0u8; 32];
                 pubkey.copy_from_slice(req.static_pubkey.as_ref());
                 let routes: Vec<String> = if req.routes.is_empty() {

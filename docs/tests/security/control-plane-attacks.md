@@ -48,10 +48,9 @@
 
 - 关联 REQ：REQ-013
 - 测试层：单测 + 集成
-- 状态：`部分覆盖`
-- 证据：rill-core/src/handshake/
-- 缺口：握手层 prologue 版本不匹配拒绝已闭环（跨网络/跨版本互不相认）；**控制面首消息版本协商未实现**
-- 说明：明确报错（非静默失败）、不进入半工作状态
+- 状态：`已覆盖`（2026-10-02）
+- 证据：rill-core/src/handshake/、rill-mesh/src/control/server.rs、rill-mesh/src/control/server_tests.rs
+- 说明：握手层 prologue 版本不匹配拒绝已闭环（跨网络/跨版本互不相认）；控制面首消息版本协商（CONTROL_PLANE §2）——REGISTER 携带 `protocol_version` 不匹配即明确报错断连（`protocol version mismatch: client X server Y`），不进半工作状态、不计入 auth key 失败锁定（升级节点非攻击者）；单测 `register_rejects_protocol_version_mismatch`（新旧两个方向 + 无锁定）
 
 ## SEC-18 租约欺骗
 
@@ -110,7 +109,7 @@
 - [ ] SEC-15：重放旧 challenge 被拒（时间窗口 + 一次性临时密钥，容器级复验待补）
 - [x] SEC-16：吊销立即生效（重连失败、旧会话作废、条目移除；轮换合并窗口不回退即时性，REQ-048）
 - [x] SEC-32：批量吊销合并轮换（N 吊销 → 1 轮换；即时语义不变；手动轮换旁路；重启自愈，REQ-048）
-- [ ] SEC-17：版本不兼容明确报错（控制面首消息协商待实现）
+- [x] SEC-17：版本不兼容明确报错（握手 prologue + 控制面首消息版本协商均闭环）
 - [ ] SEC-18：伪造心跳无法延长在线状态（容器级）
 - [ ] SEC-19：畸形消息不 panic、单连接隔离（fuzz 待补；限速断连已闭环）
 - [x] SEC-20：错误 auth key 限速锁定且无信息泄露（递增锁定 + 统一措辞 InvalidAuthKey）
