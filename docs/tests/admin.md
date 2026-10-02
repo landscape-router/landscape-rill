@@ -92,8 +92,10 @@
 
 - 关联 REQ：REQ-050
 - 测试层：CI（脚本验收）
-- 状态：`待补充`
-- 证据：scripts/build.sh、scripts/verify-repro.sh、scripts/audit-binary.sh、.github/workflows/repro.yml
+- 状态：`已覆盖`（2026-10-01）
+- 证据：scripts/build.sh、scripts/verify-repro.sh、scripts/audit-binary.sh、
+  .github/workflows/repro.yml
+  CI repro 绿（run 36944523913：冷 runner 双构建位级一致 + AO-06 审计过 + dist 产物上传）
 - 说明：同 commit 双构建（隔离 target）SHA256 比对一致 → 产出 dist/（lrill + SHA256SUMS + BUILD.md 复现说明）；AO-06 审计——二进制域名形态字符串必须有仓库源码/依赖源码/允许清单出处。CI：repro（main 触发）
 
 #### 验收断言（文件尾部汇总）
@@ -106,7 +108,7 @@
 - [ ] ADM-06：`lrill --help` 展示 pubkey/run/authkey/up/down/status；up/down/status 走 systemctl；无 systemd 明确报错提示 `lrill run`；Dockerfile ENTRYPOINT = `lrill run`（部分未自动化）
 - [x] ADM-07：状态端点认证/限速/轮换/快照一致性 + fail-closed（REQ-051，状态：`已覆盖`）
 - [x] ADM-08：写操作同认证面 + 吊销即时生效 + 幂等 404 + 审计日志 + 数据面心跳周期内剪除（REQ-069，状态：`已覆盖`）
-- [ ] ADM-09：同 commit 双构建 SHA256 一致 + dist/ 产物（SHA256SUMS + BUILD.md）+ 域名审计无源码不可见外连（REQ-050，状态：`待补充`）
+- [x] ADM-09：同 commit 双构建 SHA256 一致 + dist/ 产物（SHA256SUMS + BUILD.md）+ 域名审计无源码不可见外连（REQ-050，状态：`已覆盖`）
 - [x] LOG-01：RUST_LOG 级别生效性（debug 明细出现 / 默认 info 不出现）；CLI > env > 默认优先级
 - [x] LOG-02：RateCounter 周期语义（tick 计数 / poll 周期返回并清零 / 0 不输出）；丢帧 per-peer 归因 + 伪造 node_id 落全局桶；摘要 ≤1 条/s
 - [x] LOG-03：--log-file 按天轮转 + 保留上限 + stderr 双写
