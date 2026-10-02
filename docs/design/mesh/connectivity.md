@@ -2,7 +2,7 @@
 
 > 端点发现、直连验证、中继兜底——mesh 接入的"DERP 等价物"专题。
 > 42B 帧头的转发语义见 FRAME_HEADER；端点传播进 netmap 见 CONTROL_PLANE §3.2。
-> 版本：v0.10（2026-10-01 修订：REQ-062——§5 relay 集中继名单升级为 roster 策划（自动策划准入 + 迟滞 + raft 落位），§6 中继失联/下线行对齐；§7 对 CONTROL_PLANE 的引用更新为 relay_roster）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-054 / REQ-059 / REQ-062
+> 版本：v0.11（2026-10-02 修订：§5 兜底帧 relay 转发侧限定 dst 自有端点——多 relay 互弹防护）｜ 相关需求：REQ-007 / REQ-014 / REQ-017 / REQ-028 / REQ-046 / REQ-054 / REQ-059 / REQ-062
 
 ## 1. 问题与目标
 
@@ -116,6 +116,7 @@ probe 无认证为有意设计（会话建立前无认证链可用，§4.2），
 
 | 日期 | 决策 |
 |---|---|
+| 2026-10-02 | **relay 兜底帧互弹修复（§5 中继兜底，2026-09-29 自环修复的兄弟 relay 变体）**：多 relay 拓扑下 `apply_relay_endpoints` 把确认中继端点并入**所有** peer 候选表（发送侧兜底轮转机制，保留）——relay 转发**默认路径帧**（心跳恒走默认路径）时从 dst 的污染候选表按活性选址，可选中兄弟 relay 端点；对方转发同帧时按同规则投回 → 互弹至 TTL 耗尽（e2e-mesh probe CI 实测 CON-04 红，本地 1/3 复现）。修复 = relay 转发侧统一 `retain_hop_endpoints`（默认帧与路径帧同规）：转发只投下一跳**自有**端点，跨 relay 链路由显式路径承担，发送侧兜底轮转不受影响（回归单测 `relay_default_frame_skips_sibling_relay_endpoints`） |
 | 2026-09-30 | **probe 无响应喂端点 miss（§4.1 互探反向证据，补 CONTROL_PLANE §3.11 ② 建会话前缺口）**：多宿主节点通告全部接口地址，部分可达拓扑（对端仅共享其一网段）下 `order_endpoints` 表序首端点可为黑洞——UDP sendto 成功但被网关丢弃，无 Err 可喂 miss；建会话前的**响应方**回包（msg2）按端点表序选址，命中黑洞端点则握手永不完成，且此时无会话即无心跳 miss、无发起重试信号（均需会话/发起侧状态）。修复 = 互探周期 PONG 缺席同时喂端点级 miss（`note_probe_miss`，`note_probe_ok` 的镜像；runtime/probe.rs 退避推进处），1~2 周期（30s）内死端点排序让位，msg2/数据帧改投健康端点；PONG 恢复即清零（证据中性非粘性）。tsrt e2e 复现形态：三网卡节点 eth 枚举序随机 → 首端点落非共享网段 → mesh 腿 ~1/3 概率永久卡死（回归单测 `probe_miss_demotes_blackhole_endpoint_for_replies`） |
 | 2026-09-29 | **relay 自环排除（§5 兜底端点并入修正）**：relay 能力节点会把**自身**确认为中继（自端点 PONG 可达）——自端点并入 peer 候选列表 + coordinator 可签发首跳 = 发送者自己的路径 → `order_endpoints` 轮转相位锁定自地址 → 帧自环转发至 TTL 耗尽 → 心跳 TtlExpired、会话反复重建（1400 MTU 底座复现）。修复 = 双守卫：确认中继过滤 `node_id != self`（runtime/probe.rs）+ 发送首跳 `first_hop == self` 兜底改直发（mesh/data/session.rs） |
 | 2026-09-02 | **REQ-054：relay 链路择优泛化 + 断线回喂（FRAME_HEADER §2.8/§8 落档）**：①relay 转发侧端点选择统一走 `order_endpoints`（活性置后/轮转）——修复 v1 直连分支与 v2 `path_next_hop` 固定取 `.first()` 的缺口（专项单测 v1/v2 各一）；②传输档并入链路自由度（端点 → 链路 = (后继, 地址, 传输)，v1 全网同档配置，多传输择优随 REQ-055 谱系）；③TCP send 失败 = 显式断线信号，喂端点 miss/健康机器（流式链路由推断升级为实报，机制不变）；④非 UDP 传输的公网端点发现挂账（UDP echo 学不到 TCP NAT 映射） |

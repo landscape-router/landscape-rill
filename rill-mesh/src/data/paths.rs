@@ -161,7 +161,8 @@ impl MeshData {
 
     /// 路径帧端点过滤：路径授权逐跳签发，首跳之外的中继兜底端点
     /// 收到路径帧无法校验/转发（NoKeyDst/NoEndpoint 必丢）——发送与转发
-    /// 目标必须限定首跳节点自有端点；默认路径帧不受限（任意中继可按 to_node 转发）。
+    /// 目标必须限定首跳节点自有端点；默认路径帧发送侧不受限（任意中继可按
+    /// to_node 兜底），relay 转发侧同样限定 dst 自有端点（多 relay 互弹防护）。
     /// 兜底端点混入候选列表时，last-used 轮换会让路径帧相位锁定在死端点
     /// （probe CI：回包全灭而心跳存活——默认路径帧可经兜底中继转发，路径帧不行）
     pub(super) fn retain_hop_endpoints(&self, hop: u32, addrs: &mut Vec<SocketAddr>) {

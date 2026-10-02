@@ -1973,6 +1973,35 @@ async fn relay_forward_skips_fallback_endpoints() {
     assert!(other.try_recv(&mut buf).is_err());
 }
 
+#[tokio::test]
+async fn relay_default_frame_skips_sibling_relay_endpoints() {
+    // 默认路径帧转发侧同样限定 dst 自有端点：多 relay 拓扑，兜底帧投给
+    // 兄弟 relay 端点会被对方投回（互弹至 TTL 耗尽，probe CI 实测）
+    let mut relay = MeshData::bind("127.0.0.1:0".parse().unwrap(), 4)
+        .await
+        .unwrap();
+    let dest = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let sibling = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dest_ep = dest.local_addr().unwrap();
+    let sibling_ep = sibling.local_addr().unwrap();
+    relay.set_key_dst(3, node_key(3));
+    // 污染形态：dst(3) 候选混入兄弟 relay(1) 兜底端点且排前
+    relay.set_endpoints(3, vec![sibling_ep, dest_ep]);
+    relay.set_relay_owners(HashMap::from([(sibling_ep, 1u32)]));
+    let mut frame = frame_from(2, 3, b"hb", 64, 7);
+    assert_eq!(
+        relay.relay(&mut frame).await,
+        RelayOutcome::Forwarded { to: 3 }
+    );
+    let mut buf = [0u8; 2048];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(1), dest.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], &frame[..]);
+    assert!(sibling.try_recv(&mut buf).is_err());
+}
+
 // ==================== 节点遥测（REQ-052/CONTROL_PLANE §3.15） ====================
 
 #[tokio::test]
