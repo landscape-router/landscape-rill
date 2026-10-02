@@ -17,7 +17,7 @@ services:
     command: ["sh", "-c", "mkdir -p /var/lib/rill && exec lrill run /etc/landscape/overlay.json"]
     environment:
       RUST_LOG: "${TSRT_RUST_LOG:-info}"
-      RILL_E2E_TS2021_EVICT_NODE: node-d
+      RILL_E2E_TS2021_EVICT_NODE: "node-d,rill-ext"
     volumes:
       - ./build/tsrv.json:/etc/landscape/overlay.json
     networks:
@@ -68,6 +68,26 @@ services:
     networks:
       rillnet:
         ipv4_address: 192.168.242.21
+      tsnet:
+        ipv4_address: 192.168.244.21
+
+  # mesh 出口（E2E-07，REQ-071）：rillnet + extnet 双挂；能力位 0x08 纯 exit，
+  # coord exits.allow 运行时授权（场景阶段 b SIGHUP）；MASQUERADE 承担 WAN NAT
+  rill-x:
+    image: tsrt-base
+    container_name: tsrt-rill-x
+    privileged: true
+    devices:
+      - /dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["/usr/local/bin/entry-exit.sh"]
+    volumes:
+      - ./build/rill-x.json:/etc/landscape/overlay.json
+    networks:
+      rillnet:
+        ipv4_address: 192.168.242.22
+      extnet:
+        ipv4_address: 192.168.245.12
 
   node-c:
     image: tsrt-base

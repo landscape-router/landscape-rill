@@ -10,9 +10,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
-/// e2e 注入 marker 路径（RILL_E2E_TS2021_EVICT_NODE 指定的 hostname，
-/// marker 文件出现即驱逐；REQ-057 同源哲学：env 装填 + 文件触发）
-const EVICT_MARKER: &str = "/tmp/rill-e2e-evict";
+/// e2e 注入 marker 目录（RILL_E2E_TS2021_EVICT_NODE 指定 hostname，可逗号分隔多个；
+/// marker 文件 `<dir>/<hostname>` 出现即驱逐对应节点；REQ-057 同源哲学：env 装填 + 文件触发）
+const EVICT_MARKER_DIR: &str = "/tmp/rill-e2e-evict";
 
 pub(crate) async fn run_ts2021_server(cfg: ServerConfig) -> BoxResult<()> {
     cfg.validate().map_err(|e| {
@@ -37,20 +37,30 @@ pub(crate) async fn run_ts2021_server(cfg: ServerConfig) -> BoxResult<()> {
         cfg.network,
         landscape_rill_ts2021::tailcfg::hex(&server.noise_pub())
     );
-    // e2e 驱逐注入（阶段三增量推送场景）：仅 env 装填时启动
-    if let Ok(host) = std::env::var("RILL_E2E_TS2021_EVICT_NODE") {
-        let srv = server.clone();
-        warn!("[ts2021-server] e2e injection armed: evict '{host}' on {EVICT_MARKER}");
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
-            loop {
-                tick.tick().await;
-                if std::path::Path::new(EVICT_MARKER).exists() {
-                    let _ = std::fs::remove_file(EVICT_MARKER);
-                    srv.registry.lock().unwrap().evict(&host);
+    // e2e 驱逐注入（阶段三增量推送场景）：仅 env 装填时启动（每 hostname 一 watcher）
+    if let Ok(hosts) = std::env::var("RILL_E2E_TS2021_EVICT_NODE") {
+        let _ = std::fs::create_dir_all(EVICT_MARKER_DIR);
+        for host in hosts
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(String::from)
+        {
+            let srv = server.clone();
+            let marker = format!("{EVICT_MARKER_DIR}/{host}");
+            warn!("[ts2021-server] e2e injection armed: evict '{host}' on {marker}");
+            tokio::spawn(async move {
+                let marker = std::path::PathBuf::from(marker);
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+                loop {
+                    tick.tick().await;
+                    if marker.exists() {
+                        let _ = std::fs::remove_file(&marker);
+                        srv.registry.lock().unwrap().evict(&host);
+                    }
                 }
-            }
-        });
+            });
+        }
     }
     loop {
         // 只 select 裸 accept（取消安全），TLS 握手在 spawn 任务里进行（coord 同源）

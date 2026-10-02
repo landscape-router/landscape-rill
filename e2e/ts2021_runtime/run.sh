@@ -10,6 +10,11 @@
 #   TSL-07：--exit-node=rill-ext 后 ping 独立网络网关（allow_exit 放行的 0.0.0.0/0）
 #   TSL-11：node-d 入网 → rill-ext 持有流收到 PeersChanged（+1，无重轮询/重启）；
 #           驱逐 node-d（e2e 注入 marker）→ PeersRemoved（-1）——REQ-068 增量推送实证
+#   E2E-07（REQ-071/REQ-012，收尾阶段）：rill-b 加 ts2021 腿（偏好 tailnet>mesh；
+#   子网路由成员——ts2021 advertise 自家 LAN，tailnet 侧源受理性前提）
+#   + rill-x（mesh 出口，extnet 双挂）——tailnet exit 独占承载 → 授权 mesh exit 后
+#   偏好裁决仍走 tailnet（双出口 MASQUERADE 计数器对照）→ 驱逐 rill-ext（tailnet
+#   候选摘除）→ 解析器顺延 mesh exit 承载（切换收敛，无环路）
 # 回程前提：rill-ext 把 tailnet 前缀 100.64.0.0/10 公告进 mesh（announce_routes），
 # rill-b 内核 100.64.0.0/10 → land0（回包交还用户态）。
 set -euo pipefail
@@ -63,7 +68,7 @@ if [ "${E2E_SKIP_BUILD:-0}" != "1" ]; then
   (cd "$ROOT_DIR" && ./scripts/build.sh)
 fi
 cp "$ROOT_DIR/target/release/lrill" "$BUILD_DIR/lrill"
-cp "$E2E_DIR/entry-node.sh" "$E2E_DIR/entry-rill.sh" "$E2E_DIR/Dockerfile" "$BUILD_DIR/"
+cp "$E2E_DIR/entry-node.sh" "$E2E_DIR/entry-rill.sh" "$E2E_DIR/entry-exit.sh" "$E2E_DIR/Dockerfile" "$BUILD_DIR/"
 
 echo "==> 3/8 生成双栈证书（mesh CA + ts2021 CA）"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -149,8 +154,10 @@ MASTER_KEY=$(hex)
 SIGNING_SEED=$(hex)
 EXT_KEY=$(hex)
 RILL_B_KEY=$(hex)
+RILL_X_KEY=$(hex)
 EXT_AUTHKEY=$("$LRILL" authkey --network lab)
 B_AUTHKEY=$("$LRILL" authkey --network lab)
+X_AUTHKEY=$("$LRILL" authkey --network lab)
 COORD_PUBKEY=$("$LRILL" pubkey "$SIGNING_SEED")
 
 cat > "$BUILD_DIR/coord.json" <<EOF
@@ -166,9 +173,11 @@ cat > "$BUILD_DIR/coord.json" <<EOF
         "master_key": "$MASTER_KEY",
         "auth_keys": [
           { "key": "$EXT_AUTHKEY", "policy": "reusable" },
-          { "key": "$B_AUTHKEY", "policy": "reusable" }
+          { "key": "$B_AUTHKEY", "policy": "reusable" },
+          { "key": "$X_AUTHKEY", "policy": "reusable" }
         ],
-        "announce_whitelist": ["10.0.0.0/8", "100.64.0.0/10"]
+        "announce_whitelist": ["10.0.0.0/8", "100.64.0.0/10"],
+        "exits": { "allow": [] }
       }
     ]
   }
@@ -195,7 +204,8 @@ cat > "$BUILD_DIR/rill-ext.json" <<EOF
     "hostname": "rill-ext",
     "state_path": "/var/lib/rill/ts2021-machine.key",
     "advertise_routes": ["10.43.0.0/24"],
-    "advertise_exit": true
+    "advertise_exit": true,
+    "advertise_mesh_routes": true
   }
 }
 EOF
@@ -210,7 +220,32 @@ cat > "$BUILD_DIR/rill-b.json" <<EOF
   "coord_signing_pubkey": "$COORD_PUBKEY",
   "ca_cert_path": "/etc/landscape/ca.pem",
   "data_transport": "udp",
-  "tun": { "name": "land0", "mtu": 1420, "address4": "10.42.0.1/24" }
+  "default_route_preference": ["tailnet", "mesh"],
+  "tun": { "name": "land0", "mtu": 1420, "address4": "10.42.0.1/24" },
+  "ts2021": {
+    "control_url": "https://tsrv:8080",
+    "auth_key": "$TS_AUTHKEY",
+    "ca_cert_path": "/etc/landscape/ts2021-ca.pem",
+    "hostname": "rill-b",
+    "state_path": "/var/lib/rill/ts2021-machine.key",
+    "advertise_routes": ["10.42.0.0/24"]
+  }
+}
+EOF
+
+# rill-x（E2E-07 mesh 出口）：能力位 0x08 纯 exit；extnet 双挂（entry-exit.sh
+# 置 ip_forward + MASQUERADE）；coord exits.allow 初始空（阶段 b SIGHUP 授权）
+cat > "$BUILD_DIR/rill-x.json" <<EOF
+{
+  "coordinator_url": "https://coord:8443",
+  "auth_key": "$X_AUTHKEY",
+  "static_key_seed": "$RILL_X_KEY",
+  "capabilities": 8,
+  "announce_routes": [],
+  "coord_signing_pubkey": "$COORD_PUBKEY",
+  "ca_cert_path": "/etc/landscape/ca.pem",
+  "data_transport": "udp",
+  "tun": { "name": "land0", "mtu": 1420, "address4": "10.44.0.1/24" }
 }
 EOF
 
@@ -235,16 +270,19 @@ fi
 echo "==> 7.5/8 等待路由白名单自动审批（10.42.0.0/24 mesh 汇总 + 0.0.0.0/0 exit）"
 # 链路：rill-b 注册公告 → coord netmap → rill-ext apply_netmap 汇总 → set_mesh_routes
 # → poke 重发 MapRequest（RoutableIPs 只在新请求生效）→ tsrv 白名单过滤即批准
+# （rill-b 自家 LAN 也广播——子网路由成员；断言按"存在性"而非最后一行，
+# 两条审批行谁后到不定）
 ROUTES=""
 for i in $(seq 1 60); do
-  ROUTES=$(docker logs "$TSRV" 2>&1 | grep "routes approved" | tail -1 || true)
+  ROUTES=$(docker logs "$TSRV" 2>&1 | grep "routes approved" || true)
   if echo "$ROUTES" | grep -q "10\.42\.0\.0/24" && echo "$ROUTES" | grep -q "0\.0\.0\.0/0"; then
     break
   fi
+  ROUTES=""
   sleep 2
 done
 echo "$ROUTES"
-if ! echo "$ROUTES" | grep -q "10\.42\.0\.0/24"; then
+if [ -z "$ROUTES" ] || ! echo "$ROUTES" | grep -q "10\.42\.0\.0/24"; then
   echo "FAIL: mesh 路由汇总未广播进 tsrv（TSL-05 前置链路断裂）"
   echo "--- rill-ext 日志 ---"; docker logs tsrt-rill-ext 2>&1 | tail -40
   echo "--- coord 日志 ---"; docker logs tsrt-coord 2>&1 | tail -20
@@ -258,6 +296,8 @@ for i in $(seq 1 30); do
 done
 docker exec tsrt-rill-b ip route add 100.64.0.0/10 dev land0 2>/dev/null || true
 docker exec tsrt-rill-ext ip route add 10.42.0.0/24 dev land0 2>/dev/null || true
+# E2E-07：extnet 前缀 → land0（否则 rill-b 内核默认路由经宿主网桥直达 extnet，绕过裁决）
+docker exec tsrt-rill-b ip route add 192.168.245.0/24 dev land0 2>/dev/null || true
 # mesh 预热：内核 → TUN 触发 rill-ext⇄rill-b 懒握手（互探周期 30s，表序
 # 黑洞端点需 1~2 周期降级让位，提前触发把收敛移出断言窗）
 docker exec tsrt-rill-ext ping -c3 -W1 10.42.0.1 >/dev/null 2>&1 || true
@@ -349,7 +389,7 @@ done
 evicted=""
 if [ "$joined" = "yes" ]; then
   MARK2=$(docker logs tsrt-rill-ext 2>&1 | wc -l)
-  docker exec "$TSRV" touch /tmp/rill-e2e-evict
+  docker exec "$TSRV" touch /tmp/rill-e2e-evict/node-d
   for i in $(seq 1 30); do
     docker logs tsrt-rill-ext 2>&1 | tail -n +$((MARK2 + 1)) | grep -qE "netmap delta applied: \+0 -[1-9]" && { evicted=yes; break; }
     sleep 2
@@ -384,4 +424,104 @@ if [ "$ok" != "yes" ]; then
 fi
 docker exec tsrt-node-c ping -c3 192.168.245.1 || true
 
-echo "PASS: TSL-05 subnet router（自研 ts2021 服务端：mesh routes[] 汇总 + 自家 LAN 广播）+ E2E-08 tailnet 段大包（DF @ MTU 上限双向）+ TSL-11 持有流增量推送（+1/-1，REQ-068）+ TSL-07 exit 被用作（allow_exit 审批 + 内核转发回程）"
+# ---- E2E-07（REQ-071/REQ-012，ROUTE_ENGINE §5.1）：tailnet/mesh exit 竞争 ----
+# 证据基座 = 双出口各自的 MASQUERADE 规则计数器（承载归属唯一判据，无日志级别依赖）：
+# rill-ext 规则源 10.42.0.0/24（tailnet 出口借道）/ rill-x 规则源 10.42.0.0/24（mesh 出口）
+masq_pkts() {  # $1=容器 $2=规则源段
+  docker exec "$1" iptables -t nat -L POSTROUTING -nvx 2>/dev/null \
+    | awk -v src="$2" '$3=="MASQUERADE" && $8==src{s+=$1} END{print s+0}'
+}
+b_netmap_ver() { docker logs tsrt-rill-b 2>&1 | grep 'netmap v' | tail -1 | sed 's/.*netmap v\([0-9]*\):.*/\1/'; }
+
+echo "==> E2E-07 阶段 a：tailnet exit 独占承载（mesh 出口未授权，唯一候选）"
+for i in $(seq 1 60); do
+  docker logs "$TSRV" 2>&1 | grep "host=rill-b" >/dev/null && break
+  sleep 2
+done
+docker logs "$TSRV" 2>&1 | grep "host=rill-b" >/dev/null || {
+  echo "FAIL: E2E-07 rill-b 的 ts2021 腿未注册"
+  dump; exit 1
+}
+ok=""
+for i in $(seq 1 75); do
+  docker exec tsrt-rill-b ping -c1 -W2 192.168.245.1 >/dev/null 2>&1 && { ok=yes; break; }
+  sleep 2
+done
+[ "$ok" = "yes" ] || { echo "FAIL: E2E-07 阶段 a tailnet exit 借道不通（rill-b → 192.168.245.1）"; dump; exit 1; }
+A_EXT=$(masq_pkts tsrt-rill-ext "10.42.0.0/24")
+A_X=$(masq_pkts tsrt-rill-x "10.42.0.0/24")
+[ "$A_EXT" -gt 0 ] || { echo "FAIL: rill-ext MASQ 计数未增长（tailnet 出口未承载）"; exit 1; }
+[ "$A_X" -eq 0 ] || { echo "FAIL: mesh 出口未授权却被承载（MASQ=${A_X}——准入未 fail-closed？）"; exit 1; }
+echo "E2E-07a OK: tailnet exit 独占承载（rill-ext MASQ=${A_EXT}，rill-x=0）"
+
+echo "==> E2E-07 阶段 b：授权 mesh exit → 双候选下偏好裁决仍走 tailnet"
+X_ID=$(docker logs tsrt-rill-x 2>&1 | grep 'registered:' | sed -n '1s/.*node_id=\([0-9]*\).*/\1/p')
+[ -n "$X_ID" ] || { echo "FAIL: rill-x 未注册 mesh"; docker logs tsrt-rill-x 2>&1 | tail -10; exit 1; }
+V1=$(b_netmap_ver)
+python3 - "$BUILD_DIR/coord.json" "$X_ID" <<'PYX'
+import json, sys
+path, xid = sys.argv[1], int(sys.argv[2])
+cfg = json.load(open(path))
+for net in cfg["coord"]["networks"]:
+    if net["name"] == "lab":
+        net["exits"] = {"allow": [xid]}
+open(path + ".tmp", "w").write(json.dumps(cfg, indent=2))
+PYX
+cp "$BUILD_DIR/coord.json.tmp" "$BUILD_DIR/coord.json"
+rm -f "$BUILD_DIR/coord.json.tmp"
+docker kill -s HUP tsrt-coord >/dev/null
+reloaded=0
+for i in $(seq 1 20); do
+  n=$(docker logs tsrt-coord 2>&1 | grep -c 'config reloaded')
+  [ "$n" -ge 1 ] && { reloaded=1; break; }
+  sleep 1
+done
+[ "$reloaded" = "1" ] || { echo "FAIL: coord SIGHUP 重载未生效"; docker logs tsrt-coord 2>&1 | tail -10; exit 1; }
+# rill-b 必须先收到 exit 标记（netmap bump）再下裁决结论，否则"未分流"是空洞断言
+bumped=0
+for i in $(seq 1 30); do
+  [ "$(b_netmap_ver)" -gt "$V1" ] && { bumped=1; break; }
+  sleep 2
+done
+[ "$bumped" = "1" ] || { echo "FAIL: 授权后 rill-b 未收到 netmap bump（exit 标记未下发）"; exit 1; }
+ok=""
+for i in $(seq 1 30); do
+  docker exec tsrt-rill-b ping -c1 -W2 192.168.245.1 >/dev/null 2>&1 && { ok=yes; break; }
+  sleep 2
+done
+[ "$ok" = "yes" ] || { echo "FAIL: 双候选下 ping 不通"; exit 1; }
+docker exec tsrt-rill-b ping -c3 -W2 192.168.245.1 >/dev/null 2>&1 || true
+B_EXT=$(masq_pkts tsrt-rill-ext "10.42.0.0/24")
+B_X=$(masq_pkts tsrt-rill-x "10.42.0.0/24")
+[ "$B_EXT" -gt "$A_EXT" ] || { echo "FAIL: 双候选下 tailnet 出口未承载（偏好裁决失效？rill-ext ${A_EXT}→${B_EXT}）"; exit 1; }
+[ "$B_X" -eq "$A_X" ] || { echo "FAIL: 双候选下流量被 mesh exit 分流（rill-x ${A_X}→${B_X}——偏好序未压制次序源）"; exit 1; }
+echo "E2E-07b OK: 偏好裁决——双候选下 tailnet 承载（rill-ext ${A_EXT}→${B_EXT}，rill-x 恒 ${B_X}）"
+
+echo "==> E2E-07 阶段 c：摘除 tailnet 候选（停 rill-ext + 驱逐）→ 解析器顺延 mesh exit"
+# 停容器断流（防再注册回摆）+ marker 驱逐（确定性 PeersRemoved，不依赖死亡检测）
+C_X_BASE=$(masq_pkts tsrt-rill-x "10.42.0.0/24")
+MARK=$(docker logs tsrt-rill-b 2>&1 | wc -l)
+docker stop tsrt-rill-ext >/dev/null
+docker exec "$TSRV" touch /tmp/rill-e2e-evict/rill-ext
+removed=""
+for i in $(seq 1 30); do
+  docker logs tsrt-rill-b 2>&1 | tail -n +$((MARK + 1)) | grep -qE "netmap delta applied: .*-[1-9]" && { removed=yes; break; }
+  sleep 2
+done
+[ "$removed" = "yes" ] || {
+  echo "FAIL: rill-b 未收到 rill-ext 摘除增量（tailnet 候选未清）"
+  docker logs tsrt-rill-b 2>&1 | grep ts2021 | tail -10; exit 1
+}
+ok=""
+for i in $(seq 1 60); do
+  docker exec tsrt-rill-b ping -c1 -W2 192.168.245.1 >/dev/null 2>&1 && { ok=yes; break; }
+  sleep 2
+done
+C_X=$(masq_pkts tsrt-rill-x "10.42.0.0/24")
+{ [ "$ok" = "yes" ] && [ "$C_X" -gt "$C_X_BASE" ]; } || {
+  echo "FAIL: 切换未收敛到 mesh exit（ping=$ok，rill-x MASQ ${C_X_BASE}→${C_X}）"
+  dump; exit 1
+}
+echo "E2E-07c OK: tailnet 候选摘除 → mesh exit 承载（rill-x MASQ ${C_X_BASE}→${C_X}），切换收敛无环路"
+
+echo "PASS: TSL-05 subnet router（自研 ts2021 服务端：mesh routes[] 汇总 + 自家 LAN 广播）+ E2E-08 tailnet 段大包（DF @ MTU 上限双向）+ TSL-11 持有流增量推送（+1/-1，REQ-068）+ TSL-07 exit 被用作（allow_exit 审批 + 内核转发回程）+ E2E-07 exit 竞争（偏好裁决 + 顺延切换，REQ-071）"

@@ -53,12 +53,11 @@
 
 ## E2E-07 tailnet exit 竞争
 
-- 关联 REQ：REQ-012 / REQ-021
+- 关联 REQ：REQ-012 / REQ-021 / REQ-071
 - 测试层：docker e2e
-- 状态：`待补充`
-- 证据：—
-- 缺口：tailnet exit 双向已闭环（TSL-06/07）；竞争裁决依赖 mesh exit（RTE-06）落地
-- 说明：同时配置 mesh exit 与 tailnet exit：按静态优先级裁决，切换无环路
+- 状态：`已覆盖`（2026-10-02）
+- 证据：e2e/ts2021_runtime/run.sh
+- 说明：rill-b 加 ts2021 腿（偏好 `["tailnet","mesh"]`+ 子网路由成员：ts2021 advertise 自家 LAN 10.42.0.0/24——tailnet 侧源受理性前提）+ rill-x（mesh 出口，能力位 0x08，extnet 双挂 MASQUERADE）。三阶段：①tailnet exit 独占承载（rill-ext /0 广播，mesh 出口未授权；出站显式 peer——exit 方向 dst 不落在对端具体前缀内，dst 匹配无法表达）②SIGHUP 授权 mesh exit → 双候选下偏好裁决仍走 tailnet（双出口 MASQUERADE 计数器对照：rill-ext 增长、rill-x 恒 0——先等 rill-b 收到 netmap exit 标记再下结论，防空洞断言）③停 rill-ext + marker 驱逐（PeersRemoved 增量）→ 解析器顺延 mesh exit 承载（rill-x 计数器转正 + ping 收敛，无环路）。首两轮排障闭环两个产品缺陷：跨腿互转环（ROUTE_ENGINE §3 本机前缀落位 + 汇总门控 advertise_mesh_routes）与回程源约束（accepts_source，LPM 顺延 mesh 经 ext 回程）
 
 ## E2E-08 全链路 MTU
 
@@ -76,5 +75,5 @@
 - [x] E2E-04：rill 节点 → dn42 + 断链 fallback（DNL-14/16）
 - [x] E2E-05：mesh exit 透传 + 回程（fail-closed 准入 → 授权双栈借道 → 停机回退丢弃，exit_wan/REQ-071）
 - [x] E2E-06：双边缘冗余切换（dual_edge：租约过期撤销 + 引擎切 standby 收敛）
-- [ ] E2E-07：exit 竞争按优先级裁决、无环路（依赖 mesh exit）
+- [x] E2E-07：exit 竞争按优先级裁决、无环路（ts2021_runtime E2E-07 三阶段，REQ-071）
 - [x] E2E-08：全链路大包双向通（mesh 段 MSS clamp/PTB + tailnet 段 DF@tailscale0 上限整包）

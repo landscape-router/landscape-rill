@@ -12,6 +12,8 @@ for i in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 > "$i"; done
 
 EXT_IF=$(ip -o addr | awk '$4 ~ /^192\.168\.245\./{print $2}' | head -1)
 iptables -t nat -A POSTROUTING -o "$EXT_IF" -s 100.64.0.0/10 -j MASQUERADE
+# mesh 源（rill-b 经 tailnet exit 借道，E2E-07）：MASQUERADE 计数器 = 承载证据
+iptables -t nat -A POSTROUTING -o "$EXT_IF" -s 10.42.0.0/24 -j MASQUERADE
 
 (
   for i in $(seq 1 120); do

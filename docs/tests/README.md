@@ -62,7 +62,7 @@
 | REQ-009 | RTE-07 | 已覆盖 | rill-node/src/packet/mtu.rs、e2e/scenarios/mtu.sh |
 | REQ-010 | CTL-09 / SEC-21 ~ SEC-25 | 已覆盖 | e2e/run_e2e.sh、e2e/mesh/tenancy/、rill-coord/src/domain.rs、rill-coord/src/coordinator/ |
 | REQ-011 | FRM-06 | 已覆盖 | rill-core/src/handshake/ |
-| REQ-012 | E2E-01 ~ E2E-08 | 部分覆盖 | E2E-01/02 经 TSL-05、TSL-06/07；E2E-03/04 经 e2e/ts2021_dn42、e2e/scenarios/dn42.sh；E2E-05 经 e2e/scenarios/exit_wan.sh；E2E-06 经 e2e/scenarios/dual_edge.sh；E2E-08 经 mtu.sh + ts2021_runtime E2E-08 断言；E2E-07（exit 竞争）待组合场景 |
+| REQ-012 | E2E-01 ~ E2E-08 | 已覆盖 | E2E-01/02 经 TSL-05、TSL-06/07；E2E-03/04 经 e2e/ts2021_dn42、e2e/scenarios/dn42.sh；E2E-05 经 e2e/scenarios/exit_wan.sh；E2E-06 经 e2e/scenarios/dual_edge.sh；E2E-07 经 e2e/ts2021_runtime（E2E-07 三阶段）；E2E-08 经 mtu.sh + ts2021_runtime E2E-08 断言 |
 | REQ-013 | CTL-13 | 已覆盖 | rill-core/src/control/ |
 | REQ-014 | CTL-13 / CON-07 / CON-08 / RTE-08 | 已覆盖 | rill-mesh/src/data/、rill-core/src/probe.rs（CON-08、RTE-08 /0-exit 语义均闭环，REQ-071） |
 | REQ-015 | DNL-01 ~ DNL-16 | 已覆盖 | rill-dn42/src/、rill-node/src/runtime/dn42.rs、e2e/mesh/dn42/、e2e/scenarios/dn42.sh |
@@ -105,7 +105,7 @@
 | REQ-051 | ADM-07 | 已覆盖 | rill-coord/src/status.rs、rilld/src/coord_run.rs、e2e/mesh/status/、e2e/scenarios/status.sh |
 | REQ-069 | ADM-08 | 已覆盖 | rilld/src/status_http.rs、e2e/scenarios/status.sh |
 | REQ-070 | CTL-12 / CTL-22 / CTL-23 / CTL-24 | 已覆盖（三阶段：单机过日志 + 3 副本集群 + binding v2 交叉审计） | rill-coord/src/raft/、e2e/scenarios/ha.sh、e2e/mesh/ha/ |
-| REQ-071 | RTE-06 / E2E-05 | 已覆盖 | rill-core/src/route/default.rs、rill-coord/src/coordinator/tests.rs、e2e/scenarios/exit_wan.sh |
+| REQ-071 | RTE-06 / E2E-05 / E2E-07 | 已覆盖 | rill-core/src/route/default.rs、rill-coord/src/coordinator/tests.rs、e2e/scenarios/exit_wan.sh、e2e/ts2021_runtime/run.sh |
 | REQ-052 | CTL-21 | 已覆盖 | rill-mesh/src/data/、rill-coord/src/coordinator/、rill-coord/src/status.rs、e2e/scenarios/status.sh |
 | REQ-053 | FRM-12 | 已覆盖 | rill-core/src/frame/、rill-mesh/src/data/tests.rs |
 | REQ-054 | CON-11 | 已覆盖 | rill-mesh/src/data/、rill-node/src/runtime/、e2e/run_e2e.sh（MESH_E2E_TRANSPORT=tcp） |
